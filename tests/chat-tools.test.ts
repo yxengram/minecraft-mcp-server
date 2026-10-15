@@ -46,7 +46,7 @@ test('registerChatTools registers read-chat tool', (t) => {
   const readChatCall = toolCalls.find(call => call.args[0] === 'read-chat');
 
   t.truthy(readChatCall);
-  t.is(readChatCall!.args[1], 'Get recent chat messages from players');
+  t.true(readChatCall!.args[1].startsWith('Get recent chat messages from players'));
 });
 
 test('send-chat calls bot.chat with message', async (t) => {
@@ -185,4 +185,29 @@ test('read-chat limits count to max messages', async (t) => {
   const result = await executor({ count: 200 });
 
   t.true(result.content[0].text.includes('10 chat message'));
+});
+
+test('read-chat includes labeled system messages, action bar and titles by default', async (t) => {
+  const mockServer = { tool: sinon.stub() } as unknown as McpServer;
+  const mockConnection = { checkConnectionAndReconnect: sinon.stub().resolves({ connected: true }) } as unknown as BotConnection;
+  const factory = new ToolFactory(mockServer, mockConnection);
+  const messageStore = new MessageStore();
+  messageStore.addMessage('Steve', 'hi');
+  messageStore.addMessage('', 'Steve was slain by Zombie', 'system');
+  messageStore.addMessage('', 'You may not rest now', 'action_bar');
+  messageStore.addMessage('', 'Welcome', 'title');
+
+  registerChatTools(factory, () => ({}) as mineflayer.Bot, messageStore);
+  const executor = (mockServer.tool as sinon.SinonStub).getCalls().find(call => call.args[0] === 'read-chat')!.args[3];
+
+  const all = (await executor({})).content[0].text;
+  t.true(all.includes('Found 4 message(s) (1 chat, 3 system/action bar/title)'));
+  t.true(all.includes('Steve: hi'));
+  t.true(all.includes('[system] Steve was slain by Zombie'));
+  t.true(all.includes('[action bar] You may not rest now'));
+  t.true(all.includes('[title] Welcome'));
+
+  const chatOnly = (await executor({ includeSystem: false })).content[0].text;
+  t.true(chatOnly.includes('Found 1 chat message(s)'));
+  t.false(chatOnly.includes('[system]'));
 });

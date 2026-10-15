@@ -51,7 +51,12 @@ async function main() {
         messageStore.addMessage(username, message);
         eventStore.addEvent('chat', `${username}: ${message}`);
       },
-      onEvent: (type, message) => eventStore.addEvent(type, message)
+      onEvent: (type, message) => eventStore.addEvent(type, message),
+      onSystemMessage: (kind, text) => {
+        if (messageStore.addMessage('', text, kind)) {
+          eventStore.addEvent(kind, text);
+        }
+      }
     }
   );
 

@@ -7,6 +7,36 @@ import pathfinderPkg from 'mineflayer-pathfinder';
 const { goals } = pathfinderPkg;
 
 const CRAFTING_TABLE_REACH = 4;
+const CRAFT_SETTLE_MS = 250;
+const CRAFT_SYNC_WAIT_MS = 600;
+const CRAFT_TRIES = 2;
+const PLAYER_CRAFTING_GRID = [1, 2, 3, 4];
+
+const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+
+function countInInventory(bot: mineflayer.Bot, name: string): number {
+  return bot.inventory.items().filter(item => item.name === name).reduce((sum, item) => sum + item.count, 0);
+}
+
+// On some servers mineflayer's crafting occasionally leaves ingredients in the 2x2 grid or on the cursor
+// when crafts run back to back. Put anything left there back into the inventory.
+async function settleCraftingGrid(bot: mineflayer.Bot): Promise<void> {
+  await sleep(CRAFT_SETTLE_MS);
+  const inventory = bot.inventory as unknown as {
+    selectedItem?: unknown; slots?: unknown[]; inventoryStart?: number; inventoryEnd?: number;
+  };
+  if (bot.currentWindow || !Array.isArray(inventory.slots)) return;
+  try {
+    if (inventory.selectedItem && typeof bot.putSelectedItemRange === 'function') {
+      await bot.putSelectedItemRange(inventory.inventoryStart ?? 9, inventory.inventoryEnd ?? 45, bot.inventory, null);
+    }
+    for (const slot of PLAYER_CRAFTING_GRID) {
+      if (inventory.slots[slot] && typeof bot.putAway === 'function') await bot.putAway(slot);
+    }
+  } catch (error) {
+    log('warn', `Could not clear the crafting grid: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
 
 interface RecipeIngredient {
   name: string;
@@ -477,21 +507,30 @@ export function registerCraftingTools(factory: ToolFactory, getBot: () => minefl
             candidate.craftingTable = table;
           }
 
-          try {
-            if (candidate.craftingTable) {
-              await moveWithinReach(bot, candidate.craftingTable);
-              await bot.craft(candidate.recipe as Parameters<typeof bot.craft>[0], 1, candidate.craftingTable as Parameters<typeof bot.craft>[2]);
-            } else {
-              await bot.craft(candidate.recipe as Parameters<typeof bot.craft>[0], 1);
+          for (let tries = 0; tries < CRAFT_TRIES && !craftedThisAttempt; tries++) {
+            const before = countInInventory(bot, candidate.resultName);
+            try {
+              if (candidate.craftingTable) {
+                await moveWithinReach(bot, candidate.craftingTable);
+                await bot.craft(candidate.recipe as Parameters<typeof bot.craft>[0], 1, candidate.craftingTable as Parameters<typeof bot.craft>[2]);
+              } else {
+                await bot.craft(candidate.recipe as Parameters<typeof bot.craft>[0], 1);
+              }
+              await settleCraftingGrid(bot);
+              if (countInInventory(bot, candidate.resultName) <= before) await sleep(CRAFT_SYNC_WAIT_MS);
+              if (countInInventory(bot, candidate.resultName) <= before) {
+                throw new Error(`crafting did not add any ${candidate.resultName} to the inventory`);
+              }
+              craftedCount++;
+              craftedThisAttempt = true;
+              log('info', `Crafted ${candidate.resultName}`);
+            } catch (err) {
+              lastError = err instanceof Error ? err.message : String(err);
+              log('warn', `Failed to craft ${outputItem}: ${lastError}`);
+              await settleCraftingGrid(bot);
             }
-            craftedCount++;
-            craftedThisAttempt = true;
-            log('info', `Crafted ${candidate.resultName}`);
-            break;
-          } catch (err) {
-            lastError = err instanceof Error ? err.message : String(err);
-            log('warn', `Failed to craft ${outputItem}: ${lastError}`);
           }
+          if (craftedThisAttempt) break;
         }
 
         if (!craftedThisAttempt && attempt === 0) {
@@ -519,6 +558,11 @@ export function registerCraftingTools(factory: ToolFactory, getBot: () => minefl
         return factory.createErrorResponse(`Failed to craft ${outputItem}: ${lastError || "Missing ingredients or recipe not found"}`);
       }
 
+      if (craftedCount < amount) {
+        return factory.createResponse(
+          `Crafted ${outputItem} ${craftedCount} of ${amount} time(s); stopped: ${lastError || 'ran out of ingredients'}`
+        );
+      }
       return factory.createResponse(`Successfully crafted ${outputItem} ${craftedCount} time(s)`);
     }
   );

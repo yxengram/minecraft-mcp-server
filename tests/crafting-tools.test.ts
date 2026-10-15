@@ -258,7 +258,7 @@ test('craft-item crafts successfully when ingredients are available', async (t) 
   const mockConnection = { checkConnectionAndReconnect: sinon.stub().resolves({ connected: true }) } as unknown as BotConnection;
   const factory = new ToolFactory(mockServer, mockConnection);
 
-  const craftStub = sinon.stub().resolves();
+  const craftStub = sinon.stub().callsFake(async () => { inventoryItems.push({ name: 'stick', count: 4, slot: 99 }); });
   const mockBot = {
     version: '1.21.8',
     inventory: { items: () => inventoryItems },
@@ -330,7 +330,7 @@ test('craft-item walks to a distant crafting table before crafting', async (t) =
   const table = { name: 'crafting_table', position: new Vec3(10, 64, 0) };
   const { recipe, inventory } = realChestRecipe();
   const goto = sinon.stub().resolves();
-  const craft = sinon.stub().resolves();
+  const craft = sinon.stub().callsFake(async () => { inventory.push({ name: 'chest', count: 1, slot: 9 }); });
   const mockBot = {
     version: '1.21.8',
     entity: { position: new Vec3(0, 64, 0) },
@@ -375,4 +375,57 @@ test('craft-item reports the real failure when crafting throws', async (t) => {
   t.true(result.isError);
   t.true(result.content[0].text.includes('requires craftingTable'));
   t.true(result.content[0].text.includes('Place a crafting table nearby'));
+});
+
+function stickBot(craft: (inventory: { name: string; count: number; slot: number }[]) => Promise<void>, extra: Record<string, unknown> = {}) {
+  const mcData = minecraftData('1.21.8');
+  const stickId = (mcData as unknown as { itemsByName: Record<string, { id: number }> }).itemsByName.stick.id;
+  const recipe = flattenRecipes((mcData as unknown as { recipes: unknown }).recipes)
+    .find(candidate => (candidate as { result?: { id?: number } }).result?.id === stickId);
+  const inventory = Object.entries(countRecipeIngredients(mcData, recipe)).map(([name, count], slot) => ({ name, count, slot }));
+  const craftStub = sinon.stub().callsFake(() => craft(inventory));
+  const mockServer = { tool: sinon.stub() } as unknown as McpServer;
+  const mockConnection = { checkConnectionAndReconnect: sinon.stub().resolves({ connected: true }) } as unknown as BotConnection;
+  const factory = new ToolFactory(mockServer, mockConnection);
+  const bot = { version: '1.21.8', inventory: { items: () => inventory }, recipesFor: () => [recipe], craft: craftStub, ...extra } as unknown as mineflayer.Bot;
+  registerCraftingTools(factory, () => bot);
+  const executor = (mockServer.tool as sinon.SinonStub).getCalls().find(call => call.args[0] === 'craft-item')!.args[3];
+  return { executor, bot, craftStub };
+}
+
+test('craft-item reports when crafting does not add the item to the inventory', async (t) => {
+  const { executor, craftStub } = stickBot(async () => {});
+
+  const result = await executor({ outputItem: 'stick' });
+
+  t.true(result.isError);
+  t.true(result.content[0].text.includes('did not add any stick to the inventory'));
+  t.is(craftStub.callCount, 2);
+});
+
+test('craft-item reports partial success honestly', async (t) => {
+  let calls = 0;
+  const { executor } = stickBot(async (inventory) => { if (calls++ === 0) inventory.push({ name: 'stick', count: 4, slot: 20 }); });
+
+  const result = await executor({ outputItem: 'stick', amount: 3 });
+
+  t.falsy(result.isError);
+  t.true(result.content[0].text.startsWith('Crafted stick 1 of 3 time(s); stopped: crafting did not add any stick'));
+});
+
+test('craft-item puts leftovers from the crafting grid and cursor back into the inventory', async (t) => {
+  const slots: unknown[] = [];
+  const putAway = sinon.stub().resolves();
+  const putSelectedItemRange = sinon.stub().resolves();
+  const { executor, bot } = stickBot(async (inventory) => {
+    inventory.push({ name: 'stick', count: 4, slot: 20 });
+    slots[3] = { name: 'oak_planks' };
+  }, { putAway, putSelectedItemRange });
+  Object.assign(bot.inventory, { slots, selectedItem: { name: 'oak_planks' }, inventoryStart: 9, inventoryEnd: 45 });
+
+  const result = await executor({ outputItem: 'stick' });
+
+  t.falsy(result.isError);
+  t.true(putSelectedItemRange.calledOnceWith(9, 45));
+  t.true(putAway.calledOnceWith(3));
 });

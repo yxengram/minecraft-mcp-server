@@ -130,7 +130,7 @@ Digging tools pick the best tool in the inventory and skip blocks next to lava.
 
 ### Entity Interaction
 - `find-entity` - Find the nearest entity of a specific type
-- `list-entities` - List nearby entities, nearest first
+- `list-entities` - List nearby entities, nearest first, with what dropped items are, custom names, babies, owners, sheep colors and held or worn items
 - `list-players` - List players online on the server
 - `attack-entity` - Attack an entity within reach
 - `activate-entity` - Right-click an entity (villagers, animals)
@@ -147,7 +147,7 @@ Waypoints are stored per server host in `~/.minecraft-mcp-server/waypoints.json`
 
 ### Communication
 - `send-chat` - Send a chat message in-game
-- `read-chat` - Get recent chat messages from players
+- `read-chat` - Get recent chat messages from players, plus system messages (command feedback, death messages, advancements), action bar text and titles
 
 ### Vision
 - `scan-area` - Describe the surrounding terrain in text: height and slope in each direction, surface blocks, cliffs, water and lava, notable blocks (ores, chests, beds, trees, spawners) and entities
@@ -157,8 +157,8 @@ Both tools look down from the sky by default and switch to the bot's own level w
 
 ### Game State
 - `detect-gamemode` - Detect the gamemode on game
-- `get-observation` - One-call snapshot of vitals, position, time, weather, equipment, inventory and nearby entities
-- `get-events` - Read recent game events (chat, death, damage, item pickups, joins/leaves, kicks). Pass `nextSince` back as `since` to read only new events
+- `get-observation` - One-call snapshot of vitals, status effects, armor, xp, position, time, weather, equipment, inventory and nearby entities
+- `get-events` - Read recent game events (chat, system messages, titles, death, damage with its type and attacker, item pickups, joins/leaves, kicks). Pass `nextSince` back as `since` to read only new events
 
 ## Contributing
 

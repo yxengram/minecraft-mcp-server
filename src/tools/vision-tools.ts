@@ -4,7 +4,7 @@ import minecraftData from 'minecraft-data';
 import { Vec3 } from 'vec3';
 import { ToolFactory } from '../tool-factory.js';
 import { encodePng } from '../png.js';
-import { findNearbyEntities, entityLabel, BotEntity } from './entity-utils.js';
+import { findNearbyEntities, entityLabel, droppedItem, BotEntity } from './entity-utils.js';
 import {
   AIR_COLOR, CAVE_AIR_COLOR, UNLOADED_COLOR, Rgb, blockColor, shade, toHex
 } from './block-colors.js';
@@ -216,7 +216,7 @@ function describeEntities(bot: mineflayer.Bot, radius: number): string {
   const groups = new Map<string, Map<string, number>>();
   for (const { entity } of findNearbyEntities(bot, { maxDistance: radius })) {
     const category = entityCategory(entity);
-    const label = category === 'player' ? entityLabel(entity) : entity.name ?? entity.type;
+    const label = category === 'player' || droppedItem(entity) ? entityLabel(entity) : entity.name ?? entity.type;
     const names = groups.get(category) ?? new Map<string, number>();
     names.set(label, (names.get(label) ?? 0) + 1);
     groups.set(category, names);

@@ -3,6 +3,8 @@ import pathfinderPkg from 'mineflayer-pathfinder';
 const { pathfinder, Movements } = pathfinderPkg;
 import minecraftData from 'minecraft-data';
 import { formatStat } from './format.js';
+import { componentToText } from './text-component.js';
+import type { MessageKind } from './message-store.js';
 
 const SUPPORTED_MINECRAFT_VERSION = '26.1.2';
 
@@ -18,6 +20,17 @@ interface ConnectionCallbacks {
   onLog: (level: string, message: string) => void;
   onChatMessage: (username: string, message: string) => void;
   onEvent?: (type: string, message: string) => void;
+  onSystemMessage?: (kind: Exclude<MessageKind, 'chat'>, text: string) => void;
+}
+
+// Damage events arrive just before the matching health update.
+const DAMAGE_SOURCE_WINDOW_MS = 1500;
+
+type BotEntityLike = { id: number; username?: string; displayName?: string; name?: string; type?: string };
+
+function describeDamager(entity: BotEntityLike | undefined): string | undefined {
+  if (!entity) return undefined;
+  return `${entity.username || entity.name || entity.displayName || entity.type || 'unknown'} (id ${entity.id})`;
 }
 
 export class BotConnection {
@@ -98,12 +111,54 @@ export class BotConnection {
       this.callbacks.onEvent?.('death', 'Bot died');
     });
 
+    let damageTypes: string[] = [];
+    let lastDamage: { description: string; time: number } | null = null;
+
+    bot._client.on('registry_data', (packet: { id?: string; entries?: { key: string }[] }) => {
+      if (packet.id === 'minecraft:damage_type' && Array.isArray(packet.entries)) {
+        damageTypes = packet.entries.map(entry => entry.key.replace(/^minecraft:/, ''));
+      }
+    });
+
+    bot._client.on('damage_event', (packet: { entityId: number; sourceTypeId: number; sourceCauseId: number; sourceDirectId: number }) => {
+      if (!bot.entity || packet.entityId !== bot.entity.id) return;
+      const type = damageTypes[packet.sourceTypeId] ?? `damage type ${packet.sourceTypeId}`;
+      const entities = bot.entities as Record<number, BotEntityLike | undefined>;
+      const cause = describeDamager(entities[packet.sourceCauseId - 1]);
+      const direct = packet.sourceDirectId !== packet.sourceCauseId ? entities[packet.sourceDirectId - 1] : undefined;
+      let description = type;
+      if (cause) description += ` from ${cause}`;
+      if (direct) description += ` via ${direct.name ?? direct.type ?? 'projectile'}`;
+      lastDamage = { description, time: Date.now() };
+    });
+
     let lastHealth = bot.health;
     bot.on('health', () => {
       if (typeof lastHealth === 'number' && bot.health < lastHealth) {
-        this.callbacks.onEvent?.('damaged', `Health dropped from ${formatStat(lastHealth)} to ${formatStat(bot.health)}`);
+        const source = lastDamage && Date.now() - lastDamage.time < DAMAGE_SOURCE_WINDOW_MS ? ` (${lastDamage.description})` : '';
+        this.callbacks.onEvent?.('damaged', `Health dropped from ${formatStat(lastHealth)} to ${formatStat(bot.health)}${source}`);
+        lastDamage = null;
       }
       lastHealth = bot.health;
+    });
+
+    const forwardSystemMessage = (kind: Exclude<MessageKind, 'chat'>, text: string) => {
+      const trimmed = text.trim();
+      if (trimmed) this.callbacks.onSystemMessage?.(kind, trimmed);
+    };
+
+    bot.on('message', (message, position) => {
+      if (position === 'chat') return;
+      forwardSystemMessage(position === 'game_info' ? 'action_bar' : 'system', message.toString());
+    });
+
+    bot.on('title', (text: unknown, type: string) => {
+      forwardSystemMessage(type === 'subtitle' ? 'subtitle' : 'title', componentToText(text));
+    });
+
+    // Newer protocols send the action bar as its own packet, which mineflayer does not surface.
+    bot._client.on('action_bar', (packet: { text?: unknown }) => {
+      forwardSystemMessage('action_bar', componentToText(packet.text));
     });
 
     bot.on('playerJoined', (player) => {

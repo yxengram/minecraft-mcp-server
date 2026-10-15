@@ -363,7 +363,7 @@ test('get-observation summarizes the bot state', async (t) => {
   t.true(text.includes('Position: (10, 64, -4)'));
   t.true(text.includes('dimension: overworld'));
   t.true(text.includes('Health: 14/20, food: 17/20'));
-  t.true(text.includes('xp level: 5'));
+  t.true(text.includes('xp: level 5'));
   t.true(text.includes('6000 ticks (day), weather: clear'));
   t.true(text.includes('Held item: iron_sword x1'));
   t.true(text.includes('Equipment: head: iron_helmet'));

@@ -118,3 +118,25 @@ test('getRecentMessages with zero count', (t) => {
   
   t.is(messages.length, 0);
 });
+
+test('stores message kinds and filters by kind', (t) => {
+  const store = new MessageStore();
+  store.addMessage('Steve', 'hi');
+  store.addMessage('', 'Teleported Steve', 'system');
+
+  t.is(store.getRecentMessages(10).length, 2);
+  t.deepEqual(store.getRecentMessages(10, ['system']).map(m => m.content), ['Teleported Steve']);
+  t.is(store.getRecentMessages(10)[0].kind, 'chat');
+});
+
+test('drops repeated non-chat messages but keeps repeated chat', (t) => {
+  const store = new MessageStore();
+
+  t.true(store.addMessage('', 'Sleeping is not possible now', 'action_bar'));
+  t.false(store.addMessage('', 'Sleeping is not possible now', 'action_bar'));
+  t.true(store.addMessage('', 'Different text', 'action_bar'));
+  t.true(store.addMessage('Steve', 'lol'));
+  t.true(store.addMessage('Steve', 'lol'));
+
+  t.is(store.getRecentMessages(10).length, 4);
+});

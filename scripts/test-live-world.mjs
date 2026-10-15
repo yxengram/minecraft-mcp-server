@@ -129,15 +129,46 @@ async function distanceTo(type) {
   return Number(text.match(/([\d.]+) blocks away/)?.[1] ?? Infinity);
 }
 
+let cx, y0, cz;
+let arenaReady = false;
+
+// If an earlier step left the bot off the arena, say so and put it back so later steps stay independent.
+async function ensureOnArena() {
+  if (!arenaReady) return;
+  const [x, y, z] = await position();
+  // Standing a little higher is fine (for example on blocks the pathfinder placed); falling is not.
+  if (y >= y0 && Math.abs(x - cx) < ARENA_RADIUS && Math.abs(z - cz) < ARENA_RADIUS) return;
+  console.log(`  ! bot left the arena and was at (${x}, ${y}, ${z}); teleporting it back`);
+  await printDiagnostics();
+  await cmd(`/tp @s ${cx} ${y0} ${cz}`);
+  await sleep(1000);
+}
+
 async function step(name, fn) {
+  await ensureOnArena();
   process.stdout.write(`- ${name} ... `);
   try {
     await fn();
     results.push({ name, ok: true });
     console.log('ok');
+    return true;
   } catch (error) {
     results.push({ name, ok: false, error: error.message });
     console.log(`FAILED\n    ${error.message.split('\n').join('\n    ')}`);
+    await printDiagnostics();
+    return false;
+  }
+}
+
+class SetupFailed extends Error {}
+
+async function printDiagnostics() {
+  try {
+    const where = responseText(await client.callTool({ name: 'get-position', arguments: {} }));
+    const events = responseText(await client.callTool({ name: 'get-events', arguments: { limit: 8 } }));
+    console.log(`    diagnostics: ${where}\n    ${events.split('\n').filter(Boolean).join('\n    ')}`);
+  } catch (error) {
+    console.log(`    diagnostics unavailable: ${error.message}`);
   }
 }
 
@@ -150,7 +181,6 @@ function startHelper() {
   });
 }
 
-let cx, y0, cz;
 let eventCursor = 0;
 
 try {
@@ -164,7 +194,10 @@ try {
   }, 'bot to spawn', 30000);
   await sleep(2000);
 
-  await step('setup: operator check and arena', async () => {
+  const setupOk = await step('setup: operator check and arena', async () => {
+    // The bot may log in mid-air (for example where a previous arena was removed); creative mode
+    // keeps it from dying of fall damage until it is teleported into the new arena.
+    await cmd('/gamemode creative @s');
     await cmd('/clear @s');
     await cmd('/give @s dirt 1');
     try {
@@ -178,6 +211,11 @@ try {
     const r = ARENA_RADIUS;
     await cmd(`/fill ${cx - r} ${y0 - 1} ${cz - r} ${cx + r} ${y0 - 1} ${cz + r} stone`);
     await cmd(`/fill ${cx - r} ${y0} ${cz - r} ${cx + r} ${y0 + 6} ${cz + r} air`);
+    // A 2-block wall around the edge keeps the bots from sliding or being knocked off the platform.
+    await cmd(`/fill ${cx - r} ${y0} ${cz - r} ${cx + r} ${y0 + 1} ${cz - r} stone`);
+    await cmd(`/fill ${cx - r} ${y0} ${cz + r} ${cx + r} ${y0 + 1} ${cz + r} stone`);
+    await cmd(`/fill ${cx - r} ${y0} ${cz - r} ${cx - r} ${y0 + 1} ${cz + r} stone`);
+    await cmd(`/fill ${cx + r} ${y0} ${cz - r} ${cx + r} ${y0 + 1} ${cz + r} stone`);
     await cmd('/gamemode survival @s');
     await cmd('/time set day');
     await cmd('/weather clear');
@@ -204,7 +242,10 @@ try {
     }
     expect(arrived, `${HELPER_NAME} could not be moved into the arena`);
     await sleep(1000);
+    arenaReady = true;
   });
+
+  if (!setupOk) throw new SetupFailed('Setup failed, skipping the remaining steps');
 
   await step('read-only basics', async () => {
     expectIncludes(await call('detect-gamemode'), 'survival', 'detect-gamemode');
@@ -288,6 +329,34 @@ try {
     await call('consume', { itemName: 'golden_apple' }, { timeout: 30000 });
     await waitForCount('golden_apple', count => count === 0, 'golden apple to be eaten');
     await cmd(`/kill @e[type=item,distance=..16]`);
+  });
+
+  await step('perception: effects, armor, entity details, messages, damage source', async () => {
+    await cmd('/give @s iron_helmet 1');
+    await waitForCount('iron_helmet', count => count >= 1, 'a helmet');
+    await call('equip-item', { itemName: 'iron_helmet', destination: 'head' });
+    await cmd('/effect give @s minecraft:night_vision 60 0');
+    const observation = await call('get-observation', { maxEntities: 0 });
+    expectIncludes(observation, 'Night Vision I', 'get-observation effects');
+    expectIncludes(observation, 'Armor: 2/20', 'get-observation armor');
+    await call('unequip-item', { destination: 'head' });
+    await cmd('/effect clear @s');
+
+    await cmd(`/summon pig ${cx - 3} ${y0} ${cz - 3} {NoAI:1b,Age:-24000,CustomName:"Bacon"}`);
+    await waitFor(async () => (await call('list-entities', { type: 'pig' })).includes('named "Bacon", baby'), 'baby pig details');
+    await call('toss-item', { itemName: 'dirt', count: 1 });
+    await waitFor(async () => (await call('list-entities', { type: 'dirt', maxDistance: 8 })).includes('dirt x1 [dropped item]'), 'dropped item name');
+
+    await cmd('/title @s actionbar {"text":"mcp action bar"}');
+    const messages = await call('read-chat', { count: 20 });
+    expectIncludes(messages, '[action bar] mcp action bar', 'read-chat action bar');
+    expectIncludes(messages, '[system] Summoned new Bacon', 'read-chat system message');
+
+    await sleep(1500);
+    await cmd(`/damage ${BOT_NAME} 1 minecraft:mob_attack by @e[type=pig,limit=1,sort=nearest]`);
+    await waitFor(async () => (await call('get-events', { types: ['damaged'], limit: 5 })).includes('mob_attack from pig'), 'damage source');
+    await cmd('/kill @e[type=pig,distance=..16]');
+    await cmd('/kill @e[type=item,distance=..16]');
   });
 
   await step('blocks: place, dig, fill, clear, tunnel', async () => {
@@ -431,9 +500,12 @@ try {
     await waitFor(async () => (await call('get-events', { since: eventCursor, types: ['spawn'] })).includes('Bot spawned'), 'respawn event');
   });
 
+  arenaReady = false;
   await step('cleanup: remove the arena', async () => {
     const r = ARENA_RADIUS;
-    await cmd(`/tp ${HELPER_NAME} @s`);
+    // Leave both bots on solid ground below the arena, so they do not log in mid-air next time.
+    await cmd(`/spreadplayers ${cx} ${cz} 0 8 under ${y0 - 20} false ${BOT_NAME}`);
+    await cmd(`/spreadplayers ${cx} ${cz} 0 8 under ${y0 - 20} false ${HELPER_NAME}`);
     await cmd(`/fill ${cx - r} ${y0 - 1} ${cz - r} ${cx + r} ${y0 + 6} ${cz + r} air`);
     await cmd(`/kill @e[type=!player,x=${cx},y=${y0},z=${cz},distance=..24]`);
     await cmd('/time set day');
@@ -450,7 +522,11 @@ try {
     : `Live world test failed: ${failed.map(result => result.name).join(', ')}`);
   process.exitCode = failed.length === 0 ? 0 : 1;
 } catch (error) {
-  console.error(error);
+  if (error instanceof SetupFailed) {
+    console.log(`\n${error.message}\nLive world test failed: setup`);
+  } else {
+    console.error(error);
+  }
   process.exitCode = 1;
 } finally {
   helper?.quit();

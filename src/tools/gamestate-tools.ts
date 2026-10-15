@@ -1,5 +1,6 @@
 import { z } from "zod";
 import mineflayer from 'mineflayer';
+import minecraftData from 'minecraft-data';
 import { ToolFactory } from '../tool-factory.js';
 import { formatStat } from '../format.js';
 import { describeEntity, findNearbyEntities, formatPosition } from './entity-utils.js';
@@ -24,6 +25,60 @@ export function airLevel(bot: mineflayer.Bot): number | undefined {
   }
   const level = bot.oxygenLevel;
   return typeof level === 'number' && level >= 0 && level <= MAX_AIR ? level : undefined;
+}
+
+const TICKS_PER_SECOND = 20;
+// Effects longer than this are effectively permanent (servers use huge or -1 durations for infinite effects).
+const INFINITE_EFFECT_TICKS = 32147;
+const ROMAN = ['I', 'II', 'III', 'IV', 'V', 'VI', 'VII', 'VIII', 'IX', 'X'];
+
+// Armor points per piece, by material and slot (helmet, chestplate, leggings, boots).
+const ARMOR_POINTS: Record<string, [number, number, number, number]> = {
+  leather: [1, 3, 2, 1],
+  copper: [2, 4, 3, 1],
+  chainmail: [2, 5, 4, 1],
+  golden: [2, 5, 3, 1],
+  iron: [2, 6, 5, 2],
+  diamond: [3, 8, 6, 3],
+  netherite: [3, 8, 6, 3]
+};
+const ARMOR_PIECES = ['helmet', 'chestplate', 'leggings', 'boots'];
+
+function formatDuration(ticks: number): string {
+  if (ticks < 0 || ticks >= INFINITE_EFFECT_TICKS) return 'infinite';
+  const seconds = Math.ceil(ticks / TICKS_PER_SECOND);
+  return seconds >= 60 ? `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}` : `${seconds}s`;
+}
+
+function describeEffects(bot: mineflayer.Bot): string {
+  // mineflayer stores effects keyed by effect id even though the typings declare an array.
+  const effects = Object.values((bot.entity?.effects ?? {}) as unknown as Record<string, { id: number; amplifier: number; duration: number }>);
+  if (effects.length === 0) return 'none';
+
+  const known = minecraftData(bot.version).effects as unknown as Record<string, { displayName?: string; name?: string; type?: string }>;
+  return effects.map(effect => {
+    const info = known?.[effect.id];
+    const name = info?.displayName ?? info?.name ?? `effect ${effect.id}`;
+    const level = ROMAN[effect.amplifier] ?? String(effect.amplifier + 1);
+    const kind = info?.type === 'bad' ? ', harmful' : info?.type === 'good' ? ', beneficial' : '';
+    return `${name} ${level} (${formatDuration(effect.duration)}${kind})`;
+  }).join(', ');
+}
+
+export function armorPoints(bot: mineflayer.Bot): number {
+  let total = 0;
+  for (const destination of ['head', 'torso', 'legs', 'feet'] as const) {
+    const item = bot.inventory.slots[bot.getEquipmentDestSlot(destination)];
+    if (!item) continue;
+    if (item.name === 'turtle_helmet') {
+      total += 2;
+      continue;
+    }
+    const [material, piece] = item.name.split(/_(?=helmet|chestplate|leggings|boots)/);
+    const points = ARMOR_POINTS[material]?.[ARMOR_PIECES.indexOf(piece)];
+    if (typeof points === 'number') total += points;
+  }
+  return total;
 }
 
 function describeEquipment(bot: mineflayer.Bot): string {
@@ -72,7 +127,9 @@ export function registerGameStateTools(factory: ToolFactory, getBot: () => minef
 
       const lines = [
         `Position: ${formatPosition(position)} (exact: ${position.x.toFixed(1)}, ${position.y.toFixed(1)}, ${position.z.toFixed(1)}), dimension: ${bot.game.dimension}, gamemode: ${bot.game.gameMode}`,
-        `Health: ${formatStat(bot.health)}/20, food: ${formatStat(bot.food)}/20, saturation: ${formatStat(bot.foodSaturation)}, air: ${airLevel(bot) ?? MAX_AIR}/${MAX_AIR}, xp level: ${bot.experience?.level ?? 0}`,
+        `Health: ${formatStat(bot.health)}/20, food: ${formatStat(bot.food)}/20, saturation: ${formatStat(bot.foodSaturation)}, air: ${airLevel(bot) ?? MAX_AIR}/${MAX_AIR}`,
+        `Effects: ${describeEffects(bot)}`,
+        `Armor: ${armorPoints(bot)}/20, xp: level ${bot.experience?.level ?? 0} (${bot.experience?.points ?? 0} points)`,
         `Time: ${bot.time.timeOfDay} ticks (${bot.time.isDay ? 'day' : 'night'}), weather: ${describeWeather(bot)}`,
         `Held item: ${held ? `${held.name} x${held.count}` : 'nothing'}`,
         `Equipment: ${describeEquipment(bot)}`,
