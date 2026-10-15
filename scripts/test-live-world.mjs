@@ -359,6 +359,39 @@ try {
     await cmd('/kill @e[type=item,distance=..16]');
   });
 
+  await step('perception: item and block details, cursor, sounds, wait-for-event', async () => {
+    await cmd('/give @s diamond_sword[damage=100,enchantments={sharpness:3},custom_name="Blade"]');
+    await waitFor(async () => (await call('list-inventory')).includes('"Blade", durability 1461/1561, sharpness III'), 'item details');
+
+    await cmd(`/setblock ${cx - 2} ${y0} ${cz + 3} oak_sign[rotation=4]{front_text:{messages:["mcp","test","",""]}}`);
+    await sleep(500);
+    const info = await call('get-block-info', { x: cx - 2, y: y0, z: cz + 3 });
+    expectIncludes(info, 'Sign text (front): "mcp / test"', 'get-block-info sign text');
+    expectIncludes(info, 'State: ', 'get-block-info state');
+    expectIncludes(info, 'Light: ', 'get-block-info light');
+    expectIncludes(info, 'Biome: ', 'get-block-info biome');
+
+    await call('move-to-position', { x: cx, y: y0, z: cz, range: 0, timeoutMs: 20000 });
+    await call('look-at', { x: cx + 0.5, y: y0 - 1, z: cz + 2.5 });
+    const cursor = await call('get-cursor-target');
+    expectIncludes(cursor, 'Looking at stone', 'get-cursor-target block');
+    expectIncludes(cursor, ', top', 'get-cursor-target face');
+
+    for (const [toolArgs, trigger, expected] of [
+      [{ types: ['sound'], timeoutMs: 10000 }, '/playsound minecraft:entity.creeper.primed hostile @s ~2 ~ ~', 'entity.creeper.primed'],
+      [{ types: ['never'], hostileWithin: 6, timeoutMs: 10000 }, `/summon zombie ${cx - 4} ${y0} ${cz} {NoAI:1b,PersistenceRequired:1b}`, 'Hostile mob within 6 blocks: zombie']
+    ]) {
+      covered.add('wait-for-event');
+      const pending = client.callTool({ name: 'wait-for-event', arguments: toolArgs }, undefined, { timeout: 30000 });
+      await sleep(500);
+      await cmd(trigger);
+      expectIncludes(responseText(await pending), expected, `wait-for-event ${JSON.stringify(toolArgs)}`);
+    }
+    expectIncludes(await call('wait-for-event', { types: ['never'], timeoutMs: 500 }), 'Nothing happened', 'wait-for-event timeout');
+    await cmd('/kill @e[type=zombie,distance=..16]');
+    await cmd(`/setblock ${cx - 2} ${y0} ${cz + 3} air`);
+  });
+
   await step('blocks: place, dig, fill, clear, tunnel', async () => {
     await placeAndVerify('dirt', cx + 3, y0, cz);
     await call('dig-block', { x: cx + 3, y: y0, z: cz });

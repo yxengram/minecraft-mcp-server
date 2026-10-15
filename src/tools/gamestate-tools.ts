@@ -3,6 +3,7 @@ import mineflayer from 'mineflayer';
 import minecraftData from 'minecraft-data';
 import { ToolFactory } from '../tool-factory.js';
 import { formatStat } from '../format.js';
+import { describeItem } from './item-utils.js';
 import { describeEntity, findNearbyEntities, formatPosition } from './entity-utils.js';
 
 const ARMOR_SLOTS = ['head', 'torso', 'legs', 'feet', 'off-hand'] as const;
@@ -85,7 +86,7 @@ function describeEquipment(bot: mineflayer.Bot): string {
   const equipped = ARMOR_SLOTS
     .map(destination => {
       const item = bot.inventory.slots[bot.getEquipmentDestSlot(destination)];
-      return item ? `${destination}: ${item.name}` : null;
+      return item ? `${destination}: ${describeItem(bot, item, { withCount: false })}` : null;
     })
     .filter(Boolean);
   return equipped.length > 0 ? equipped.join(', ') : 'none';
@@ -131,7 +132,7 @@ export function registerGameStateTools(factory: ToolFactory, getBot: () => minef
         `Effects: ${describeEffects(bot)}`,
         `Armor: ${armorPoints(bot)}/20, xp: level ${bot.experience?.level ?? 0} (${bot.experience?.points ?? 0} points)`,
         `Time: ${bot.time.timeOfDay} ticks (${bot.time.isDay ? 'day' : 'night'}), weather: ${describeWeather(bot)}`,
-        `Held item: ${held ? `${held.name} x${held.count}` : 'nothing'}`,
+        `Held item: ${held ? describeItem(bot, held) : 'nothing'}`,
         `Equipment: ${describeEquipment(bot)}`,
         `Inventory: ${summarizeInventory(bot)}`
       ];

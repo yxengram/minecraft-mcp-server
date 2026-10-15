@@ -2,12 +2,12 @@ import { z } from "zod";
 import mineflayer from 'mineflayer';
 import { ToolFactory } from '../tool-factory.js';
 import { formatStat } from '../format.js';
-import { countItems, resolveItemsByName } from './item-utils.js';
+import { countItems, itemDetails, resolveItemsByName } from './item-utils.js';
 
-interface InventoryItem {
-  name: string;
-  count: number;
-  slot: number;
+function detailSuffix(bot: mineflayer.Bot, item: Parameters<typeof itemDetails>[1]): string {
+  const { customName, details } = itemDetails(bot, item);
+  const parts = [...(customName ? [`"${customName}"`] : []), ...details];
+  return parts.length > 0 ? `: ${parts.join(', ')}` : '';
 }
 
 const EQUIPMENT_DESTINATIONS = ['hand', 'head', 'torso', 'legs', 'feet', 'off-hand'] as const;
@@ -20,19 +20,14 @@ export function registerInventoryTools(factory: ToolFactory, getBot: () => minef
     async () => {
       const bot = getBot();
       const items = bot.inventory.items();
-      const itemList: InventoryItem[] = items.map((item) => ({
-        name: item.name,
-        count: item.count,
-        slot: item.slot
-      }));
 
       if (items.length === 0) {
         return factory.createResponse("Inventory is empty");
       }
 
       let inventoryText = `Found ${items.length} items in inventory:\n\n`;
-      itemList.forEach(item => {
-        inventoryText += `- ${item.name} (x${item.count}) in slot ${item.slot}\n`;
+      items.forEach(item => {
+        inventoryText += `- ${item.name} (x${item.count}) in slot ${item.slot}${detailSuffix(bot, item)}\n`;
       });
 
       return factory.createResponse(inventoryText);
@@ -53,7 +48,7 @@ export function registerInventoryTools(factory: ToolFactory, getBot: () => minef
       );
 
       if (item) {
-        return factory.createResponse(`Found ${item.count} ${item.name} in inventory (slot ${item.slot})`);
+        return factory.createResponse(`Found ${item.count} ${item.name} in inventory (slot ${item.slot})${detailSuffix(bot, item)}`);
       } else {
         return factory.createResponse(`Couldn't find any item matching '${nameOrType}' in inventory`);
       }

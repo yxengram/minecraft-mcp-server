@@ -7,6 +7,9 @@ import minecraftData from 'minecraft-data';
 import { ToolFactory } from '../tool-factory.js';
 import { log } from '../logger.js';
 import { coerceCoordinates } from './coordinate-utils.js';
+import { blockDetails, faceName } from './block-details.js';
+import { describeEntity, entityDetails } from './entity-utils.js';
+import { compassDirection } from './terrain-utils.js';
 
 type FaceDirection = 'up' | 'down' | 'north' | 'south' | 'east' | 'west';
 const MAX_FIND_BLOCKS_COUNT = 256;
@@ -134,7 +137,8 @@ export function registerBlockTools(factory: ToolFactory, getBot: () => mineflaye
         return factory.createResponse(`No block information found at position (${x}, ${y}, ${z})`);
       }
 
-      return factory.createResponse(`Found ${block.name} (type: ${block.type}) at position (${block.position.x}, ${block.position.y}, ${block.position.z})`);
+      const lines = [`Found ${block.name} (type: ${block.type}) at position (${block.position.x}, ${block.position.y}, ${block.position.z})`, ...blockDetails(bot, block)];
+      return factory.createResponse(lines.join('\n'));
     }
   );
 
@@ -187,6 +191,39 @@ export function registerBlockTools(factory: ToolFactory, getBot: () => mineflaye
         .join('\n');
 
       return factory.createResponse(`Found ${blocks.length} ${blockType} block(s) within ${maxDistance} blocks:\n${blocksList}`);
+    }
+  );
+
+  factory.registerTool(
+    "get-cursor-target",
+    "Get what the bot is looking at: its facing direction and the block (with the face being looked at) or entity under its crosshair",
+    {
+      maxDistance: z.coerce.number().finite().positive().max(64).optional().describe("How far to look (default: 5, roughly reach distance)")
+    },
+    async ({ maxDistance = 5 }) => {
+      const bot = getBot();
+      const yaw = bot.entity.yaw ?? 0;
+      const pitchDegrees = Math.round(((bot.entity.pitch ?? 0) * 180) / Math.PI);
+      const facing = compassDirection(Math.round(-Math.sin(yaw) * 100), Math.round(-Math.cos(yaw) * 100));
+      const lines = [`Facing ${facing}, looking ${pitchDegrees > 5 ? 'up' : pitchDegrees < -5 ? 'down' : 'straight ahead'} (pitch ${pitchDegrees}°)`];
+
+      const eye = bot.entity.position.offset(0, (bot.entity as { eyeHeight?: number }).eyeHeight ?? 1.62, 0);
+      const block = bot.blockAtCursor(maxDistance);
+      const entity = typeof bot.entityAtCursor === 'function' ? bot.entityAtCursor(maxDistance) : null;
+      const blockDistance = block ? eye.distanceTo(block.position.offset(0.5, 0.5, 0.5)) : Infinity;
+      const entityDistance = entity ? eye.distanceTo(entity.position) : Infinity;
+
+      if (entity && entityDistance <= blockDistance) {
+        lines.push(`Looking at entity: ${describeEntity({ entity, distance: bot.entity.position.distanceTo(entity.position), details: entityDetails(bot, entity) })}`);
+      } else if (block) {
+        const face = faceName((block as { face?: number }).face);
+        lines.push(`Looking at ${block.name} at (${block.position.x}, ${block.position.y}, ${block.position.z}), ${blockDistance.toFixed(1)} blocks away${face ? `, ${face}` : ''}`);
+        lines.push(...blockDetails(bot, block));
+      } else {
+        lines.push(`Nothing within ${maxDistance} blocks`);
+      }
+
+      return factory.createResponse(lines.join('\n'));
     }
   );
 }

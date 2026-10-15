@@ -62,6 +62,14 @@ export function entityDetails(bot: Bot, entity: BotEntity): string[] {
       details.push(ownerName ? `tamed by ${ownerName}` : 'tamed');
     }
 
+    if (entity.name === 'creeper') {
+      const swelling = metadataValue(bot, entity, 'swell_dir');
+      if (metadataValue(bot, entity, 'is_ignited') === true || (typeof swelling === 'number' && swelling > 0)) {
+        details.push('ABOUT TO EXPLODE');
+      }
+      if (metadataValue(bot, entity, 'is_powered') === true) details.push('charged');
+    }
+
     const wool = metadataValue(bot, entity, 'wool');
     if (typeof wool === 'number') {
       details.push(`${DYE_COLORS[wool & SHEEP_COLOR_MASK]} wool${wool & SHEEP_SHEARED_FLAG ? ', sheared' : ''}`);

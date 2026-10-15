@@ -100,7 +100,7 @@ Once connected to a Minecraft server, Claude can use these commands:
 - `fly-to` - Make the bot fly directly to specific coordinates
 
 ### Inventory
-- `list-inventory` - List all items in the bot's inventory
+- `list-inventory` - List all items in the bot's inventory, with custom names, durability and enchantments
 - `find-item` - Find a specific item in inventory
 - `equip-item` - Equip a specific item
 - `unequip-item` - Take off an equipped item
@@ -110,7 +110,8 @@ Once connected to a Minecraft server, Claude can use these commands:
 ### Block Interaction
 - `place-block` - Place a block at specified coordinates
 - `dig-block` - Dig a block at specified coordinates
-- `get-block-info` - Get information about a block
+- `get-block-info` - Get information about a block: its state (open, facing, powered, ...), light level, biome and sign text
+- `get-cursor-target` - What the bot is looking at: facing direction and the block face or entity under the crosshair
 - `find-blocks` - Find one or more nearby blocks of a specific type
 - `collect-block` - Mine and pick up a number of blocks of one type
 - `clear-region` - Dig out a box between two corners (max 512 blocks)
@@ -130,7 +131,7 @@ Digging tools pick the best tool in the inventory and skip blocks next to lava.
 
 ### Entity Interaction
 - `find-entity` - Find the nearest entity of a specific type
-- `list-entities` - List nearby entities, nearest first, with what dropped items are, custom names, babies, owners, sheep colors and held or worn items
+- `list-entities` - List nearby entities, nearest first, with what dropped items are, custom names, babies, owners, sheep colors, held or worn items and creepers about to explode
 - `list-players` - List players online on the server
 - `attack-entity` - Attack an entity within reach
 - `activate-entity` - Right-click an entity (villagers, animals)
@@ -158,7 +159,8 @@ Both tools look down from the sky by default and switch to the bot's own level w
 ### Game State
 - `detect-gamemode` - Detect the gamemode on game
 - `get-observation` - One-call snapshot of vitals, status effects, armor, xp, position, time, weather, equipment, inventory and nearby entities
-- `get-events` - Read recent game events (chat, system messages, titles, death, damage with its type and attacker, item pickups, joins/leaves, kicks). Pass `nextSince` back as `since` to read only new events
+- `get-events` - Read recent game events (chat, system messages, titles, death, damage with its type and attacker, hostile mob sounds, loud sounds, explosions, item pickups, joins/leaves, kicks). Pass `nextSince` back as `since` to read only new events
+- `wait-for-event` - Wait until something happens instead of polling: a new event (optionally of certain types), a hostile mob coming close or health dropping low (up to 55 seconds)
 
 ## Contributing
 

@@ -5,6 +5,8 @@ import minecraftData from 'minecraft-data';
 import { formatStat } from './format.js';
 import { componentToText } from './text-component.js';
 import type { MessageKind } from './message-store.js';
+import { serverRegistryName, trackServerRegistries } from './server-registries.js';
+import { describeOffset } from './tools/terrain-utils.js';
 
 const SUPPORTED_MINECRAFT_VERSION = '26.1.2';
 
@@ -22,6 +24,21 @@ interface ConnectionCallbacks {
   onEvent?: (type: string, message: string) => void;
   onSystemMessage?: (kind: Exclude<MessageKind, 'chat'>, text: string) => void;
 }
+
+const SOUND_RADIUS = 32;
+const SOUND_SOURCE_RADIUS = 2;
+const SOUND_REPEAT_MS = 5000;
+const LOUD_VOLUME = 2;
+// Sound packets store coordinates multiplied by 8.
+const SOUND_POSITION_SCALE = 8;
+
+type SoundPacket = {
+  sound?: { soundId?: number; data?: { soundName?: string } };
+  soundCategory?: string;
+  volume?: number;
+  x?: number; y?: number; z?: number;
+  entityId?: number;
+};
 
 // Damage events arrive just before the matching health update.
 const DAMAGE_SOURCE_WINDOW_MS = 1500;
@@ -111,18 +128,12 @@ export class BotConnection {
       this.callbacks.onEvent?.('death', 'Bot died');
     });
 
-    let damageTypes: string[] = [];
+    trackServerRegistries(bot);
     let lastDamage: { description: string; time: number } | null = null;
-
-    bot._client.on('registry_data', (packet: { id?: string; entries?: { key: string }[] }) => {
-      if (packet.id === 'minecraft:damage_type' && Array.isArray(packet.entries)) {
-        damageTypes = packet.entries.map(entry => entry.key.replace(/^minecraft:/, ''));
-      }
-    });
 
     bot._client.on('damage_event', (packet: { entityId: number; sourceTypeId: number; sourceCauseId: number; sourceDirectId: number }) => {
       if (!bot.entity || packet.entityId !== bot.entity.id) return;
-      const type = damageTypes[packet.sourceTypeId] ?? `damage type ${packet.sourceTypeId}`;
+      const type = serverRegistryName(bot, 'damage_type', packet.sourceTypeId) ?? `damage type ${packet.sourceTypeId}`;
       const entities = bot.entities as Record<number, BotEntityLike | undefined>;
       const cause = describeDamager(entities[packet.sourceCauseId - 1]);
       const direct = packet.sourceDirectId !== packet.sourceCauseId ? entities[packet.sourceDirectId - 1] : undefined;
@@ -140,6 +151,67 @@ export class BotConnection {
         lastDamage = null;
       }
       lastHealth = bot.health;
+    });
+
+    // Sound ids cannot be mapped to names reliably on every version, so describe sounds by category and source;
+    // packets that carry an explicit sound name keep it.
+    const lastSoundAt = new Map<string, number>();
+    const reportSound = (packet: SoundPacket, position: { x: number; y: number; z: number } | undefined, source?: BotEntityLike) => {
+      if (!bot.entity || !position || source === (bot.entity as unknown as BotEntityLike)) return;
+      const name = packet.sound?.data?.soundName?.replace(/^minecraft:/, '');
+      const category = packet.soundCategory ?? 'unknown';
+      const volume = packet.volume ?? 1;
+      const loud = volume >= LOUD_VOLUME;
+      if (!name && category !== 'hostile' && !loud) return;
+
+      const dx = position.x - bot.entity.position.x;
+      const dz = position.z - bot.entity.position.z;
+      const distance = Math.hypot(dx, position.y - bot.entity.position.y, dz);
+      if (distance > SOUND_RADIUS * Math.max(1, volume)) return;
+
+      const key = `${source?.id ?? `${Math.round(position.x)},${Math.round(position.y)},${Math.round(position.z)}`}:${name ?? category}`;
+      const now = Date.now();
+      if (now - (lastSoundAt.get(key) ?? 0) < SOUND_REPEAT_MS) return;
+      lastSoundAt.set(key, now);
+
+      const what = name ?? (category === 'weather' ? 'thunder or weather sound' : `${category} sound`);
+      const from = describeDamager(source);
+      this.callbacks.onEvent?.('sound', `${what}${from ? ` from ${from}` : ''}, ${describeOffset(Math.round(dx), Math.round(dz), Math.round(position.y - bot.entity.position.y))}${loud ? ' (loud)' : ''}`);
+    };
+
+    const nearestEntityTo = (position: { x: number; y: number; z: number }) => {
+      let best: BotEntityLike | undefined;
+      let bestDistance = SOUND_SOURCE_RADIUS;
+      for (const entity of Object.values(bot.entities ?? {})) {
+        if (entity === bot.entity || !entity.position) continue;
+        const distance = entity.position.distanceTo(position as never);
+        if (distance <= bestDistance) {
+          best = entity as unknown as BotEntityLike;
+          bestDistance = distance;
+        }
+      }
+      return best;
+    };
+
+    bot._client.on('sound_effect', (packet: SoundPacket) => {
+      if (typeof packet.x !== 'number' || typeof packet.y !== 'number' || typeof packet.z !== 'number') return;
+      const position = { x: packet.x / SOUND_POSITION_SCALE, y: packet.y / SOUND_POSITION_SCALE, z: packet.z / SOUND_POSITION_SCALE };
+      reportSound(packet, position, nearestEntityTo(position));
+    });
+
+    bot._client.on('entity_sound_effect', (packet: SoundPacket) => {
+      const entity = typeof packet.entityId === 'number' ? bot.entities?.[packet.entityId] : undefined;
+      reportSound(packet, entity?.position, entity as unknown as BotEntityLike | undefined);
+    });
+
+    bot._client.on('explosion', (packet: { center?: { x: number; y: number; z: number }; x?: number; y?: number; z?: number }) => {
+      if (!bot.entity) return;
+      const center = packet.center ?? (typeof packet.x === 'number' ? { x: packet.x, y: packet.y ?? 0, z: packet.z ?? 0 } : undefined);
+      if (!center) return;
+      const dx = Math.round(center.x - bot.entity.position.x);
+      const dz = Math.round(center.z - bot.entity.position.z);
+      const dy = Math.round(center.y - bot.entity.position.y);
+      this.callbacks.onEvent?.('explosion', `Explosion at (${Math.floor(center.x)}, ${Math.floor(center.y)}, ${Math.floor(center.z)}), ${describeOffset(dx, dz, dy)}`);
     });
 
     const forwardSystemMessage = (kind: Exclude<MessageKind, 'chat'>, text: string) => {

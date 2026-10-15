@@ -79,7 +79,7 @@ async function main() {
   registerGameStateTools(factory, getBot);
   registerCraftingTools(factory, getBot);
   registerFurnaceTools(factory, getBot);
-  registerEventTools(factory, eventStore);
+  registerEventTools(factory, eventStore, getBot);
   registerContainerTools(factory, getBot);
   registerInteractionTools(factory, getBot);
   registerFollowTools(factory, getBot);
