@@ -6,6 +6,7 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { BotConnection } from '../src/bot-connection.js';
 import type mineflayer from 'mineflayer';
 import minecraftData from 'minecraft-data';
+import { Vec3 } from 'vec3';
 
 function flattenRecipes(recipes: unknown): unknown[] {
   const all: unknown[] = [];
@@ -284,14 +285,85 @@ test('uses real minecraft-data recipes for version 1.21.8', async (t) => {
   t.true(isValid);
 });
 
-test('craft-item reports the real failure when a craftable recipe throws', async (t) => {
+test('craft-item explains that a 3x3 recipe needs a crafting table', async (t) => {
   const mockServer = { tool: sinon.stub() } as unknown as McpServer;
   const mockConnection = { checkConnectionAndReconnect: sinon.stub().resolves({ connected: true }) } as unknown as BotConnection;
   const factory = new ToolFactory(mockServer, mockConnection);
 
+  const craft = sinon.stub().resolves();
   const mockBot = {
     version: '1.21.8',
     inventory: { items: () => [{ name: 'oak_planks', count: 8, slot: 0 }] },
+    recipesFor: () => [],
+    findBlock: () => null,
+    craft
+  } as unknown as mineflayer.Bot;
+
+  registerCraftingTools(factory, () => mockBot);
+  const craftItemCall = (mockServer.tool as sinon.SinonStub).getCalls().find(call => call.args[0] === 'craft-item');
+
+  const result = await craftItemCall!.args[3]({ outputItem: 'chest' });
+
+  t.true(result.isError);
+  t.true(result.content[0].text.includes('chest needs a crafting table'));
+  t.false(result.content[0].text.includes('cherry_planks'));
+  t.false(craft.called);
+});
+
+
+function realChestRecipe() {
+  const mcData = minecraftData('1.21.8');
+  const chestId = (mcData as unknown as { itemsByName: Record<string, { id: number }> }).itemsByName.chest.id;
+  const recipe = flattenRecipes((mcData as unknown as { recipes: unknown }).recipes).find((candidate) => {
+    const result = (candidate as { result?: { id?: number } }).result;
+    return result?.id === chestId;
+  });
+  const [name, count] = Object.entries(countRecipeIngredients(mcData, recipe))[0];
+  return { recipe, inventory: [{ name, count, slot: 0 }] };
+}
+
+test('craft-item walks to a distant crafting table before crafting', async (t) => {
+  const mockServer = { tool: sinon.stub() } as unknown as McpServer;
+  const mockConnection = { checkConnectionAndReconnect: sinon.stub().resolves({ connected: true }) } as unknown as BotConnection;
+  const factory = new ToolFactory(mockServer, mockConnection);
+
+  const table = { name: 'crafting_table', position: new Vec3(10, 64, 0) };
+  const { recipe, inventory } = realChestRecipe();
+  const goto = sinon.stub().resolves();
+  const craft = sinon.stub().resolves();
+  const mockBot = {
+    version: '1.21.8',
+    entity: { position: new Vec3(0, 64, 0) },
+    inventory: { items: () => inventory },
+    recipesFor: (_id: number, _meta: null, _min: number, craftingTable: unknown) => (craftingTable ? [recipe] : []),
+    findBlock: () => table,
+    pathfinder: { goto },
+    craft
+  } as unknown as mineflayer.Bot;
+
+  registerCraftingTools(factory, () => mockBot);
+  const craftItemCall = (mockServer.tool as sinon.SinonStub).getCalls().find(call => call.args[0] === 'craft-item');
+
+  const result = await craftItemCall!.args[3]({ outputItem: 'chest' });
+
+  t.falsy(result.isError);
+  t.true(goto.calledOnce);
+  t.true(goto.calledBefore(craft));
+  t.is(craft.firstCall.args[2], table);
+});
+
+test('craft-item reports the real failure when crafting throws', async (t) => {
+  const mockServer = { tool: sinon.stub() } as unknown as McpServer;
+  const mockConnection = { checkConnectionAndReconnect: sinon.stub().resolves({ connected: true }) } as unknown as BotConnection;
+  const factory = new ToolFactory(mockServer, mockConnection);
+
+  const { recipe, inventory } = realChestRecipe();
+  const mockBot = {
+    version: '1.21.8',
+    entity: { position: new Vec3(0, 64, 0) },
+    inventory: { items: () => inventory },
+    recipesFor: () => [recipe],
+    findBlock: () => ({ position: new Vec3(1, 64, 0) }),
     craft: sinon.stub().rejects(new Error('Recipe requires craftingTable, but one was not supplied'))
   } as unknown as mineflayer.Bot;
 
@@ -303,5 +375,4 @@ test('craft-item reports the real failure when a craftable recipe throws', async
   t.true(result.isError);
   t.true(result.content[0].text.includes('requires craftingTable'));
   t.true(result.content[0].text.includes('Place a crafting table nearby'));
-  t.false(result.content[0].text.includes('cherry_planks'));
 });

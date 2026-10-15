@@ -4,7 +4,7 @@
 //   npm run build
 //   npm run test:live:world -- <LAN_PORT> --allow-world-changes
 //
-// It builds a floating stone arena above the bot, gives itself items, summons entities, changes
+// It builds a floating stone arena at y=240 above the bot (removed again at the end), gives itself items, summons entities, changes
 // time and game mode, and kills the bot at the end to test death/respawn events. A second
 // in-process bot (MCPHelper) acts as another player for chat, whisper and follow tests.
 
@@ -32,7 +32,8 @@ if (!args.includes('--allow-world-changes')) {
 
 const BOT_NAME = 'MCPWorldTest';
 const HELPER_NAME = 'MCPHelper';
-const ARENA_HEIGHT = 20;
+// A fixed altitude keeps repeated runs from stacking arenas on top of each other.
+const ARENA_Y = 240;
 const ARENA_RADIUS = 10;
 
 const waypointDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-live-world-'));
@@ -102,6 +103,23 @@ async function inventoryCount(itemName) {
   return [...text.matchAll(new RegExp(`- ${itemName} \\(x(\\d+)\\)`, 'g'))].reduce((sum, m) => sum + Number(m[1]), 0);
 }
 
+async function waitForCount(itemName, predicate, description) {
+  let last;
+  try {
+    await waitFor(async () => predicate(last = await inventoryCount(itemName)), description);
+  } catch {
+    throw new Error(`Timed out waiting for ${description} (have ${last} ${itemName})`);
+  }
+}
+
+async function placeAndVerify(itemName, x, y, z) {
+  await call('equip-item', { itemName });
+  const text = await call('place-block', { x, y, z });
+  expect(text.startsWith('Placed block'), `place-block ${itemName} at ${x}, ${y}, ${z}: ${text}`);
+  const placed = await block(x, y, z);
+  expect(placed === itemName, `place-block reported success but found ${placed} at ${x}, ${y}, ${z}`);
+}
+
 async function block(x, y, z) {
   return (await call('get-block-info', { x, y, z })).match(/Found (\w+)/)?.[1];
 }
@@ -149,11 +167,14 @@ try {
   await step('setup: operator check and arena', async () => {
     await cmd('/clear @s');
     await cmd('/give @s dirt 1');
-    expect(await waitFor(async () => (await inventoryCount('dirt')) === 1, 'the /give command', 5000),
-      'The bot could not run commands. Enable cheats for the LAN world');
+    try {
+      await waitFor(async () => (await inventoryCount('dirt')) === 1, 'the /give command', 5000);
+    } catch {
+      throw new Error('The bot could not run commands. Enable cheats for the LAN world');
+    }
 
     const [x, y, z] = await position();
-    [cx, y0, cz] = [x, Math.min(y + ARENA_HEIGHT, 300), z];
+    [cx, y0, cz] = [x, ARENA_Y, z];
     const r = ARENA_RADIUS;
     await cmd(`/fill ${cx - r} ${y0 - 1} ${cz - r} ${cx + r} ${y0 - 1} ${cz + r} stone`);
     await cmd(`/fill ${cx - r} ${y0} ${cz - r} ${cx + r} ${y0 + 6} ${cz + r} air`);
@@ -166,9 +187,23 @@ try {
     await sleep(1500);
     expect((await block(cx, y0 - 1, cz)) === 'stone', 'arena floor was not built');
 
+    // The helper may log in mid-air where a previous arena was removed, so make it fall-proof and
+    // confirm it actually arrived before relying on it.
     helper = await startHelper();
-    await cmd(`/tp ${HELPER_NAME} ${cx} ${y0} ${cz - 7}`);
-    await sleep(1500);
+    await cmd(`/gamemode creative ${HELPER_NAME}`);
+    const helperSpot = new Vec3(cx + 0.5, y0, cz - 6.5);
+    let arrived = false;
+    for (let attempt = 0; attempt < 3 && !arrived; attempt++) {
+      await cmd(`/tp ${HELPER_NAME} ${cx} ${y0} ${cz - 7}`);
+      try {
+        await waitFor(() => helper.entity?.position.distanceTo(helperSpot) < 2, 'the helper to arrive', 4000);
+        arrived = true;
+      } catch {
+        // retry the teleport
+      }
+    }
+    expect(arrived, `${HELPER_NAME} could not be moved into the arena`);
+    await sleep(1000);
   });
 
   await step('read-only basics', async () => {
@@ -239,7 +274,7 @@ try {
     await cmd('/give @s golden_apple 1');
     await cmd('/give @s dirt 16');
     await cmd('/give @s iron_helmet 1');
-    await waitFor(async () => (await inventoryCount('dirt')) === 16, 'items to arrive');
+    await waitForCount('dirt', count => count >= 16, 'items to arrive');
 
     expectIncludes(await call('find-item', { nameOrType: 'helmet' }), 'iron_helmet', 'find-item');
     await call('equip-item', { itemName: 'iron_helmet', destination: 'head' });
@@ -247,17 +282,16 @@ try {
     await call('unequip-item', { destination: 'head' });
     expectIncludes(await call('get-observation', { maxEntities: 0 }), 'Equipment: none', 'unequip-item');
 
+    const dirtBefore = await inventoryCount('dirt');
     await call('toss-item', { itemName: 'dirt', count: 2 });
-    await waitFor(async () => (await inventoryCount('dirt')) === 14, 'toss-item to drop 2 dirt');
+    await waitForCount('dirt', count => count === dirtBefore - 2, 'toss-item to drop 2 dirt');
     await call('consume', { itemName: 'golden_apple' }, { timeout: 30000 });
-    await waitFor(async () => (await inventoryCount('golden_apple')) === 0, 'golden apple to be eaten');
+    await waitForCount('golden_apple', count => count === 0, 'golden apple to be eaten');
     await cmd(`/kill @e[type=item,distance=..16]`);
   });
 
   await step('blocks: place, dig, fill, clear, tunnel', async () => {
-    await call('equip-item', { itemName: 'dirt' });
-    await call('place-block', { x: cx + 3, y: y0, z: cz });
-    expect((await block(cx + 3, y0, cz)) === 'dirt', 'place-block did not place dirt');
+    await placeAndVerify('dirt', cx + 3, y0, cz);
     await call('dig-block', { x: cx + 3, y: y0, z: cz });
     expect((await block(cx + 3, y0, cz)) === 'air', 'dig-block did not remove the block');
 
@@ -286,29 +320,27 @@ try {
     await cmd(`/fill ${cx - 5} ${y0} ${cz - 5} ${cx - 5} ${y0 + 2} ${cz - 5} oak_log`);
     await sleep(500);
     expectIncludes(await call('collect-block', { blockType: 'oak_log', count: 3, timeoutMs: 60000 }), 'Mined 3 of 3 oak_log', 'collect-block');
-    await waitFor(async () => (await inventoryCount('oak_log')) === 3, 'logs to be picked up');
+    await waitForCount('oak_log', count => count >= 3, 'logs to be picked up');
   });
 
   await step('crafting', async () => {
     expectIncludes(await call('get-recipe', { itemName: 'chest' }), 'chest', 'get-recipe');
     expectIncludes(await call('can-craft', { itemName: 'chest' }), 'Missing', 'can-craft without planks');
     await call('craft-item', { outputItem: 'oak_planks', amount: 2 });
-    await waitFor(async () => (await inventoryCount('oak_planks')) === 8, 'planks to be crafted');
+    await waitForCount('oak_planks', count => count >= 8, 'planks to be crafted');
     expectIncludes(await call('list-recipes', { outputItem: 'crafting_table' }), 'crafting_table', 'list-recipes');
 
-    await call('craft-item', { outputItem: 'chest' }, { expectError: true });
+    expectIncludes(await call('craft-item', { outputItem: 'chest' }, { expectError: true }), 'needs a crafting table', 'craft-item without a table');
     await call('craft-item', { outputItem: 'crafting_table' });
-    await call('equip-item', { itemName: 'crafting_table' });
-    await call('place-block', { x: cx + 2, y: y0, z: cz + 4 });
+    await placeAndVerify('crafting_table', cx + 2, y0, cz + 4);
     await cmd('/give @s oak_planks 4');
-    await waitFor(async () => (await inventoryCount('oak_planks')) === 8, 'extra planks');
+    await waitForCount('oak_planks', count => count >= 8, 'extra planks');
     await call('craft-item', { outputItem: 'chest' });
-    await waitFor(async () => (await inventoryCount('chest')) === 1, 'chest to be crafted');
+    await waitForCount('chest', count => count >= 1, 'chest to be crafted');
   });
 
   await step('containers', async () => {
-    await call('equip-item', { itemName: 'chest' });
-    await call('place-block', { x: cx + 4, y: y0, z: cz + 4 });
+    await placeAndVerify('chest', cx + 4, y0, cz + 4);
     const at = { x: cx + 4, y: y0, z: cz + 4 };
     expectIncludes(await call('read-container', at), 'is empty', 'read-container');
     await call('container-deposit', { ...at, itemName: 'dirt', count: 5 });
@@ -343,12 +375,11 @@ try {
     await cmd('/give @s furnace 1');
     await cmd('/give @s raw_iron 1');
     await cmd('/give @s coal 1');
-    await waitFor(async () => (await inventoryCount('coal')) === 1, 'furnace items');
-    await call('equip-item', { itemName: 'furnace' });
-    await call('place-block', { x: cx + 4, y: y0, z: cz + 6 });
+    await waitForCount('coal', count => count >= 1, 'furnace items');
+    await placeAndVerify('furnace', cx + 4, y0, cz + 6);
     expectIncludes(await call('smelt-item', { x: cx + 4, y: y0, z: cz + 6, inputItem: 'raw_iron', fuelItem: 'coal', timeoutMs: 30000 }, { timeout: 60000 }),
       'Smelted', 'smelt-item');
-    await waitFor(async () => (await inventoryCount('iron_ingot')) === 1, 'iron ingot');
+    await waitForCount('iron_ingot', count => count >= 1, 'iron ingot');
   });
 
   await step('entities: attack, interact, ride', async () => {
@@ -398,6 +429,14 @@ try {
     await cmd('/kill @s');
     await waitFor(async () => (await call('get-events', { since: eventCursor, types: ['death'] })).includes('Bot died'), 'death event');
     await waitFor(async () => (await call('get-events', { since: eventCursor, types: ['spawn'] })).includes('Bot spawned'), 'respawn event');
+  });
+
+  await step('cleanup: remove the arena', async () => {
+    const r = ARENA_RADIUS;
+    await cmd(`/tp ${HELPER_NAME} @s`);
+    await cmd(`/fill ${cx - r} ${y0 - 1} ${cz - r} ${cx + r} ${y0 + 6} ${cz + r} air`);
+    await cmd(`/kill @e[type=!player,x=${cx},y=${y0},z=${cz},distance=..24]`);
+    await cmd('/time set day');
   });
 
   const notCovered = tools.map(tool => tool.name).filter(name => !covered.has(name));

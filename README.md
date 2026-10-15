@@ -190,6 +190,6 @@ To exercise every MCP tool against a real server, use a throwaway world with che
 npm run test:live:world -- LAN_PORT --allow-world-changes
 ```
 
-This test **modifies the world**. It builds a floating stone arena above the bot, gives itself items with `/give`, summons a pig and a minecart, places a bed, crafting table, chest and furnace, changes the time and game mode, and kills the bot at the end to check death and respawn events. A second bot named `MCPHelper` joins to act as another player for the chat, whisper and follow tests. The script reports any tool it did not exercise, so newly added tools show up as missing coverage.
+This test **modifies the world**. It builds a floating stone arena at y=240 above the bot (and removes it at the end), gives itself items with `/give`, summons a pig and a minecart, places a bed, crafting table, chest and furnace, changes the time and game mode, and kills the bot at the end to check death and respawn events. A second bot named `MCPHelper` joins to act as another player for the chat, whisper and follow tests. The script reports any tool it did not exercise, so newly added tools show up as missing coverage.
 
 Minecraft Java 26.1.2 (protocol 775) was also manually verified with a Survival bot: place a dirt block, read it back, dig it, and restore the borrowed dirt to its original location.

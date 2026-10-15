@@ -3,6 +3,10 @@ import mineflayer from 'mineflayer';
 import minecraftData from 'minecraft-data';
 import { ToolFactory } from '../tool-factory.js';
 import { log } from '../logger.js';
+import pathfinderPkg from 'mineflayer-pathfinder';
+const { goals } = pathfinderPkg;
+
+const CRAFTING_TABLE_REACH = 4;
 
 interface RecipeIngredient {
   name: string;
@@ -129,6 +133,25 @@ type CandidateRecipe = {
   exactMatch: boolean;
   craftingTable?: unknown;
 };
+
+/** Raw minecraft-data recipes larger than 2x2 can only be crafted at a crafting table. */
+function rawRecipeNeedsTable(recipe: unknown): boolean {
+  const r = recipe as { inShape?: unknown[][]; ingredients?: unknown[] };
+  if (Array.isArray(r.inShape)) {
+    return r.inShape.length > 2 || r.inShape.some(row => Array.isArray(row) && row.length > 2);
+  }
+  return Array.isArray(r.ingredients) && r.ingredients.length > 4;
+}
+
+async function moveWithinReach(bot: mineflayer.Bot, table: unknown): Promise<void> {
+  const position = (table as { position?: { x: number; y: number; z: number } }).position;
+  const pathfinder = (bot as unknown as { pathfinder?: mineflayer.Bot['pathfinder'] }).pathfinder;
+  if (!position || !pathfinder || !bot.entity?.position) return;
+  const distance = bot.entity.position.distanceTo(position as never);
+  if (distance > CRAFTING_TABLE_REACH) {
+    await pathfinder.goto(new goals.GoalNear(position.x, position.y, position.z, 2));
+  }
+}
 
 function collectCandidateRecipes(recipes: unknown[], query: string, itemsById: McDataItemsById): CandidateRecipe[] {
   const exact: CandidateRecipe[] = [];
@@ -422,7 +445,10 @@ export function registerCraftingTools(factory: ToolFactory, getBot: () => minefl
       const candidatesFromBotNoTable = collectCandidateRecipesFromBot(bot, mcData, outputQuery, itemsById, null);
       const candidatesFromBotWithTable = table ? collectCandidateRecipesFromBot(bot, mcData, outputQuery, itemsById, table) : [];
       const candidatesFromBot = candidatesFromBotNoTable.length > 0 ? candidatesFromBotNoTable : candidatesFromBotWithTable;
-      const candidates = candidatesFromBot.length > 0 ? candidatesFromBot : collectCandidateRecipes(recipes, outputQuery, itemsById);
+      // mineflayer only returns recipes it can craft right now; fall back to raw data to explain what is missing.
+      const usingRawRecipes = candidatesFromBot.length === 0;
+      const candidates = usingRawRecipes ? collectCandidateRecipes(recipes, outputQuery, itemsById) : candidatesFromBot;
+      let needsTable = false;
 
       for (let attempt = 0; attempt < amount; attempt++) {
         const currentInventory = bot.inventory.items().map(item => ({ name: item.name, count: item.count }));
@@ -443,8 +469,17 @@ export function registerCraftingTools(factory: ToolFactory, getBot: () => minefl
             continue;
           }
 
+          if (usingRawRecipes && rawRecipeNeedsTable(candidate.recipe)) {
+            if (!table) {
+              needsTable = true;
+              continue;
+            }
+            candidate.craftingTable = table;
+          }
+
           try {
             if (candidate.craftingTable) {
+              await moveWithinReach(bot, candidate.craftingTable);
               await bot.craft(candidate.recipe as Parameters<typeof bot.craft>[0], 1, candidate.craftingTable as Parameters<typeof bot.craft>[2]);
             } else {
               await bot.craft(candidate.recipe as Parameters<typeof bot.craft>[0], 1);
@@ -460,6 +495,11 @@ export function registerCraftingTools(factory: ToolFactory, getBot: () => minefl
         }
 
         if (!craftedThisAttempt && attempt === 0) {
+          if (needsTable && !lastError) {
+            return factory.createErrorResponse(
+              `${outputItem} needs a crafting table. Place one within 16 blocks of the bot and try again.`
+            );
+          }
           if (lastError) {
             const hint = /crafting ?table/i.test(lastError) ? ' Place a crafting table nearby and try again.' : '';
             return factory.createErrorResponse(`Failed to craft ${outputItem}: ${lastError}.${hint}`);
