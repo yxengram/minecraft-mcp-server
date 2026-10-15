@@ -162,6 +162,12 @@ Both tools look down from the sky by default and switch to the bot's own level w
 - `get-events` - Read recent game events (chat, system messages, titles, death, damage with its type and attacker, hostile mob sounds, loud sounds, explosions, item pickups, joins/leaves, kicks). Pass `nextSince` back as `since` to read only new events
 - `wait-for-event` - Wait until something happens instead of polling: a new event (optionally of certain types), a hostile mob coming close or health dropping low (up to 55 seconds)
 
+## Planned: Autopilot (design only)
+
+An autopilot subsystem is being designed so the bot can react in real time without waiting for the LLM: background tasks and behaviors (follow, guard, gather, hunt, return home), reflexes (dodge creepers, escape fire and lava, retreat when hurt, eat), a policy the LLM can adjust, and optional fast decisions through OpenRouter decision models.
+
+**It is not implemented yet.** The design is in [docs/BLUEPRINT.md](docs/BLUEPRINT.md) and the roadmap in [docs/PLAN.md](docs/PLAN.md). Files under `blueprint/` are design notes only and must not be run.
+
 ## Contributing
 
 Feel free to submit pull requests or open issues for improvements. All refactoring commits, functional and test contributions, issues and discussion are greatly appreciated!

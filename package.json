@@ -7,6 +7,9 @@
     "minecraft-mcp-server": "dist/main.js"
   },
   "ava": {
+    "files": [
+      "tests/**/*.test.ts"
+    ],
     "extensions": [
       "ts"
     ],
