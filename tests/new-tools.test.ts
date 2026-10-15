@@ -371,6 +371,16 @@ test('get-observation summarizes the bot state', async (t) => {
   t.true(text.includes('zombie [hostile]'));
 });
 
+test('get-observation rounds fractional health', async (t) => {
+  const { factory, getTool } = createFactory();
+  registerGameStateTools(factory, asBot(observationBot({ health: 13.333332061767578, foodSaturation: 2.4000000953674316 })));
+
+  const text = (await getTool('get-observation')!.execute({})).content[0].text;
+
+  t.true(text.includes('Health: 13.3/20'));
+  t.true(text.includes('saturation: 2.4'));
+});
+
 test('get-observation handles empty surroundings', async (t) => {
   const { factory, getTool } = createFactory();
   registerGameStateTools(factory, asBot(observationBot({
@@ -390,14 +400,34 @@ test('get-observation handles empty surroundings', async (t) => {
   t.true(text.includes('Nearby entities (within 16 blocks): none'));
 });
 
-test('get-observation reports air as full when the server has not sent oxygen data', async (t) => {
+test('get-observation reports full air when the server has not sent oxygen data', async (t) => {
   const { factory, getTool } = createFactory();
   registerGameStateTools(factory, asBot(observationBot({ oxygenLevel: undefined })));
 
   const text = (await getTool('get-observation')!.execute({})).content[0].text;
 
-  t.true(text.includes('air: full'));
+  t.true(text.includes('air: 20/20'));
   t.false(text.includes('undefined'));
+});
+
+test('get-observation reads air from the bot entity instead of the shared oxygenLevel', async (t) => {
+  const { factory, getTool } = createFactory();
+  const bot = observationBot({ oxygenLevel: 229 });
+  (bot.entity as { metadata?: unknown[] }).metadata = [0, 90];
+  registerGameStateTools(factory, asBot(bot));
+
+  const text = (await getTool('get-observation')!.execute({})).content[0].text;
+
+  t.true(text.includes('air: 6/20'));
+});
+
+test('get-observation ignores out of range oxygenLevel without entity metadata', async (t) => {
+  const { factory, getTool } = createFactory();
+  registerGameStateTools(factory, asBot(observationBot({ oxygenLevel: 229 })));
+
+  const text = (await getTool('get-observation')!.execute({})).content[0].text;
+
+  t.true(text.includes('air: 20/20'));
 });
 
 test('get-observation limits listed entities', async (t) => {

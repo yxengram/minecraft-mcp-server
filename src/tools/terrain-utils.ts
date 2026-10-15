@@ -23,7 +23,9 @@ export interface SurfaceGrid {
 const AIR_NAMES = new Set(['air', 'cave_air', 'void_air', 'light']);
 const WATER_LIKE = new Set(['water', 'kelp', 'kelp_plant', 'seagrass', 'tall_seagrass', 'bubble_column']);
 const SURFACE_SCAN_ABOVE = 32;
-const MAX_SCAN_DEPTH = 64;
+// Surface scans reach well below the bot so the ground is still found when it stands on a tower or in the air.
+const SURFACE_SCAN_BELOW = 128;
+const LEVEL_SCAN_DEPTH = 64;
 const ROOF_CHECK_HEIGHT = 12;
 
 const DIRECTIONS_8 = ['north', 'northeast', 'east', 'southeast', 'south', 'southwest', 'west', 'northwest'];
@@ -74,7 +76,7 @@ export function scanSurface(bot: mineflayer.Bot, radius: number, view: ViewMode 
   const startY = resolvedView === 'surface'
     ? Math.min(maxY, feet.y + SURFACE_SCAN_ABOVE)
     : Math.min(maxY, feet.y + 1);
-  const bottomY = Math.max(minY, startY - MAX_SCAN_DEPTH);
+  const bottomY = Math.max(minY, resolvedView === 'surface' ? feet.y - SURFACE_SCAN_BELOW : startY - LEVEL_SCAN_DEPTH);
   const size = radius * 2 + 1;
   const columns: Column[] = new Array(size * size);
   const cursor = new Vec3(0, 0, 0);

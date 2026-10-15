@@ -32,7 +32,7 @@ test('scanSurface finds the top solid block, skipping plants but not water', (t)
   const bot = createVisionBot({
     blockAt: (x, y, z) => {
       if (x > 3) return null;
-      if (x === -3 && z === -3) return y <= 20 ? 'stone' : 'air';
+      if (x === -3 && z === -3) return y <= -70 ? 'stone' : 'air';
       if (x === 2 && z === 0) return y <= 62 ? 'sand' : y <= 63 ? 'water' : 'air';
       if (y === 64 && x === 1) return 'short_grass';
       return y <= 63 ? (y === 63 ? 'grass_block' : 'dirt') : 'air';
@@ -71,4 +71,16 @@ test('scanSurface uses the bot position as the grid center', (t) => {
   t.is(grid.centerX, 100);
   t.is(grid.centerZ, -21);
   t.is(grid.feetY, 11);
+});
+
+test('scanSurface still finds the ground far below a bot standing high in the air', (t) => {
+  const bot = createVisionBot({
+    blockAt: (x, y, z) => (x === 0 && z === 0 && y === 149 ? 'stone' : y <= 63 ? 'grass_block' : 'air'),
+    position: new Vec3(0.5, 150, 0.5)
+  });
+
+  const grid = scanSurface(asBot(bot), 2, 'surface');
+
+  t.deepEqual(columnAt(grid, 0, 0), { state: 'surface', y: 149, name: 'stone' });
+  t.deepEqual(columnAt(grid, 2, 2), { state: 'surface', y: 63, name: 'grass_block' });
 });

@@ -1,6 +1,7 @@
 import { z } from "zod";
 import mineflayer from 'mineflayer';
 import { ToolFactory } from '../tool-factory.js';
+import { formatStat } from '../format.js';
 import { countItems, resolveItemsByName } from './item-utils.js';
 
 interface InventoryItem {
@@ -105,7 +106,7 @@ export function registerInventoryTools(factory: ToolFactory, getBot: () => minef
       }
 
       await bot.consume();
-      return factory.createResponse(`Consumed ${held.name}. Health: ${bot.health}, food: ${bot.food}`);
+      return factory.createResponse(`Consumed ${held.name}. Health: ${formatStat(bot.health)}, food: ${formatStat(bot.food)}`);
     }
   );
 

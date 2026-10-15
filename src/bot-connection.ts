@@ -2,6 +2,7 @@ import mineflayer from 'mineflayer';
 import pathfinderPkg from 'mineflayer-pathfinder';
 const { pathfinder, Movements } = pathfinderPkg;
 import minecraftData from 'minecraft-data';
+import { formatStat } from './format.js';
 
 const SUPPORTED_MINECRAFT_VERSION = '26.1.2';
 
@@ -100,7 +101,7 @@ export class BotConnection {
     let lastHealth = bot.health;
     bot.on('health', () => {
       if (typeof lastHealth === 'number' && bot.health < lastHealth) {
-        this.callbacks.onEvent?.('damaged', `Health dropped from ${lastHealth} to ${bot.health}`);
+        this.callbacks.onEvent?.('damaged', `Health dropped from ${formatStat(lastHealth)} to ${formatStat(bot.health)}`);
       }
       lastHealth = bot.health;
     });
