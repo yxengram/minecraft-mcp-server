@@ -4,11 +4,24 @@ import { Vec3 } from 'vec3';
 import { registerInteractionTools } from '../src/tools/interaction-tools.js';
 import { registerFollowTools } from '../src/tools/follow-tools.js';
 import { asBot, createFactory } from './_helpers.js';
+import { Autopilot } from '../src/autopilot/autopilot.js';
+import { EventStore } from '../src/event-store.js';
+import type { ExecutionContext } from 'ava';
 
 const self = { id: 1, position: new Vec3(0, 64, 0) };
 
 function entity(id: number, name: string, type: string, pos: Vec3) {
   return { id, name, type, position: pos, height: 1, isValid: true };
+}
+
+// follow-entity and flee-from now run as background tasks; cancel them when the test ends.
+function autopilotFor(t: ExecutionContext, bot: Record<string, unknown>) {
+  Object.assign(bot.pathfinder as object, { stop: sinon.stub() });
+  Object.assign(bot, { clearControlStates: sinon.stub() });
+  const autopilot = new Autopilot({ events: new EventStore() });
+  autopilot.bind(asBot(bot)());
+  t.teardown(() => autopilot.tasks.cancelAll('test finished'));
+  return () => autopilot;
 }
 
 function baseBot<T extends Record<string, unknown>>(overrides: T) {
@@ -194,7 +207,7 @@ test('follow-entity sets a dynamic follow goal', async (t) => {
   const steve = { ...entity(5, 'player', 'player', new Vec3(5, 64, 0)), username: 'Steve' };
   const bot = baseBot({ entities: { 5: steve } });
   const { factory, getTool } = createFactory();
-  registerFollowTools(factory, asBot(bot));
+  registerFollowTools(factory, asBot(bot), autopilotFor(t, bot));
 
   const result = await getTool('follow-entity')!.execute({ type: 'Steve', range: 4 });
 
@@ -210,7 +223,7 @@ test('flee-from sets an inverted dynamic goal', async (t) => {
   const zombie = entity(2, 'zombie', 'hostile', new Vec3(3, 64, 0));
   const bot = baseBot({ entities: { 2: zombie } });
   const { factory, getTool } = createFactory();
-  registerFollowTools(factory, asBot(bot));
+  registerFollowTools(factory, asBot(bot), autopilotFor(t, bot));
 
   const result = await getTool('flee-from')!.execute({ entityId: 2, distance: 20 });
 
@@ -223,7 +236,7 @@ test('flee-from sets an inverted dynamic goal', async (t) => {
 test('follow-entity and flee-from error when target is missing', async (t) => {
   const bot = baseBot({});
   const { factory, getTool } = createFactory();
-  registerFollowTools(factory, asBot(bot));
+  registerFollowTools(factory, asBot(bot), autopilotFor(t, bot));
 
   const follow = await getTool('follow-entity')!.execute({ type: 'Steve' });
   const flee = await getTool('flee-from')!.execute({});

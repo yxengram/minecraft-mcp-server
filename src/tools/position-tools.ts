@@ -6,10 +6,11 @@ import { Vec3 } from 'vec3';
 import { ToolFactory } from '../tool-factory.js';
 import { coerceCoordinates } from './coordinate-utils.js';
 import { stopPathfinder } from './movement-utils.js';
+import type { Autopilot } from '../autopilot/autopilot.js';
 
 type Direction = 'forward' | 'back' | 'left' | 'right';
 
-export function registerPositionTools(factory: ToolFactory, getBot: () => mineflayer.Bot): void {
+export function registerPositionTools(factory: ToolFactory, getBot: () => mineflayer.Bot, getAutopilot?: () => Autopilot | null): void {
   factory.registerTool(
     "get-position",
     "Get the current position of the bot",
@@ -130,13 +131,16 @@ export function registerPositionTools(factory: ToolFactory, getBot: () => minefl
 
   factory.registerTool(
     "stop-pathfinding",
-    "Stop the bot's current movement (pathfinding and manual movement)",
+    "Stop the bot's current movement (pathfinding and manual movement) and cancel the current background task",
     {},
     async () => {
       const bot = getBot();
+      const autopilot = getAutopilot?.();
+      const task = autopilot?.isReady() ? autopilot.currentTask() : null;
+      if (task) await autopilot!.tasks.cancel(task.id, 'stopped by stop-pathfinding');
       stopPathfinder(bot);
       bot.clearControlStates();
-      return factory.createResponse("Stopped all movement");
+      return factory.createResponse(task ? `Stopped all movement and cancelled task ${task.id} (${task.behavior})` : "Stopped all movement");
     }
   );
 }

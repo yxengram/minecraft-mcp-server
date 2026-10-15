@@ -23,6 +23,10 @@ interface ConnectionCallbacks {
   onChatMessage: (username: string, message: string) => void;
   onEvent?: (type: string, message: string) => void;
   onSystemMessage?: (kind: Exclude<MessageKind, 'chat'>, text: string) => void;
+  /** The bot spawned for the first time after (re)connecting. */
+  onBotReady?: (bot: mineflayer.Bot) => void;
+  /** The bot left the game. */
+  onBotEnd?: (reason: string) => void;
 }
 
 const SOUND_RADIUS = 32;
@@ -106,6 +110,7 @@ export class BotConnection {
       bot.pathfinder.setMovements(defaultMove);
 
       bot.chat('LLM-powered bot ready to receive instructions!');
+      this.callbacks.onBotReady?.(bot);
       this.callbacks.onLog('info', `Bot connected successfully. Username: ${this.config.username}, Server: ${this.config.host}:${this.config.port}`);
     });
 
@@ -289,6 +294,7 @@ export class BotConnection {
 
     bot.on('end', (reason) => {
       this.callbacks.onEvent?.('disconnected', this.formatError(reason));
+      this.callbacks.onBotEnd?.(this.formatError(reason));
       this.callbacks.onLog('info', `Bot disconnected: ${this.formatError(reason)}`);
 
       if (this.state === 'connected') {

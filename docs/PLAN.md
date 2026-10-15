@@ -8,7 +8,7 @@
 
 | 里程碑 | 目标（完成后新增的可观察能力） | 前置 | 状态 |
 |---|---|---|---|
-| M1 | 动作仲裁 + 后台任务 + follow / flee 行为 + 任务工具：LLM 可以启动、查看、恢复、取消后台任务，事件流可见；LLM 的身体类命令立即执行并报告被打断的任务 | 无 | planned |
+| M1 | 动作仲裁 + 后台任务 + follow / flee 行为 + 任务工具：LLM 可以启动、查看、恢复、取消后台任务，事件流可见；LLM 的身体类命令立即执行并报告被打断的任务 | 无 | implemented-unverified（单元测试通过；实机验收待游戏重新开放） |
 | M2 | 威胁识别 + 近战 + guard / gather / hunt / return-home：bot 能自主守卫、采集、狩猎、回家 | M1 | planned |
 | M3 | 反射 + 策略 + 策略工具：不依赖 LLM 的保命反应，LLM 可调整策略 | M2 | planned |
 | M4 | OpenRouter 客户端 + 模型目录 + 聊天筛选与聊天命令：对 bot 说的话以 chat_request 交给 LLM；LLM 授权过的玩家可以直接下命令（默认无人授权） | M3；OpenRouter API key（开始前通知用户并给出提供步骤） | planned |
@@ -29,7 +29,7 @@
 | 验收 | 正常：上面的端到端路径实机通过；`tests/action-arbiter.test.ts`、`tests/task-manager.test.ts`、`tests/task-tools.test.ts`、`tests/autopilot.test.ts` 通过。边界：手动工具打断任务后任务保持暂停、不自动恢复，中断报告内容完整；对运行中的任务调用 resume-task 返回错误；stop-pathfinding 取消任务；断线后任务被取消。回归：现有全部单元测试通过；`npm run test:live:world` 连续两轮通过且覆盖 start-task / list-tasks / resume-task / cancel-task 与中断报告流程 |
 | 可运行边界 | 只在最终路径创建本里程碑的文件，同时删除 `blueprint/` 中对应的占位；ava 只运行 `tests/**/*.test.ts`，tsc 与 eslint 只读取 `src/`、`tests/`，所以剩余的 `blueprint/` 占位不会被读取 |
 | 恢复 | 在 `extra-tools` 分支上以独立提交完成；回退该提交即可恢复。无外部数据或持久状态 |
-| 状态与证据 | planned；未执行 |
+| 状态与证据 | implemented-unverified：单元测试与静态检查已通过（见进展记录）；实机验收尚未完成 |
 
 ## M2：威胁、战斗与工作行为
 
@@ -165,4 +165,14 @@
 | 决策模型在聊天上的用途 | 主要用于执行授权玩家的命令 | 主要用于聊天筛选：判断是否对 bot 说的、属于哪类，只把相关消息以 chat_request 上报 LLM；授权命令变成次要路径 | 与用户决定一致：让 LLM 只被相关消息唤醒 | F-016、F-029、F-032（chat-triage 情景）、M4 |
 
 占位文件已按 v0.3 重新生成（33 个，内容与蓝图 F 节一致）。
+
+### 2026-10-16 M1 实现
+
+- 新增：`src/autopilot/action-arbiter.ts`、`src/autopilot/task-manager.ts`、`src/autopilot/autopilot.ts`、`src/autopilot/behaviors/target.ts`（实现时新增，契约 F-034）、`src/autopilot/behaviors/follow.ts`、`src/autopilot/behaviors/flee.ts`、`src/tools/task-tools.ts`，测试 `tests/action-arbiter.test.ts`、`tests/task-manager.test.ts`、`tests/autopilot.test.ts`、`tests/movement-behaviors.test.ts`（follow / flee 部分）、`tests/task-tools.test.ts`。对应的 11 个 `blueprint/` 占位文件已删除。
+- 改动：`src/tool-factory.ts`（身体类工具租约与中断报告）、`src/tools/follow-tools.ts`、`src/tools/position-tools.ts`、`src/bot-connection.ts`（onBotReady、onBotEnd）、`src/main.ts`、`src/tools/entity-utils.ts`（新增 refreshEntity）、`tests/interaction-tools.test.ts`（follow/flee 测试改为通过任务运行，断言的对外行为不变）、`scripts/test-live-world.mjs`（新增任务步骤）。
+- 设计调整（不改变契约语义）：身体类工具改为在 `src/tool-factory.ts` 中集中列名单，并把 equip-item 纳入名单（E-001）；新增共享文件 `src/autopilot/behaviors/target.ts`（F-034）。
+- 实现中发现并修复：任务从排队恢复后、行为开始运行前若被取消，行为会错过取消信号；任务管理器现在在调用行为前检查取消状态（有回归测试）。
+- 实际执行的检查：`tsc --noEmit` 通过；`npm run lint` 无错误；`npm test` 313 个测试通过（原有 273 个全部保留，新增 40 个）；`npm run build` 成功。
+- 实机验收：**未完成**。`npm run test:live:world` 在启动阶段失败，原因是 Minecraft 局域网端口 63320 已关闭（`nc` 确认端口不可连接），bot 无法进入游戏；与代码无关。另确认服务器在连接被拒绝时继续运行、不会退出。等待用户重新开放局域网并提供端口。
+- 备注：连接被拒绝时日志会出现一条 “Unhandled rejection: ECONNREFUSED”，M1 之前即存在，不影响运行，暂不处理。
 

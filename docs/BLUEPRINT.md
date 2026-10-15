@@ -10,7 +10,7 @@
 |---|---|
 | 设计版本 | v0.3（2026-10-16）：按用户对未决问题的答复修订，变更见 docs/PLAN.md |
 | 目标版本 | Autopilot v1：阶段一到四（任务与行为、反射与策略、决策模型、情景测试） |
-| 当前阶段 | 规划与说明性骨架；实现尚未开始 |
+| 当前阶段 | M1 已实现（单元测试通过，实机验收待完成）；M2～M6 仍为说明性骨架 |
 | 状态标记 | **已确认**：用户已同意，或已用一手资料/实机核实。**暂定**：设计者提出的合理默认值，可在实现时调整，需记录。**待验证**：依赖实测结果，验证前不能当作事实 |
 | 与现有代码的关系 | 现有代码保持可构建、可测试。新增文件实现前只存在于 `blueprint/` 镜像目录；对现有文件的改动在「F2. 现有文件的计划改动」中描述，不创建占位副本 |
 
@@ -256,6 +256,7 @@ src/main.ts（现有，改动）--创建并注册--> src/autopilot/autopilot.ts�
 │   │   ├── reflex-engine.ts          新增：反射调度
 │   │   ├── reflexes.ts               新增：5 个反射定义
 │   │   └── behaviors/
+│   │       ├── target.ts             新增（M1 实现时加入）：行为共用的目标参数与解析
 │   │       ├── follow.ts             新增
 │   │       ├── flee.ts               新增
 │   │       ├── guard.ts              新增
@@ -315,14 +316,14 @@ src/main.ts（现有，改动）--创建并注册--> src/autopilot/autopilot.ts�
 
 ## F. 文件契约（新增文件）
 
-每个新增的代码、测试和脚本文件一个条目。`blueprint/` 下对应占位文件中的说明是本节的副本，两者必须保持一致。
+每个新增的代码、测试和脚本文件一个条目。状态为 placeholder 的文件在 `blueprint/` 下有占位副本，两者必须保持一致；已实现的文件不再有占位副本，契约继续保留在本节。
 
 
 ### F1-a 组装、仲裁与任务
 
 ### F-001 · `src/autopilot/autopilot.ts`
 
-- **模块**：M-WIRE 组装　**里程碑**：M1（M3、M4 扩展）　**状态**：placeholder　**设计**：已确定：模块划分已获同意；回调名称暂定
+- **模块**：M-WIRE 组装　**里程碑**：M1（M3、M4 扩展）　**状态**：implemented-unverified（M1 范围：仲裁器、任务、绑定与解绑；策略重置、反射与决策在 M3、M4 加入）　**设计**：已确定：模块划分已获同意；回调名称暂定
 - **职责**：为当前 bot 创建并连接动作仲裁器、任务管理器、反射引擎、策略存储和决策钩子；bot 就绪时绑定，断线时解绑；bot 每次重新进入游戏（首次连接或断线后重连，例如重启游戏后）时把策略恢复为默认值；向工具层提供这些服务的访问入口。
 - **不负责**：不包含任何行为、反射或决策规则；不注册 MCP 工具（由 src/main.ts 注册）；不读取环境变量中的 API key（由 src/decisions/openrouter-client.ts 读取）。
 - **输入**：来源：src/main.ts（创建时传入）；src/bot-connection.ts 的新回调 onBotReady、onBotEnd、onDamage、onChatMessage、onWhisper（经 src/main.ts 转接）。 内容：当前 bot 实例、现有 EventStore 与 WaypointStore、启动配置（决策模型 id）。聊天命令授权名单不属于启动配置，只能由 LLM 通过 set-policy 设置。 限制：同一时刻只绑定一个 bot；bot 未就绪时，工具层访问服务应得到“bot 未就绪”的明确错误，而不是空对象。
@@ -336,7 +337,7 @@ src/main.ts（现有，改动）--创建并注册--> src/autopilot/autopilot.ts�
 
 ### F-002 · `src/autopilot/action-arbiter.ts`
 
-- **模块**：M-ARB 动作仲裁　**里程碑**：M1　**状态**：placeholder　**设计**：已确定：唯一控制权与抢占/恢复；优先级数值暂定
+- **模块**：M-ARB 动作仲裁　**里程碑**：M1　**状态**：implemented-unverified　**设计**：已确定：唯一控制权与抢占/恢复；优先级数值暂定
 - **职责**：维护 bot 身体（移动、视角、攻击、使用手中物品）的唯一控制权：按优先级（关键反射 30、手动 20、日常反射 15、任务 10）授予、抢占、暂停、恢复和释放租约。被反射抢占的持有者在反射结束后自动恢复；被手动命令抢占的持有者被挂起且不自动恢复，需要重新申请。
 - **不负责**：不知道持有者在做什么；不决定做什么；不写事件（由持有者写）。只在抢占时做兜底停止，不替持有者执行动作。
 - **输入**：来源：src/autopilot/reflex-engine.ts（关键反射级与日常反射级请求）、src/tool-factory.ts（手动级请求）、src/autopilot/task-manager.ts（任务级请求，包括 resume-task 时的重新申请）。 内容：请求者名称、优先级、暂停回调（附带抢占者类型：反射或手动）、恢复回调、可选的等待超时（手动级遇到关键反射时最长等待 10 秒）。 限制：优先级只能是四个固定值之一；同一请求者不能同时持有两个租约。
@@ -350,7 +351,7 @@ src/main.ts（现有，改动）--创建并注册--> src/autopilot/autopilot.ts�
 
 ### F-003 · `src/autopilot/task-manager.ts`
 
-- **模块**：M-TASK 任务与行为　**里程碑**：M1　**状态**：placeholder　**设计**：已确定：生命周期与事件；进度节流间隔与历史条数暂定
+- **模块**：M-TASK 任务与行为　**里程碑**：M1　**状态**：implemented-unverified　**设计**：已确定：生命周期与事件；进度节流间隔与历史条数暂定
 - **职责**：管理后台任务的生命周期：查找已注册行为、校验参数、启动、记录进度与当前步骤、响应仲裁器的暂停与恢复、恢复被手动命令挂起的任务、取消和结束；提供当前任务的快照，供手动命令报告中断前的状态；为每次状态变化写事件；保存当前任务与最近 20 个已结束任务。同时定义行为必须遵守的契约：参数模式、运行上下文、进度与当前步骤的报告方式、取消信号与暂停等待。
 - **不负责**：不实现具体行为（在 src/autopilot/behaviors/）；不决定何时启动任务（由 LLM 或决策钩子决定）；不做威胁检测。
 - **输入**：来源：src/tools/task-tools.ts（启动、恢复、取消、查询）；src/decisions/decision-hooks.ts、src/tools/follow-tools.ts、src/tools/gathering-tools.ts、src/tools/position-tools.ts（启动、取消）；src/tool-factory.ts（读取快照）；src/autopilot/action-arbiter.ts（暂停与恢复回调，附抢占者类型）。 内容：行为名、行为参数对象、是否替换当前任务（默认替换）、来源标记（llm / chat / tool）。 限制：同一时刻至多一个活动任务；参数必须通过该行为自己的 zod 模式；行为名必须已注册。
@@ -367,7 +368,7 @@ src/main.ts（现有，改动）--创建并注册--> src/autopilot/autopilot.ts�
 
 ### F-004 · `src/autopilot/behaviors/follow.ts`
 
-- **模块**：M-TASK 任务与行为　**里程碑**：M1　**状态**：placeholder　**设计**：已确定；“目标丢失”判定时长暂定 10 秒
+- **模块**：M-TASK 任务与行为　**里程碑**：M1　**状态**：implemented-unverified　**设计**：已确定；“目标丢失”判定时长暂定 10 秒
 - **职责**：持续跟随一个实体（玩家名、实体 id 或类型），保持在指定距离内，直到被取消。现有 follow-entity 工具改由本行为实现。
 - **不负责**：不攻击；不处理威胁（由反射负责）；不决定跟随谁。
 - **输入**：来源：src/autopilot/task-manager.ts（运行时传入参数、上下文和取消信号）。 内容：目标（entityId、玩家名或实体类型之一）、保持距离（默认 3，范围 1–16）、搜索距离（默认 32）。 限制：目标在启动时必须可见，否则启动失败；保持距离为正数。
@@ -381,7 +382,7 @@ src/main.ts（现有，改动）--创建并注册--> src/autopilot/autopilot.ts�
 
 ### F-005 · `src/autopilot/behaviors/flee.ts`
 
-- **模块**：M-TASK 任务与行为　**里程碑**：M1　**状态**：placeholder　**设计**：已确定；“保持 2 秒视为完成”暂定
+- **模块**：M-TASK 任务与行为　**里程碑**：M1　**状态**：implemented-unverified　**设计**：已确定；“保持 2 秒视为完成”暂定
 - **职责**：远离一个实体直到达到指定距离并保持 2 秒后完成。现有 flee-from 工具改由本行为实现。
 - **不负责**：不攻击；不选择逃离目标。
 - **输入**：来源：src/autopilot/task-manager.ts。 内容：目标（entityId、玩家名或实体类型之一）、逃离距离（默认 16，范围 2–64）。 限制：目标在启动时必须可见。
@@ -448,6 +449,20 @@ src/main.ts（现有，改动）--创建并注册--> src/autopilot/autopilot.ts�
 - **关键约束**：暂停时停止移动；睡眠中被取消则起床。
 - **失败处理**：路标不存在或在其他维度 → 启动失败；不可达或超时 → 失败。
 - **验收**：正常：白天，路标 home 在 20 格外 → 到达后完成“arrived (daytime)”。 边界或失败：夜晚，路标旁有床 → 完成“arrived and sleeping”；路标不存在 → 失败并说明。 位置：tests/movement-behaviors.test.ts（计划，未执行）
+
+### F-034 · `src/autopilot/behaviors/target.ts`
+
+- **模块**：M-TASK 任务与行为　**里程碑**：M1　**状态**：implemented-unverified　**设计**：实现时新增：follow 与 flee 共用的目标参数与解析，M2 的行为也会复用
+- **职责**：提供行为共用的目标参数模式（entityId、target、maxDistance）、目标解析、参数摘要与目标显示名。
+- **不负责**：不实现任何行为流程；不判断目标是否可以攻击（由 src/autopilot/threats.ts 负责）。
+- **输入**：来源：src/autopilot/behaviors/follow.ts、src/autopilot/behaviors/flee.ts（导入）。 内容：行为参数中的 entityId、target（玩家名或实体类型）与 maxDistance；bot 的实体表。 限制：entityId 与 target 至少提供一个；maxDistance 为正数，默认 32。
+- **输出**：去向：导入它的行为文件。 内容：zod 参数片段与校验规则；解析结果（实体或错误文字）；参数摘要；“名字 (id N)”形式的显示名。 成功含义：同一参数在不同行为中解析出相同的目标。
+- **使用方**：src/autopilot/behaviors/follow.ts、src/autopilot/behaviors/flee.ts（导入）；tests/movement-behaviors.test.ts（经行为间接验证）。
+- **依赖**：src/tools/entity-utils.ts（现有，resolveTargetEntity、entityLabel）。 外部：zod。
+- **状态与副作用**：状态：无。 副作用：无。
+- **关键约束**：解析规则与现有 follow-entity / flee-from 工具一致。
+- **失败处理**：找不到目标时返回错误文字，由行为的 prepare 转成启动失败。
+- **验收**：正常：target: "Steve" 解析为可见的玩家 Steve。 边界或失败：既没有 entityId 也没有 target → 校验错误“Provide entityId or target”；目标不可见 → “No Steve found …”。 位置：tests/movement-behaviors.test.ts（计划，未执行）
 
 
 ### F1-c 威胁、战斗与反射
@@ -558,7 +573,7 @@ src/main.ts（现有，改动）--创建并注册--> src/autopilot/autopilot.ts�
 
 ### F-017 · `src/tools/task-tools.ts`
 
-- **模块**：M-MCP 工具接口　**里程碑**：M1　**状态**：placeholder　**设计**：已确定：工具名与参数；输出措辞暂定
+- **模块**：M-MCP 工具接口　**里程碑**：M1　**状态**：implemented-unverified　**设计**：已确定：工具名与参数；输出措辞暂定
 - **职责**：注册 4 个 MCP 工具：start-task（behavior、params、replace）、list-tasks（当前任务与最近的已结束任务）、resume-task（id，默认当前暂停的任务，用于恢复被手动命令挂起的任务）、cancel-task（id，默认当前任务）。
 - **不负责**：不含任务逻辑；不校验行为参数的细节（由任务管理器按行为模式校验）。
 - **输入**：来源：LLM（经 MCP）。 内容：start-task：行为名（6 种之一）、参数对象、是否替换（默认 true）。resume-task、cancel-task：可选任务 id。 限制：行为名用 zod 枚举限制；参数对象原样交给任务管理器。
@@ -589,7 +604,7 @@ src/main.ts（现有，改动）--创建并注册--> src/autopilot/autopilot.ts�
 
 ### F-019 · `tests/autopilot.test.ts`
 
-- **模块**：M-VER 验证　**里程碑**：M1　**状态**：placeholder　**设计**：已确定：覆盖范围；具体样例随实现补充，不能照抄实现行为
+- **模块**：M-VER 验证　**里程碑**：M1　**状态**：implemented-unverified（M1 范围）　**设计**：已确定：覆盖范围；具体样例随实现补充，不能照抄实现行为
 - **职责**：验证 src/autopilot/autopilot.ts 的契约行为。
 - **不负责**：不连接真实 Minecraft 服务器或 OpenRouter；不测试其他模块的内部细节。
 - **输入**：来源：ava 测试运行器（npm test，仅运行 tests/**/*.test.ts）。 内容：模拟的 bot、实体、方块、事件存储与时钟（沿用现有 tests/_helpers.ts、tests/_world.ts 的做法）。 限制：使用 sinon 假时钟控制时间，避免依赖真实等待；不发网络请求。
@@ -603,7 +618,7 @@ src/main.ts（现有，改动）--创建并注册--> src/autopilot/autopilot.ts�
 
 ### F-020 · `tests/action-arbiter.test.ts`
 
-- **模块**：M-VER 验证　**里程碑**：M1　**状态**：placeholder　**设计**：已确定：覆盖范围；具体样例随实现补充，不能照抄实现行为
+- **模块**：M-VER 验证　**里程碑**：M1　**状态**：implemented-unverified　**设计**：已确定：覆盖范围；具体样例随实现补充，不能照抄实现行为
 - **职责**：验证 src/autopilot/action-arbiter.ts 的契约行为。
 - **不负责**：不连接真实 Minecraft 服务器或 OpenRouter；不测试其他模块的内部细节。
 - **输入**：来源：ava 测试运行器（npm test，仅运行 tests/**/*.test.ts）。 内容：模拟的 bot、实体、方块、事件存储与时钟（沿用现有 tests/_helpers.ts、tests/_world.ts 的做法）。 限制：使用 sinon 假时钟控制时间，避免依赖真实等待；不发网络请求。
@@ -617,7 +632,7 @@ src/main.ts（现有，改动）--创建并注册--> src/autopilot/autopilot.ts�
 
 ### F-021 · `tests/task-manager.test.ts`
 
-- **模块**：M-VER 验证　**里程碑**：M1　**状态**：placeholder　**设计**：已确定：覆盖范围；具体样例随实现补充，不能照抄实现行为
+- **模块**：M-VER 验证　**里程碑**：M1　**状态**：implemented-unverified　**设计**：已确定：覆盖范围；具体样例随实现补充，不能照抄实现行为
 - **职责**：验证 src/autopilot/task-manager.ts 的契约行为。
 - **不负责**：不连接真实 Minecraft 服务器或 OpenRouter；不测试其他模块的内部细节。
 - **输入**：来源：ava 测试运行器（npm test，仅运行 tests/**/*.test.ts）。 内容：模拟的 bot、实体、方块、事件存储与时钟（沿用现有 tests/_helpers.ts、tests/_world.ts 的做法）。 限制：使用 sinon 假时钟控制时间，避免依赖真实等待；不发网络请求。
@@ -687,7 +702,7 @@ src/main.ts（现有，改动）--创建并注册--> src/autopilot/autopilot.ts�
 
 ### F-026 · `tests/movement-behaviors.test.ts`
 
-- **模块**：M-VER 验证　**里程碑**：M1（return-home 在 M2）　**状态**：placeholder　**设计**：已确定：覆盖范围；具体样例随实现补充，不能照抄实现行为
+- **模块**：M-VER 验证　**里程碑**：M1（return-home 在 M2）　**状态**：implemented-unverified（follow / flee 部分；return-home 在 M2 补充）　**设计**：已确定：覆盖范围；具体样例随实现补充，不能照抄实现行为
 - **职责**：验证 src/autopilot/behaviors/follow.ts、flee.ts、return-home.ts 的契约行为。
 - **不负责**：不连接真实 Minecraft 服务器或 OpenRouter；不测试其他模块的内部细节。
 - **输入**：来源：ava 测试运行器（npm test，仅运行 tests/**/*.test.ts）。 内容：模拟的 bot、实体、方块、事件存储与时钟（沿用现有 tests/_helpers.ts、tests/_world.ts 的做法）。 限制：使用 sinon 假时钟控制时间，避免依赖真实等待；不发网络请求。
@@ -743,7 +758,7 @@ src/main.ts（现有，改动）--创建并注册--> src/autopilot/autopilot.ts�
 
 ### F-030 · `tests/task-tools.test.ts`
 
-- **模块**：M-VER 验证　**里程碑**：M1　**状态**：placeholder　**设计**：已确定：覆盖范围；具体样例随实现补充，不能照抄实现行为
+- **模块**：M-VER 验证　**里程碑**：M1　**状态**：implemented-unverified　**设计**：已确定：覆盖范围；具体样例随实现补充，不能照抄实现行为
 - **职责**：验证 src/tools/task-tools.ts 的契约行为。
 - **不负责**：不连接真实 Minecraft 服务器或 OpenRouter；不测试其他模块的内部细节。
 - **输入**：来源：ava 测试运行器（npm test，仅运行 tests/**/*.test.ts）。 内容：模拟的 bot、实体、方块、事件存储与时钟（沿用现有 tests/_helpers.ts、tests/_world.ts 的做法）。 限制：使用 sinon 假时钟控制时间，避免依赖真实等待；不发网络请求。
@@ -803,13 +818,13 @@ src/main.ts（现有，改动）--创建并注册--> src/autopilot/autopilot.ts�
 
 | 条目 | 文件 | 里程碑 | 计划改动 | 不变的部分 | 验证 |
 |---|---|---|---|---|---|
-| E-001 | `src/tool-factory.ts` | M1 | `registerTool` 增加“身体类”选项：执行前以手动优先级向仲裁器申请租约（立即抢占任务与日常反射，遇到关键反射时等待最长 10 秒），结束后释放；如果抢占了任务或日常反射，在工具结果末尾附上中断报告（被打断任务的快照，或被打断的反射名称，以及 resume-task / cancel-task 的用法）；等待过关键反射时说明等待了哪个反射多久；超时返回 “Busy: <持有者>” 错误。身体类工具：move-to-position、move-in-direction、look-at、jump、fly-to、dig-block、place-block、activate-block、activate-entity、attack-entity、mount-entity、dismount、sleep、consume、craft-item、smelt-item、container-deposit、container-withdraw、read-container、clear-region、fill-region、dig-tunnel、goto-waypoint | 连接检查、参数校验、错误包装、只读工具的行为 | 现有 `tests/tool-factory.test.ts`；`tests/task-tools.test.ts` 中的租约场景 |
-| E-002 | `src/tools/follow-tools.ts` | M1 | follow-entity、flee-from 改为通过任务管理器启动 follow / flee 任务（替换当前任务），立即返回并在文字中附上任务 id | 工具名、参数、返回文字的开头（“Following …” / “Fleeing from …”） | 现有 `tests/interaction-tools.test.ts` 中的 follow/flee 场景（按新实现调整断言，不改变对外语义） |
-| E-003 | `src/tools/position-tools.ts` | M1 | stop-pathfinding 同时取消当前任务（原因 “stopped by stop-pathfinding”）；移动类工具标记为身体类 | stop-pathfinding 的停止语义与现有修复（清除 pathfinder 标志） | 现有 `tests/position-tools.test.ts`、`tests/new-tools.test.ts` |
+| E-001 | `src/tool-factory.ts` | M1（已实现） | 实现方式：在 `src/tool-factory.ts` 中集中维护身体类工具名单 `BODY_TOOLS`（也可用注册选项 `body` 覆盖），而不是在各工具文件里逐个标记；名单在下列工具之外还包含 equip-item（切换手中物品，符合 G1 的“身体”定义），以及 M2 改为任务之前的 collect-block。`registerTool` 增加“身体类”选项：执行前以手动优先级向仲裁器申请租约（立即抢占任务与日常反射，遇到关键反射时等待最长 10 秒），结束后释放；如果抢占了任务或日常反射，在工具结果末尾附上中断报告（被打断任务的快照，或被打断的反射名称，以及 resume-task / cancel-task 的用法）；等待过关键反射时说明等待了哪个反射多久；超时返回 “Busy: <持有者>” 错误。身体类工具：move-to-position、move-in-direction、look-at、jump、fly-to、dig-block、place-block、activate-block、activate-entity、attack-entity、mount-entity、dismount、sleep、consume、craft-item、smelt-item、container-deposit、container-withdraw、read-container、clear-region、fill-region、dig-tunnel、goto-waypoint | 连接检查、参数校验、错误包装、只读工具的行为 | 现有 `tests/tool-factory.test.ts`；`tests/task-tools.test.ts` 中的租约场景 |
+| E-002 | `src/tools/follow-tools.ts` | M1（已实现） | follow-entity、flee-from 改为通过任务管理器启动 follow / flee 任务（替换当前任务），立即返回并在文字中附上任务 id | 工具名、参数、返回文字的开头（“Following …” / “Fleeing from …”） | 现有 `tests/interaction-tools.test.ts` 中的 follow/flee 场景（按新实现调整断言，不改变对外语义） |
+| E-003 | `src/tools/position-tools.ts` | M1（已实现） | stop-pathfinding 同时取消当前任务（原因 “stopped by stop-pathfinding”）；移动类工具标记为身体类 | stop-pathfinding 的停止语义与现有修复（清除 pathfinder 标志） | 现有 `tests/position-tools.test.ts`、`tests/new-tools.test.ts` |
 | E-004 | `src/tools/gathering-tools.ts` | M2 | collect-block 改为启动 gather 任务并等待其结束，返回与现在相同格式的文字；采集循环迁移到 `src/autopilot/behaviors/gather.ts` | 工具名、参数、返回文字格式、安全规则 | 现有 `tests/gathering-tools.test.ts` 全部通过 |
-| E-005 | `src/bot-connection.ts` | M1（onDamage 在 M3） | 增加回调：onBotReady(bot)、onBotEnd()、onDamage({attackerId, type, time})（结构化受伤信息，复用现有伤害事件解析） | 现有事件、系统消息、声音、伤害文字描述 | 现有 `tests/perception*.test.ts`；`tests/autopilot.test.ts` |
+| E-005 | `src/bot-connection.ts` | M1（onBotReady、onBotEnd 已实现；onDamage 在 M3） | 增加回调：onBotReady(bot)、onBotEnd()、onDamage({attackerId, type, time})（结构化受伤信息，复用现有伤害事件解析） | 现有事件、系统消息、声音、伤害文字描述 | 现有 `tests/perception*.test.ts`；`tests/autopilot.test.ts` |
 | E-006 | `src/config.ts` | M4 | 新增命令行参数 `--decision-model <id>`。聊天命令授权不提供启动参数（用户决定，只能由 LLM 设置）。API key 不经过此文件 | 现有参数 | 现有 `tests/config.test.ts` 补充新参数场景 |
-| E-007 | `src/main.ts` | M1（M3、M4 扩展） | 创建 Autopilot，连接 BotConnection 回调，把服务访问函数传给工具注册函数；注册 task-tools、policy-tools | 现有工具注册与启动流程 | 实机：`npm run test:live` 显示工具总数从 54 增加到 61 |
+| E-007 | `src/main.ts` | M1（已实现；M3、M4 扩展） | 创建 Autopilot，连接 BotConnection 回调，把服务访问函数传给工具注册函数；注册 task-tools、policy-tools | 现有工具注册与启动流程 | 实机：`npm run test:live` 显示工具总数从 54 增加到 61 |
 | E-008 | `package.json` | 规划阶段（已完成）、M6 | 规划阶段：ava `files` 限定为 `tests/**/*.test.ts`，防止 `blueprint/` 中的占位文件被当作测试运行。M6：增加 `test:scenarios` 脚本 | 其他脚本与依赖 | 规划阶段：`npm test` 仍为 273 个测试通过（已执行） |
 | E-009 | `scripts/test-live-world.mjs` | M1～M4、M6 | 覆盖 7 个新工具（start-task、list-tasks、resume-task、cancel-task、get-policy、set-policy、list-decision-models），以及“任务中调用移动工具 → 中断报告 → resume-task”流程；M6 改为使用 `scripts/lib/live-arena.mjs` | 已有的全部检查步骤与防护 | 实机连续两轮全部通过 |
 | E-010 | `README.md` | 规划阶段（已完成）、M6 | 规划阶段：增加一小节说明 Autopilot 处于设计阶段并链接本蓝图。M6：替换为实际使用说明（任务、策略、决策模型的隐私与费用说明） | 现有内容 | 人工阅读 |

@@ -158,3 +158,14 @@ export async function approachEntity(bot: Bot, entity: BotEntity, reach: number)
   const { x, y, z } = entity.position;
   await bot.pathfinder.goto(new goals.GoalNear(x, y, z, Math.min(2, reach)));
 }
+
+/** The live entity object for a previously seen entity (players are also matched by name), or null if it is gone. */
+export function refreshEntity(bot: Bot, entity: BotEntity): BotEntity | null {
+  const byId = bot.entities?.[entity.id];
+  if (byId && byId.isValid !== false) return byId;
+  if (entity.username) {
+    const player = bot.players?.[entity.username]?.entity;
+    if (player && player.isValid !== false) return player;
+  }
+  return null;
+}

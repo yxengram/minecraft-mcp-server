@@ -27,6 +27,8 @@ import { registerRegionTools } from './tools/region-tools.js';
 import { registerGatheringTools } from './tools/gathering-tools.js';
 import { registerVisionTools } from './tools/vision-tools.js';
 import { WaypointStore, defaultWaypointFile } from './waypoint-store.js';
+import { Autopilot } from './autopilot/autopilot.js';
+import { registerTaskTools } from './tools/task-tools.js';
 
 setupStdioFiltering();
 
@@ -42,6 +44,7 @@ async function main() {
   const config = parseConfig();
   const messageStore = new MessageStore();
   const eventStore = new EventStore();
+  const autopilot = new Autopilot({ events: eventStore, log });
 
   const connection = new BotConnection(
     config,
@@ -56,7 +59,9 @@ async function main() {
         if (messageStore.addMessage('', text, kind)) {
           eventStore.addEvent(kind, text);
         }
-      }
+      },
+      onBotReady: bot => autopilot.bind(bot),
+      onBotEnd: () => autopilot.unbind('disconnected')
     }
   );
 
@@ -69,8 +74,10 @@ async function main() {
 
   const factory = new ToolFactory(server, connection);
   const getBot = () => connection.getBot()!;
+  const getAutopilot = () => autopilot;
+  factory.setAutopilot(getAutopilot);
 
-  registerPositionTools(factory, getBot);
+  registerPositionTools(factory, getBot, getAutopilot);
   registerInventoryTools(factory, getBot);
   registerBlockTools(factory, getBot);
   registerEntityTools(factory, getBot);
@@ -82,7 +89,8 @@ async function main() {
   registerEventTools(factory, eventStore, getBot);
   registerContainerTools(factory, getBot);
   registerInteractionTools(factory, getBot);
-  registerFollowTools(factory, getBot);
+  registerFollowTools(factory, getBot, getAutopilot);
+  registerTaskTools(factory, getAutopilot);
   registerWaypointTools(factory, getBot, new WaypointStore(config.waypointFile ?? defaultWaypointFile(), config.host));
   registerRegionTools(factory, getBot);
   registerGatheringTools(factory, getBot);

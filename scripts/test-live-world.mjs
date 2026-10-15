@@ -311,6 +311,31 @@ try {
     await call('move-to-position', { x: cx, y: y0, z: cz, range: 0, timeoutMs: 20000 });
   });
 
+  await step('tasks: start, interrupt with a manual command, resume, cancel', async () => {
+    const started = await call('start-task', { behavior: 'follow', params: { target: HELPER_NAME, range: 2 } });
+    expectIncludes(started, 'Started task', 'start-task');
+    const id = started.match(/task (t\d+)/)[1];
+    await waitFor(async () => (await distanceTo(HELPER_NAME)) <= 3.5, 'the follow task to reach the helper', 15000);
+    expectIncludes(await call('list-tasks'), `${id} follow [running]`, 'list-tasks running');
+
+    const moved = await call('move-to-position', { x: cx + 4, y: y0, z: cz + 4, range: 0, timeoutMs: 20000 });
+    expectIncludes(moved, `Interrupted before this command: task ${id} follow`, 'interruption report');
+    expectIncludes(moved, `resume-task ${id}`, 'interruption report advice');
+    expectIncludes(await call('list-tasks'), `${id} follow [paused]`, 'list-tasks paused');
+    await sleep(1500);
+    expect((await distanceTo(HELPER_NAME)) > 6, 'a manually paused task must not keep following');
+
+    expectIncludes(await call('resume-task', { id }), `Resumed task ${id}`, 'resume-task');
+    await waitFor(async () => (await distanceTo(HELPER_NAME)) <= 3.5, 'the resumed task to reach the helper again', 15000);
+    expectIncludes(await call('cancel-task', { id }), `Cancelled task ${id}`, 'cancel-task');
+
+    const events = await call('get-events', { since: eventCursor, types: ['task_started', 'task_paused', 'task_resumed', 'task_cancelled'], limit: 50 });
+    for (const type of ['task_started', 'task_paused', 'task_resumed', 'task_cancelled']) {
+      expectIncludes(events, `[${type}] ${id} follow`, `${type} event`);
+    }
+    await call('move-to-position', { x: cx, y: y0, z: cz, range: 0, timeoutMs: 20000 });
+  });
+
   await step('inventory', async () => {
     await cmd('/give @s golden_apple 1');
     await cmd('/give @s dirt 16');
