@@ -5,6 +5,7 @@ const { goals } = pathfinderPkg;
 import { Vec3 } from 'vec3';
 import { ToolFactory } from '../tool-factory.js';
 import { coerceCoordinates } from './coordinate-utils.js';
+import { stopPathfinder } from './movement-utils.js';
 
 type Direction = 'forward' | 'back' | 'left' | 'right';
 
@@ -72,7 +73,7 @@ export function registerPositionTools(factory: ToolFactory, getBot: () => minefl
           clearTimeout(timeoutId);
         }
         if (timedOut) {
-          bot.pathfinder.stop();
+          stopPathfinder(bot);
           gotoPromise.catch(() => {});
         }
       }
@@ -124,6 +125,18 @@ export function registerPositionTools(factory: ToolFactory, getBot: () => minefl
           resolve(factory.createResponse(`Moved ${direction} for ${duration}ms`));
         }, duration);
       });
+    }
+  );
+
+  factory.registerTool(
+    "stop-pathfinding",
+    "Stop the bot's current movement (pathfinding and manual movement)",
+    {},
+    async () => {
+      const bot = getBot();
+      stopPathfinder(bot);
+      bot.clearControlStates();
+      return factory.createResponse("Stopped all movement");
     }
   );
 }

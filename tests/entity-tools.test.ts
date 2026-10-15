@@ -189,3 +189,20 @@ test('find-entity searches any entity when type not specified', async (t) => {
 
   t.true(result.content[0].text.includes('cow'));
 });
+
+test('find-entity shows the username for players instead of the entity name', async (t) => {
+  const mockServer = { tool: sinon.stub() } as unknown as McpServer;
+  const mockConnection = { checkConnectionAndReconnect: sinon.stub().resolves({ connected: true }) } as unknown as BotConnection;
+  const factory = new ToolFactory(mockServer, mockConnection);
+  const mockBot = {
+    entity: { position: new Vec3(0, 64, 0) },
+    nearestEntity: sinon.stub().returns({ name: 'player', username: 'Steve', type: 'player', position: new Vec3(3, 64, 0) })
+  } as unknown as mineflayer.Bot;
+
+  registerEntityTools(factory, () => mockBot);
+  const executor = (mockServer.tool as sinon.SinonStub).getCalls().find(call => call.args[0] === 'find-entity')!.args[3];
+
+  const result = await executor({ type: 'player' });
+
+  t.true(result.content[0].text.startsWith('Found Steve at position'));
+});

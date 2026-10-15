@@ -5,6 +5,7 @@ export interface ServerConfig {
   host: string;
   port: number;
   username: string;
+  waypointFile?: string;
 }
 
 export function parseConfig(): ServerConfig {
@@ -23,6 +24,10 @@ export function parseConfig(): ServerConfig {
       type: 'string',
       description: 'Bot username',
       default: 'LLMBot'
+    })
+    .option('waypoint-file', {
+      type: 'string',
+      description: 'JSON file used to store waypoints (default: ~/.minecraft-mcp-server/waypoints.json)'
     })
     .help()
     .alias('help', 'h')

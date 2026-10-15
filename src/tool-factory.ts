@@ -2,8 +2,12 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z, ZodError, ZodRawShape, ZodType } from "zod";
 import { BotConnection } from './bot-connection.js';
 
+type McpContent =
+  | { type: "text"; text: string }
+  | { type: "image"; data: string; mimeType: string };
+
 type McpResponse = {
-  content: { type: "text"; text: string }[];
+  content: McpContent[];
   isError?: boolean;
   [key: string]: unknown;
 };
@@ -45,6 +49,15 @@ export class ToolFactory {
   createResponse(text: string): McpResponse {
     return {
       content: [{ type: "text", text }]
+    };
+  }
+
+  createImageResponse(text: string, image: Buffer, mimeType = "image/png"): McpResponse {
+    return {
+      content: [
+        { type: "image", data: image.toString('base64'), mimeType },
+        { type: "text", text }
+      ]
     };
   }
 

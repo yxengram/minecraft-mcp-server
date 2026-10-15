@@ -460,6 +460,10 @@ export function registerCraftingTools(factory: ToolFactory, getBot: () => minefl
         }
 
         if (!craftedThisAttempt && attempt === 0) {
+          if (lastError) {
+            const hint = /crafting ?table/i.test(lastError) ? ' Place a crafting table nearby and try again.' : '';
+            return factory.createErrorResponse(`Failed to craft ${outputItem}: ${lastError}.${hint}`);
+          }
           if (bestCannotCraft) {
             return factory.createErrorResponse(bestCannotCraft.message);
           }

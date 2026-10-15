@@ -123,7 +123,8 @@ test.serial('move-to-position returns timeout error and stops pathfinder', async
   const mockBot = {
     pathfinder: {
       goto: sinon.stub().returns(new Promise(() => {})),
-      stop: sinon.stub()
+      stop: sinon.stub(),
+      setGoal: sinon.stub()
     }
   } as Partial<mineflayer.Bot>;
   const getBot = () => mockBot as mineflayer.Bot;

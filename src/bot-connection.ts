@@ -16,6 +16,7 @@ interface BotConfig {
 interface ConnectionCallbacks {
   onLog: (level: string, message: string) => void;
   onChatMessage: (username: string, message: string) => void;
+  onEvent?: (type: string, message: string) => void;
 }
 
 export class BotConnection {
@@ -82,7 +83,62 @@ export class BotConnection {
       this.callbacks.onChatMessage(username, message);
     });
 
+    bot.on('whisper', (username, message) => {
+      if (username === bot.username) return;
+      this.callbacks.onEvent?.('whisper', `${username}: ${message}`);
+    });
+
+    bot.on('spawn', () => {
+      const { x, y, z } = bot.entity.position;
+      this.callbacks.onEvent?.('spawn', `Bot spawned at (${Math.floor(x)}, ${Math.floor(y)}, ${Math.floor(z)})`);
+    });
+
+    bot.on('death', () => {
+      this.callbacks.onEvent?.('death', 'Bot died');
+    });
+
+    let lastHealth = bot.health;
+    bot.on('health', () => {
+      if (typeof lastHealth === 'number' && bot.health < lastHealth) {
+        this.callbacks.onEvent?.('damaged', `Health dropped from ${lastHealth} to ${bot.health}`);
+      }
+      lastHealth = bot.health;
+    });
+
+    bot.on('playerJoined', (player) => {
+      if (player.username === bot.username) return;
+      this.callbacks.onEvent?.('player_joined', `${player.username} joined the game`);
+    });
+
+    bot.on('playerLeft', (player) => {
+      if (player.username === bot.username) return;
+      this.callbacks.onEvent?.('player_left', `${player.username} left the game`);
+    });
+
+    bot.on('playerCollect', (collector, collected) => {
+      if (collector !== bot.entity) return;
+      try {
+        const item = collected.getDroppedItem();
+        if (item) {
+          this.callbacks.onEvent?.('item_picked_up', `Picked up ${item.count} ${item.name}`);
+        }
+      } catch {
+        // Item metadata may not be available yet; skip the event.
+      }
+    });
+
+    // mineflayer only updates bot.vehicle when the bot is listed as a passenger, so it never notices
+    // dismounting on protocols where the server answers with an empty passenger list.
+    bot._client.on('set_passengers', (packet: { entityId: number; passengers: number[] }) => {
+      const vehicle = (bot as unknown as { vehicle?: { id: number } | null }).vehicle;
+      if (vehicle && packet.entityId === vehicle.id && !packet.passengers.includes(bot.entity.id)) {
+        (bot as unknown as { vehicle: null }).vehicle = null;
+        bot.emit('dismount', vehicle as never);
+      }
+    });
+
     bot.on('kicked', (reason) => {
+      this.callbacks.onEvent?.('kicked', this.formatError(reason));
       this.callbacks.onLog('error', `Bot was kicked from server: ${this.formatError(reason)}`);
       this.state = 'disconnected';
       bot.quit();
@@ -104,6 +160,7 @@ export class BotConnection {
     });
 
     bot.on('end', (reason) => {
+      this.callbacks.onEvent?.('disconnected', this.formatError(reason));
       this.callbacks.onLog('info', `Bot disconnected: ${this.formatError(reason)}`);
 
       if (this.state === 'connected') {

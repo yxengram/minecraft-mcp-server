@@ -283,3 +283,25 @@ test('uses real minecraft-data recipes for version 1.21.8', async (t) => {
   const isValid = mcData.recipes && (Array.isArray(mcData.recipes) || typeof mcData.recipes === 'object');
   t.true(isValid);
 });
+
+test('craft-item reports the real failure when a craftable recipe throws', async (t) => {
+  const mockServer = { tool: sinon.stub() } as unknown as McpServer;
+  const mockConnection = { checkConnectionAndReconnect: sinon.stub().resolves({ connected: true }) } as unknown as BotConnection;
+  const factory = new ToolFactory(mockServer, mockConnection);
+
+  const mockBot = {
+    version: '1.21.8',
+    inventory: { items: () => [{ name: 'oak_planks', count: 8, slot: 0 }] },
+    craft: sinon.stub().rejects(new Error('Recipe requires craftingTable, but one was not supplied'))
+  } as unknown as mineflayer.Bot;
+
+  registerCraftingTools(factory, () => mockBot);
+  const craftItemCall = (mockServer.tool as sinon.SinonStub).getCalls().find(call => call.args[0] === 'craft-item');
+
+  const result = await craftItemCall!.args[3]({ outputItem: 'chest' });
+
+  t.true(result.isError);
+  t.true(result.content[0].text.includes('requires craftingTable'));
+  t.true(result.content[0].text.includes('Place a crafting table nearby'));
+  t.false(result.content[0].text.includes('cherry_planks'));
+});

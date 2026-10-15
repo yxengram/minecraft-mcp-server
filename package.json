@@ -22,7 +22,8 @@
     "test": "ava",
     "lint": "eslint \"{src,tests}/**/*.ts\"",
     "lint:fix": "eslint \"{src,tests}/**/*.ts\" --fix",
-    "test:live": "node scripts/test-live.mjs"
+    "test:live": "node scripts/test-live.mjs",
+    "test:live:world": "node scripts/test-live-world.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.27.1",

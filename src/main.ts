@@ -8,6 +8,7 @@ import { parseConfig } from './config.js';
 import { BotConnection } from './bot-connection.js';
 import { ToolFactory } from './tool-factory.js';
 import { MessageStore } from './message-store.js';
+import { EventStore } from './event-store.js';
 import { registerPositionTools } from './tools/position-tools.js';
 import { registerInventoryTools } from './tools/inventory-tools.js';
 import { registerBlockTools } from './tools/block-tools.js';
@@ -17,6 +18,15 @@ import { registerFlightTools } from './tools/flight-tools.js';
 import { registerGameStateTools } from './tools/gamestate-tools.js';
 import { registerCraftingTools } from './tools/crafting-tools.js';
 import { registerFurnaceTools } from './tools/furnace-tools.js';
+import { registerEventTools } from './tools/event-tools.js';
+import { registerContainerTools } from './tools/container-tools.js';
+import { registerInteractionTools } from './tools/interaction-tools.js';
+import { registerFollowTools } from './tools/follow-tools.js';
+import { registerWaypointTools } from './tools/waypoint-tools.js';
+import { registerRegionTools } from './tools/region-tools.js';
+import { registerGatheringTools } from './tools/gathering-tools.js';
+import { registerVisionTools } from './tools/vision-tools.js';
+import { WaypointStore, defaultWaypointFile } from './waypoint-store.js';
 
 setupStdioFiltering();
 
@@ -31,12 +41,17 @@ process.on('uncaughtException', (error) => {
 async function main() {
   const config = parseConfig();
   const messageStore = new MessageStore();
+  const eventStore = new EventStore();
 
   const connection = new BotConnection(
     config,
     {
       onLog: log,
-      onChatMessage: (username, message) => messageStore.addMessage(username, message)
+      onChatMessage: (username, message) => {
+        messageStore.addMessage(username, message);
+        eventStore.addEvent('chat', `${username}: ${message}`);
+      },
+      onEvent: (type, message) => eventStore.addEvent(type, message)
     }
   );
 
@@ -59,6 +74,14 @@ async function main() {
   registerGameStateTools(factory, getBot);
   registerCraftingTools(factory, getBot);
   registerFurnaceTools(factory, getBot);
+  registerEventTools(factory, eventStore);
+  registerContainerTools(factory, getBot);
+  registerInteractionTools(factory, getBot);
+  registerFollowTools(factory, getBot);
+  registerWaypointTools(factory, getBot, new WaypointStore(config.waypointFile ?? defaultWaypointFile(), config.host));
+  registerRegionTools(factory, getBot);
+  registerGatheringTools(factory, getBot);
+  registerVisionTools(factory, getBot);
 
   process.stdin.on('end', () => {
     connection.cleanup();

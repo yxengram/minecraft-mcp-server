@@ -71,6 +71,17 @@ try {
   }
   if (!block?.startsWith('Found ')) throw new Error('Nearby block data was not loaded');
   console.log(block);
+
+  const observation = await callTool('get-observation');
+  if (!observation.includes('Health:') || observation.includes('undefined')) {
+    throw new Error('get-observation returned unexpected output:\n' + observation);
+  }
+  console.log(observation.split('\n')[0]);
+  await callTool('list-entities');
+  await callTool('list-players');
+  const events = await callTool('get-events');
+  if (!events.includes('nextSince:')) throw new Error('get-events returned unexpected output');
+  console.log('Read-only tool checks passed');
   console.log('Live MCP compatibility test passed');
 } catch (error) {
   console.error(error);

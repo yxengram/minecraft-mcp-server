@@ -92,6 +92,9 @@ Once connected to a Minecraft server, Claude can use these commands:
 - `look-at` - Make the bot look at specific coordinates
 - `jump` - Make the bot jump
 - `move-in-direction` - Move in a specific direction for a duration
+- `stop-pathfinding` - Stop the current movement
+- `follow-entity` - Keep following a player or mob until `stop-pathfinding`
+- `flee-from` - Run away from an entity until a safe distance
 
 ### Flight
 - `fly-to` - Make the bot fly directly to specific coordinates
@@ -100,25 +103,62 @@ Once connected to a Minecraft server, Claude can use these commands:
 - `list-inventory` - List all items in the bot's inventory
 - `find-item` - Find a specific item in inventory
 - `equip-item` - Equip a specific item
+- `unequip-item` - Take off an equipped item
+- `consume` - Eat or drink an item
+- `toss-item` - Drop items on the ground
 
 ### Block Interaction
 - `place-block` - Place a block at specified coordinates
 - `dig-block` - Dig a block at specified coordinates
 - `get-block-info` - Get information about a block
 - `find-blocks` - Find one or more nearby blocks of a specific type
+- `collect-block` - Mine and pick up a number of blocks of one type
+- `clear-region` - Dig out a box between two corners (max 512 blocks)
+- `fill-region` - Fill empty spaces in a box with a block from the inventory (max 512 blocks)
+- `dig-tunnel` - Dig a straight horizontal tunnel
+- `activate-block` - Right-click a block (doors, buttons, levers)
+
+Digging tools pick the best tool in the inventory and skip blocks next to lava.
+
+### Containers
+- `read-container` - Look inside a chest, barrel, shulker box, hopper, dispenser or dropper
+- `container-deposit` - Put inventory items into a container
+- `container-withdraw` - Take items out of a container
 
 ### Furnace
 - `smelt-item` - Smelt items using a furnace-like block
 
 ### Entity Interaction
 - `find-entity` - Find the nearest entity of a specific type
+- `list-entities` - List nearby entities, nearest first
+- `list-players` - List players online on the server
+- `attack-entity` - Attack an entity within reach
+- `activate-entity` - Right-click an entity (villagers, animals)
+- `sleep` / `wake` - Sleep in a bed (at night or during thunderstorms) and get up
+- `mount-entity` / `dismount` - Ride and leave horses, boats and minecarts
+
+### Waypoints
+- `set-waypoint` - Save a named location (current position by default)
+- `list-waypoints` - List saved waypoints with distances
+- `delete-waypoint` - Delete a waypoint
+- `goto-waypoint` - Walk to a saved waypoint
+
+Waypoints are stored per server host in `~/.minecraft-mcp-server/waypoints.json`. Use `--waypoint-file <path>` to store them elsewhere, for example one file per world, since every LAN world is `localhost`.
 
 ### Communication
 - `send-chat` - Send a chat message in-game
 - `read-chat` - Get recent chat messages from players
 
+### Vision
+- `scan-area` - Describe the surrounding terrain in text: height and slope in each direction, surface blocks, cliffs, water and lava, notable blocks (ores, chests, beds, trees, spawners) and entities
+- `render-map` - Render a PNG map: a top-down view (north up) with the bot, its facing direction and entities marked, or a vertical cross-section through the bot
+
+Both tools look down from the sky by default and switch to the bot's own level when it is under a roof, so caves and buildings show walkable floor and walls. `scan-area` only lists blocks exposed to air or water unless `xray` is set. `render-map` returns an image, so it needs an MCP client and model that support images. Both only see chunks the server has sent to the bot.
+
 ### Game State
 - `detect-gamemode` - Detect the gamemode on game
+- `get-observation` - One-call snapshot of vitals, position, time, weather, equipment, inventory and nearby entities
+- `get-events` - Read recent game events (chat, death, damage, item pickups, joins/leaves, kicks). Pass `nextSince` back as `since` to read only new events
 
 ## Contributing
 
@@ -140,6 +180,16 @@ After building the project, open a singleplayer world to LAN and run:
 npm run test:live -- LAN_PORT
 ```
 
-Replace `LAN_PORT` with the port shown in Minecraft chat. The test connects a bot on localhost, lists MCP tools, checks its position and game mode, and reads a nearby block. It disconnects when finished and does not intentionally change blocks. The port defaults to `25565` when omitted.
+Replace `LAN_PORT` with the port shown in Minecraft chat. The test connects a bot on localhost, lists MCP tools, checks its position and game mode, reads a nearby block, and calls the read-only observation tools. It disconnects when finished and does not intentionally change blocks. The port defaults to `25565` when omitted.
+
+### Full world test
+
+To exercise every MCP tool against a real server, use a throwaway world with cheats enabled and run:
+
+```sh
+npm run test:live:world -- LAN_PORT --allow-world-changes
+```
+
+This test **modifies the world**. It builds a floating stone arena above the bot, gives itself items with `/give`, summons a pig and a minecart, places a bed, crafting table, chest and furnace, changes the time and game mode, and kills the bot at the end to check death and respawn events. A second bot named `MCPHelper` joins to act as another player for the chat, whisper and follow tests. The script reports any tool it did not exercise, so newly added tools show up as missing coverage.
 
 Minecraft Java 26.1.2 (protocol 775) was also manually verified with a Survival bot: place a dirt block, read it back, dig it, and restore the borrowed dirt to its original location.
