@@ -10,7 +10,7 @@
 |---|---|
 | 设计版本 | v0.3（2026-10-16）：按用户对未决问题的答复修订，变更见 docs/PLAN.md |
 | 目标版本 | Autopilot v1：阶段一到四（任务与行为、反射与策略、决策模型、情景测试） |
-| 当前阶段 | M1 已实现（单元测试通过，实机验收待完成）；M2～M6 仍为说明性骨架 |
+| 当前阶段 | M1、M2 已实现（单元测试通过，实机验收待完成）；M3～M6 仍为说明性骨架 |
 | 状态标记 | **已确认**：用户已同意，或已用一手资料/实机核实。**暂定**：设计者提出的合理默认值，可在实现时调整，需记录。**待验证**：依赖实测结果，验证前不能当作事实 |
 | 与现有代码的关系 | 现有代码保持可构建、可测试。新增文件实现前只存在于 `blueprint/` 镜像目录；对现有文件的改动在「F2. 现有文件的计划改动」中描述，不创建占位副本 |
 
@@ -257,6 +257,7 @@ src/main.ts（现有，改动）--创建并注册--> src/autopilot/autopilot.ts�
 │   │   ├── reflexes.ts               新增：5 个反射定义
 │   │   └── behaviors/
 │   │       ├── target.ts             新增（M1 实现时加入）：行为共用的目标参数与解析
+│   │       ├── actions.ts            新增（M2 实现时加入）：工作行为共用的暂停感知动作、拾取掉落物与路标解析
 │   │       ├── follow.ts             新增
 │   │       ├── flee.ts               新增
 │   │       ├── guard.ts              新增
@@ -352,14 +353,14 @@ src/main.ts（现有，改动）--创建并注册--> src/autopilot/autopilot.ts�
 ### F-003 · `src/autopilot/task-manager.ts`
 
 - **模块**：M-TASK 任务与行为　**里程碑**：M1　**状态**：implemented-unverified　**设计**：已确定：生命周期与事件；进度节流间隔与历史条数暂定
-- **职责**：管理后台任务的生命周期：查找已注册行为、校验参数、启动、记录进度与当前步骤、响应仲裁器的暂停与恢复、恢复被手动命令挂起的任务、取消和结束；提供当前任务的快照，供手动命令报告中断前的状态；为每次状态变化写事件；保存当前任务与最近 20 个已结束任务。同时定义行为必须遵守的契约：参数模式、运行上下文、进度与当前步骤的报告方式、取消信号与暂停等待。
+- **职责**：管理后台任务的生命周期：查找已注册行为、校验参数、启动、记录进度与当前步骤、响应仲裁器的暂停与恢复、恢复被手动命令挂起的任务、取消和结束；提供当前任务的快照，供手动命令报告中断前的状态；为每次状态变化写事件；保存当前任务与最近 20 个已结束任务。同时定义行为必须遵守的契约：参数模式、运行上下文、进度与当前步骤的报告方式、取消信号与暂停等待；M2 起，prepare 与运行上下文还会收到共享服务（目前只有路标存储，供 guard 与 return-home 读取）。
 - **不负责**：不实现具体行为（在 src/autopilot/behaviors/）；不决定何时启动任务（由 LLM 或决策钩子决定）；不做威胁检测。
 - **输入**：来源：src/tools/task-tools.ts（启动、恢复、取消、查询）；src/decisions/decision-hooks.ts、src/tools/follow-tools.ts、src/tools/gathering-tools.ts、src/tools/position-tools.ts（启动、取消）；src/tool-factory.ts（读取快照）；src/autopilot/action-arbiter.ts（暂停与恢复回调，附抢占者类型）。 内容：行为名、行为参数对象、是否替换当前任务（默认替换）、来源标记（llm / chat / tool）。 限制：同一时刻至多一个活动任务；参数必须通过该行为自己的 zod 模式；行为名必须已注册。
 - **输出**：去向：调用者（任务 id 与状态，或一个在任务结束时完成的等待对象）；src/event-store.ts（事件）；src/tools/task-tools.ts（任务列表）。 内容：任务记录：id（t1、t2…）、行为、参数摘要、状态（running / paused / done / failed / cancelled）、暂停原因（reflex <名称> 或 manual <工具名>）、进度文字、当前步骤（例如“chasing zombie id 812”）、开始与结束时间、结果或失败原因、来源。快照：当前任务的上述信息与已运行时长。事件：task_started、task_progress（同一任务至少间隔 2 秒）、task_paused、task_resumed、task_done、task_failed、task_cancelled。 成功含义：每次状态变化都有且仅有一条对应事件；取消后 1 秒内 bot 停止该任务的动作。
 - **使用方**：src/tools/task-tools.ts、src/decisions/decision-hooks.ts、src/tools/follow-tools.ts、src/tools/gathering-tools.ts、src/tools/position-tools.ts（调用）；src/tool-factory.ts（读取快照）；src/autopilot/autopilot.ts（创建）；src/autopilot/behaviors/*.ts（导入行为契约）；tests/task-manager.test.ts（验证）；tests/movement-behaviors.test.ts、tests/decision-hooks.test.ts（作为被测模块的依赖）。
 - **依赖**：src/autopilot/action-arbiter.ts（申请任务级租约）；src/autopilot/behaviors/follow.ts、flee.ts、guard.ts、gather.ts、hunt.ts、return-home.ts（导入注册表）；src/event-store.ts（现有，写事件）；src/tools/movement-utils.ts（现有，取消时 stopPathfinder）。 外部：无。
 - **状态与副作用**：状态：当前任务、历史记录、每个任务的取消控制器（内存）。 副作用：通过行为驱动 bot 的动作；取消时停止寻路。
-- **关键约束**：替换当前任务时，先完成旧任务的取消（写 task_cancelled，原因 replaced），再启动新任务；任务被暂停期间行为不能发出动作；被反射暂停的任务在反射结束后自动恢复，被手动命令暂停的任务保持 paused，直到 resume-task 或 cancel-task；恢复时重新申请任务级租约；进度事件节流；任务结束后必须释放租约。
+- **关键约束**：替换当前任务时，先校验参数并完成新行为的 prepare（失败则旧任务保持不变），再完成旧任务的取消（写 task_cancelled，原因 replaced），最后启动新任务；任务被暂停期间行为不能发出动作；被反射暂停的任务在反射结束后自动恢复，被手动命令暂停的任务保持 paused，直到 resume-task 或 cancel-task；恢复时重新申请任务级租约；进度事件节流；任务结束后必须释放租约。
 - **失败处理**：行为抛错 → task_failed，附错误信息；参数无效 → 不创建任务，返回全部校验错误；行为名未知 → 返回可用行为列表。
 - **验收**：正常：启动 follow → task_started；取消 → task_cancelled，bot 停止；行为正常结束 → task_done 附结果。 边界或失败：replace=false 时启动第二个任务 → 返回“已有任务运行”错误；行为抛错 → task_failed；被反射暂停 → task_paused 后自动 task_resumed；被手动命令暂停 → task_paused（原因 manual）且不自动恢复，resume 后 task_resumed；对非 paused 任务调用 resume → 明确错误；快照包含当前步骤；1 秒内多次进度只产生一条 task_progress。 位置：tests/task-manager.test.ts（计划，未执行）
 
@@ -396,7 +397,7 @@ src/main.ts（现有，改动）--创建并注册--> src/autopilot/autopilot.ts�
 
 ### F-006 · `src/autopilot/behaviors/guard.ts`
 
-- **模块**：M-TASK 任务与行为　**里程碑**：M2　**状态**：placeholder　**设计**：暂定：守卫半径与追击距离默认值待情景测试调整
+- **模块**：M-TASK 任务与行为　**里程碑**：M2　**状态**：implemented-unverified　**设计**：暂定：守卫半径与追击距离默认值待情景测试调整
 - **职责**：守卫一个玩家（贴身保镖）或一个地点：清理守卫半径内的合法敌对目标，之后回到守卫位置，直到被取消。
 - **不负责**：不攻击玩家、被动生物和默认的中立生物（由 src/autopilot/threats.ts 判定）；不处理自身危险（由反射负责）。
 - **输入**：来源：src/autopilot/task-manager.ts。 内容：守卫对象：玩家名、实体 id、路标名或坐标之一（默认当前位置）；守卫半径（默认 8，范围 2–24）；最大追击距离（默认 16）。 限制：守卫玩家时该玩家必须可见；路标必须存在且在当前维度。
@@ -405,12 +406,12 @@ src/main.ts（现有，改动）--创建并注册--> src/autopilot/autopilot.ts�
 - **依赖**：src/autopilot/task-manager.ts（行为契约）；src/autopilot/threats.ts（合法目标与附近敌对生物）；src/autopilot/combat.ts（战斗）；src/waypoint-store.ts（现有，读取路标）；src/tools/entity-utils.ts（现有）。 外部：mineflayer-pathfinder：返回守卫位置。
 - **状态与副作用**：状态：累计击杀数（任务内）。 副作用：驱动 bot 移动与攻击。
 - **关键约束**：只攻击 threats.ts 判为合法的目标；追击超出最大距离时放弃并返回；暂停时中止当前战斗回合。
-- **失败处理**：守卫的玩家消失超过 15 秒 → 失败；寻路失败 → 记录进度并继续守卫，不终止任务。
+- **失败处理**：守卫的玩家消失超过 15 秒 → 失败；寻路失败（回守卫位置 5 秒没有靠近）→ 记录一次进度并继续守卫，不终止任务。实际追击距离不小于守卫半径，否则半径内的敌对生物永远打不到。
 - **验收**：正常：守卫玩家时，一只僵尸进入 8 格 → 被击杀，进度报告击杀 1；bot 回到玩家身边。 边界或失败：一只猪进入守卫半径 → 不攻击；僵尸逃出 16 格 → 停止追击并返回。 位置：tests/work-behaviors.test.ts；scripts/test-scenarios.mjs（计划，未执行）
 
 ### F-007 · `src/autopilot/behaviors/gather.ts`
 
-- **模块**：M-TASK 任务与行为　**里程碑**：M2　**状态**：placeholder　**设计**：已确定：沿用现有 collect-block 的已验证逻辑
+- **模块**：M-TASK 任务与行为　**里程碑**：M2　**状态**：implemented-unverified　**设计**：已确定：沿用现有 collect-block 的已验证逻辑
 - **职责**：寻找、挖掘并拾取指定数量的某种方块。逻辑从现有 src/tools/gathering-tools.ts 的 collect-block 迁移而来，collect-block 改为调用本行为并等待结果。
 - **不负责**：不合成、不存箱子；不在任务外挖掘其他方块（寻路自身的挖掘除外）。
 - **输入**：来源：src/autopilot/task-manager.ts（来自 start-task 或 collect-block）。 内容：方块名、数量（1–64）、搜索距离（默认 32）、时间上限（默认 120 秒）。 限制：方块名必须存在于 minecraft-data。
@@ -418,16 +419,16 @@ src/main.ts（现有，改动）--创建并注册--> src/autopilot/autopilot.ts�
 - **使用方**：src/autopilot/task-manager.ts；src/tools/gathering-tools.ts（经任务管理器委托）；tests/work-behaviors.test.ts。
 - **依赖**：src/autopilot/task-manager.ts（行为契约）；src/tools/block-utils.ts、src/tools/item-utils.ts（现有，挖掘与计数）。 外部：minecraft-data、mineflayer、mineflayer-pathfinder。
 - **状态与副作用**：状态：已挖数量、跳过的位置（任务内）。 副作用：挖掘方块、移动、拾取物品。
-- **关键约束**：保持现有安全规则：不挖紧邻岩浆的方块；连续 5 次失败中止。暂停时停止挖掘，恢复后重新寻找目标。
+- **关键约束**：保持现有安全规则：不挖紧邻岩浆的方块；连续 5 次失败中止。暂停时停止挖掘，恢复后重新寻找目标；只停止本任务自己的挖掘，不打断手动命令对其他方块的挖掘。需要走近时，先做岩浆、不可破坏等安全检查，再在时间上限内走过去（collect-block 等待本任务，时间上限必须覆盖行走）；走路途中被寻路顺带挖掉的目标计为已挖。
 - **失败处理**：找不到更多方块、超时、连续失败 → 失败（若一个都没挖到）或以部分结果完成，与现有 collect-block 规则一致。
 - **验收**：正常：附近有 3 根原木，要求 3 → 完成，背包增加 3。 边界或失败：目标旁有岩浆 → 跳过并计入跳过数；现有 tests/gathering-tools.test.ts 全部继续通过。 位置：tests/work-behaviors.test.ts；tests/gathering-tools.test.ts（现有）（计划，未执行）
 
 ### F-008 · `src/autopilot/behaviors/hunt.ts`
 
-- **模块**：M-TASK 任务与行为　**里程碑**：M2　**状态**：placeholder　**设计**：暂定
+- **模块**：M-TASK 任务与行为　**里程碑**：M2　**状态**：implemented-unverified　**设计**：暂定
 - **职责**：猎杀指定数量的某种动物并拾取掉落物，用于获取食物等资源。
 - **不负责**：不攻击未指定类型的生物；不攻击玩家或被驯服的动物。
-- **输入**：来源：src/autopilot/task-manager.ts。 内容：动物类型（例如 cow、pig、chicken、sheep、rabbit）、数量（1–16）、搜索距离（默认 32）、时间上限（默认 120 秒）。 限制：类型必须是 minecraft-data 中的实体名，且不能是 player。
+- **输入**：来源：src/autopilot/task-manager.ts。 内容：动物类型（例如 cow、pig、chicken、sheep、rabbit）、数量（1–16）、搜索距离（默认 32）、时间上限（默认 120 秒）。 限制：类型必须是 minecraft-data 中的生物实体名（物品、经验球、投射物、载具等不能攻击的实体被拒绝），且不能是 player。被驯服的判定包括有主人的狼、猫、鹦鹉，以及标志位为已驯服的马、驴、骡、羊驼、骆驼等。
 - **输出**：去向：src/autopilot/task-manager.ts。 内容：当前步骤：searching、chasing <目标 id>、collecting drops。进度：已击杀数量。结果：击杀数量与背包新增物品摘要，失败时附原因。 成功含义：击杀数量达到要求，且附近掉落物被拾取。
 - **使用方**：src/autopilot/task-manager.ts；tests/work-behaviors.test.ts。
 - **依赖**：src/autopilot/task-manager.ts（行为契约）；src/autopilot/threats.ts（合法目标：被明确指定的被动生物，排除被驯服的）；src/autopilot/combat.ts（战斗）；src/tools/entity-utils.ts（现有，掉落物识别）。 外部：mineflayer、mineflayer-pathfinder。
@@ -438,7 +439,7 @@ src/main.ts（现有，改动）--创建并注册--> src/autopilot/autopilot.ts�
 
 ### F-009 · `src/autopilot/behaviors/return-home.ts`
 
-- **模块**：M-TASK 任务与行为　**里程碑**：M2　**状态**：placeholder　**设计**：暂定：床的搜索范围 8 格
+- **模块**：M-TASK 任务与行为　**里程碑**：M2　**状态**：implemented-unverified　**设计**：暂定：床的搜索范围 8 格
 - **职责**：走到指定路标（默认 home）；如果是夜晚且允许睡觉，找附近的床睡下。
 - **不负责**：不放置床；不保存路标（由现有路标工具负责）。
 - **输入**：来源：src/autopilot/task-manager.ts。 内容：路标名（默认 home）、是否睡觉（默认 true）、时间上限（默认 120 秒）。 限制：路标必须存在且在当前维度。
@@ -464,12 +465,26 @@ src/main.ts（现有，改动）--创建并注册--> src/autopilot/autopilot.ts�
 - **失败处理**：找不到目标时返回错误文字，由行为的 prepare 转成启动失败。
 - **验收**：正常：target: "Steve" 解析为可见的玩家 Steve。 边界或失败：既没有 entityId 也没有 target → 校验错误“Provide entityId or target”；目标不可见 → “No Steve found …”。 位置：tests/movement-behaviors.test.ts（计划，未执行）
 
+### F-035 · `src/autopilot/behaviors/actions.ts`
+
+- **模块**：M-TASK 任务与行为　**里程碑**：M2　**状态**：implemented-unverified　**设计**：实现时新增：仲裁器抢占时会停止寻路，使进行中的 `pathfinder.goto` 失败；没有本文件时，工作行为会把暂停误判为失败（例如跳过本可挖掘的方块）
+- **职责**：为 gather、hunt、guard、return-home 提供暂停感知的动作步骤：等待任务恢复（可带截止时间）、执行一个可被暂停打断的动作（打断时调用停止回调，例如 `bot.stopDigging`，并让调用者重试同一步骤）、带暂停重试与截止时间的寻路、拾取附近掉落物、解析当前维度中的路标。
+- **不负责**：不实现行为流程；不申请或释放租约；不判断目标合法性。
+- **输入**：来源：src/autopilot/behaviors/gather.ts、hunt.ts、guard.ts、return-home.ts（导入）。 内容：行为上下文（bot、取消信号、isPaused、waitUntilRunning）、寻路目标、截止时间、路标名与 BehaviorServices 中的路标存储。 限制：只在任务持有租约时发出动作；暂停期间不发出任何动作。
+- **输出**：去向：导入它的行为。 内容：动作完成、被暂停打断（`{ done: false }`）或抛出取消/真实错误；截止时间到达时抛出 DeadlineReached；路标解析结果或错误文字（“No waypoint named …”、“Waypoint … is in <维度> but the bot is in <维度>”）。 成功含义：被反射或手动命令打断的步骤不计为失败，任务恢复后重试；取消立即向上抛出。
+- **使用方**：src/autopilot/behaviors/gather.ts、hunt.ts、guard.ts、return-home.ts；tests/work-behaviors.test.ts、tests/movement-behaviors.test.ts（经行为间接验证）。
+- **依赖**：src/autopilot/task-manager.ts（行为契约、delay）；src/waypoint-store.ts（现有，路标类型）；src/tools/movement-utils.ts（现有，stopPathfinder）。 外部：mineflayer-pathfinder（GoalNear）。
+- **状态与副作用**：状态：无。 副作用：移动（拾取掉落物、寻路）。
+- **关键约束**：截止时间在暂停期间照常计算（collect-block 等待 gather 任务结束，不能因手动命令暂停而无限等待）；监视定时器在动作结束后必须清除。
+- **失败处理**：动作在任务暂停后失败 → 视为被打断而不是失败；任务取消 → 抛出取消原因；其他错误原样抛出。
+- **验收**：正常：挖掘中被手动命令暂停 → stopDigging 被调用、该方块不计失败也不跳过，resume-task 后继续挖同一方块。 边界或失败：暂停期间截止时间到达 → 以 time limit reached 结束；路标在其他维度 → 启动失败。 位置：tests/work-behaviors.test.ts、tests/movement-behaviors.test.ts（经行为间接验证）
+
 
 ### F1-c 威胁、战斗与反射
 
 ### F-010 · `src/autopilot/threats.ts`
 
-- **模块**：M-CMB 战斗与威胁　**里程碑**：M2（M3 扩展环境危险）　**状态**：placeholder　**设计**：已确定：判定规则；中立生物名单暂定
+- **模块**：M-CMB 战斗与威胁　**里程碑**：M2（M3 扩展环境危险）　**状态**：implemented-unverified　**设计**：已确定：判定规则；中立生物名单暂定
 - **职责**：根据当前游戏状态计算威胁信息：附近的敌对生物（按距离）、即将爆炸的苦力怕、自身是否着火/在岩浆中/氧气过低/低血量，以及远离威胁的方向；判断某个实体能否作为攻击目标。
 - **不负责**：不移动 bot；不做任何决定；不调用网络。
 - **输入**：来源：src/autopilot/reflexes.ts、src/autopilot/combat.ts、src/autopilot/behaviors/guard.ts、src/autopilot/behaviors/hunt.ts、src/decisions/decision-hooks.ts。 内容：bot（实体表、自身状态、方块查询）；当前策略中的攻击规则；可选的“明确允许的目标类型”（hunt 使用）。 限制：只读取内存数据；单次计算的目标耗时低于 1 毫秒（目标，待实测）。
@@ -477,13 +492,13 @@ src/main.ts（现有，改动）--创建并注册--> src/autopilot/autopilot.ts�
 - **使用方**：src/autopilot/reflexes.ts、src/autopilot/combat.ts、src/autopilot/behaviors/guard.ts、src/autopilot/behaviors/hunt.ts、src/decisions/decision-hooks.ts（调用）；tests/threats.test.ts（验证）；tests/combat.test.ts（作为被测模块的依赖）。
 - **依赖**：src/tools/entity-utils.ts（现有，附近实体与苦力怕状态）；src/tools/terrain-utils.ts（现有，方块可通行判断）；src/tools/gamestate-tools.ts（现有，自身氧气读取）；src/autopilot/policy.ts（读取攻击规则）。 外部：mineflayer、minecraft-data。
 - **状态与副作用**：状态：无状态。 副作用：无。
-- **关键约束**：玩家永远不是合法目标，除非策略显式开启攻击玩家；被动生物只在被明确指定类型时合法；被驯服的动物永远不合法；默认中立生物（例如末影人、狼、猪灵、北极熊、蜜蜂）不合法。
+- **关键约束**：玩家永远不是合法目标，除非策略显式开启攻击玩家；被动生物只在被明确指定类型时合法；被驯服的动物永远不合法；默认中立生物（例如末影人、狼、猪灵、北极熊、蜜蜂）不合法。敌对与中立按实体名的显式名单判定，而不是按 minecraft-data 的分类（它把疣猪兽归为动物、把末影人与猪灵归为敌对）；M2 期间攻击规则是常量默认值（attackPlayers=false），由调用者以参数传入，M3 改为读取策略。
 - **失败处理**：实体数据缺失或异常时视为非威胁并跳过，不抛错。
 - **验收**：正常：7 格内膨胀中的苦力怕被列为最高威胁；站在岩浆中被识别；逃离方向与威胁质心方向相反。 边界或失败：玩家在“不攻击玩家”时判为非法目标；被驯服的狼判为非法；没有威胁时返回空列表和零向量。 位置：tests/threats.test.ts（计划，未执行）
 
 ### F-011 · `src/autopilot/combat.ts`
 
-- **模块**：M-CMB 战斗与威胁　**里程碑**：M2　**状态**：placeholder　**设计**：暂定：冷却数值与撤退血量默认值待情景测试调整
+- **模块**：M-CMB 战斗与威胁　**里程碑**：M2　**状态**：implemented-unverified　**设计**：暂定：冷却数值与撤退血量默认值待情景测试调整
 - **职责**：对一个合法目标进行近战：装备最好的近战武器，接近到攻击距离，看向目标，按武器攻击冷却出手；目标死亡、丢失或超出追击距离时结束；自身血量低于阈值时撤退。
 - **不负责**：不选择目标（由调用者给出）；不判断是否应该参战；不使用弓、弩、盾牌（本版本非目标）。
 - **输入**：来源：src/autopilot/behaviors/guard.ts、src/autopilot/behaviors/hunt.ts、src/autopilot/reflexes.ts（self-defense）。 内容：目标实体、最大追击距离、撤退血量、取消信号。 限制：目标必须通过 src/autopilot/threats.ts 的合法性检查，否则立即返回非法目标，不出手。
@@ -491,9 +506,9 @@ src/main.ts（现有，改动）--创建并注册--> src/autopilot/autopilot.ts�
 - **使用方**：src/autopilot/behaviors/guard.ts、src/autopilot/behaviors/hunt.ts、src/autopilot/reflexes.ts（调用）；tests/combat.test.ts（验证）；tests/work-behaviors.test.ts（作为被测行为的依赖）；scripts/test-scenarios.mjs（zombie-wave，经 MCP 服务器间接使用）。
 - **依赖**：src/autopilot/threats.ts（合法性与目标状态）；src/tools/movement-utils.ts（现有，stopPathfinder）。 外部：mineflayer（attack、lookAt、equip）、mineflayer-pathfinder（GoalFollow）、minecraft-data（武器攻击速度）。
 - **状态与副作用**：状态：战斗过程中的临时状态（上次出手时间、攻击次数）。 副作用：攻击实体、移动、切换手持物品。
-- **关键约束**：两次出手的间隔不小于武器冷却（剑约 0.625 秒，其他武器按 minecraft-data 攻击速度，暂定）；收到取消信号后 1 刻内停止出手；结束时调用 stopPathfinder。
+- **关键约束**：两次出手的间隔不小于武器冷却（剑约 0.625 秒；minecraft-data 没有攻击速度数据，改用原版数值表：剑 1.6、斧 0.8–1.0、三叉戟 1.1、其他物品与空手 4 次/秒，按整刻向上取整）；收到取消信号或调用者的停止条件（例如任务暂停）后 1 刻内停止出手；除 cancelled 外，结束时调用 stopPathfinder 并清除按键状态；cancelled 时不触碰身体——暂停时身体已归手动命令或反射，取消时由任务管理器停止（G1、G4）。目标旁有非法生物（例如被守卫的玩家、宠物、中立生物）时不用剑出手（避免横扫误伤），改用其他武器或空手；换手中物品后等待一个完整冷却。连续出手 10 秒都没有收到目标受伤事件时放弃（lost），避免对打不动的目标（例如嘎吱怪）无限出手。追击距离从调用者给出的锚点（守卫位置或被守卫的玩家）量起，默认是开战时 bot 的位置。retreated 只表示脱离战斗，移动远离由 M3 的低血量撤退反射负责。目标消失时：收到死亡事件，或在最近一次命中后 3 秒内、6 格内消失，记为 killed，否则为 lost。
 - **失败处理**：寻路失败 → lost；装备失败 → 空手继续；目标中途变为非法（例如被驯服）→ 立即结束为 illegal_target。
-- **验收**：正常：模拟目标在若干次攻击后失效 → killed，攻击间隔不小于冷却。 边界或失败：自身血量降到撤退阈值 → retreated；目标为玩家 → illegal_target 且攻击次数为 0；取消信号 → cancelled 且寻路目标被清除。 位置：tests/combat.test.ts；scripts/test-scenarios.mjs（计划，未执行）
+- **验收**：正常：模拟目标在若干次攻击后失效 → killed，攻击间隔不小于冷却。 边界或失败：自身血量降到撤退阈值 → retreated；目标为玩家 → illegal_target 且攻击次数为 0；取消信号 → cancelled，1 刻内不再出手，且不清除（已不属于自己的）寻路目标；被守卫的玩家站在目标旁 → 不用剑出手。 位置：tests/combat.test.ts；scripts/test-scenarios.mjs（计划，未执行）
 
 ### F-012 · `src/autopilot/reflex-engine.ts`
 
@@ -660,7 +675,7 @@ src/main.ts（现有，改动）--创建并注册--> src/autopilot/autopilot.ts�
 
 ### F-023 · `tests/threats.test.ts`
 
-- **模块**：M-VER 验证　**里程碑**：M2　**状态**：placeholder　**设计**：已确定：覆盖范围；具体样例随实现补充，不能照抄实现行为
+- **模块**：M-VER 验证　**里程碑**：M2　**状态**：implemented-unverified　**设计**：已确定：覆盖范围；具体样例随实现补充，不能照抄实现行为
 - **职责**：验证 src/autopilot/threats.ts 的契约行为。
 - **不负责**：不连接真实 Minecraft 服务器或 OpenRouter；不测试其他模块的内部细节。
 - **输入**：来源：ava 测试运行器（npm test，仅运行 tests/**/*.test.ts）。 内容：模拟的 bot、实体、方块、事件存储与时钟（沿用现有 tests/_helpers.ts、tests/_world.ts 的做法）。 限制：使用 sinon 假时钟控制时间，避免依赖真实等待；不发网络请求。
@@ -674,7 +689,7 @@ src/main.ts（现有，改动）--创建并注册--> src/autopilot/autopilot.ts�
 
 ### F-024 · `tests/combat.test.ts`
 
-- **模块**：M-VER 验证　**里程碑**：M2　**状态**：placeholder　**设计**：已确定：覆盖范围；具体样例随实现补充，不能照抄实现行为
+- **模块**：M-VER 验证　**里程碑**：M2　**状态**：implemented-unverified　**设计**：已确定：覆盖范围；具体样例随实现补充，不能照抄实现行为
 - **职责**：验证 src/autopilot/combat.ts 的契约行为。
 - **不负责**：不连接真实 Minecraft 服务器或 OpenRouter；不测试其他模块的内部细节。
 - **输入**：来源：ava 测试运行器（npm test，仅运行 tests/**/*.test.ts）。 内容：模拟的 bot、实体、方块、事件存储与时钟（沿用现有 tests/_helpers.ts、tests/_world.ts 的做法）。 限制：使用 sinon 假时钟控制时间，避免依赖真实等待；不发网络请求。
@@ -684,7 +699,7 @@ src/main.ts（现有，改动）--创建并注册--> src/autopilot/autopilot.ts�
 - **状态与副作用**：状态：无。 副作用：无。
 - **关键约束**：预期结果来自 docs/BLUEPRINT.md 的契约与不变量，而不是实现的实际输出；每个测试互相独立。
 - **失败处理**：断言失败时给出具体的期望与实际值。
-- **验收**：正常：模拟目标在若干次攻击后失效 → killed；两次出手间隔不小于冷却；结束后没有残留寻路目标。 边界或失败：血量降到撤退阈值 → retreated；目标为玩家 → illegal_target 且未出手；取消 → cancelled 且停止寻路；目标走出追击距离 → out_of_range；装备失败时空手继续。 位置：tests/combat.test.ts（本文件）（计划，未执行）
+- **验收**：正常：模拟目标在若干次攻击后失效 → killed；两次出手间隔不小于冷却；结束后没有残留寻路目标。 边界或失败：血量降到撤退阈值 → retreated；目标为玩家 → illegal_target 且未出手；取消 → cancelled，不再出手且不触碰身体（由当前租约持有者停止，见 G4）；目标走出追击距离 → out_of_range；装备失败时空手继续。 位置：tests/combat.test.ts（本文件）（计划，未执行）
 
 ### F-025 · `tests/reflexes.test.ts`
 
@@ -702,7 +717,7 @@ src/main.ts（现有，改动）--创建并注册--> src/autopilot/autopilot.ts�
 
 ### F-026 · `tests/movement-behaviors.test.ts`
 
-- **模块**：M-VER 验证　**里程碑**：M1（return-home 在 M2）　**状态**：implemented-unverified（follow / flee 部分；return-home 在 M2 补充）　**设计**：已确定：覆盖范围；具体样例随实现补充，不能照抄实现行为
+- **模块**：M-VER 验证　**里程碑**：M1（return-home 在 M2）　**状态**：implemented-unverified（follow / flee 在 M1，return-home 在 M2 补充）　**设计**：已确定：覆盖范围；具体样例随实现补充，不能照抄实现行为
 - **职责**：验证 src/autopilot/behaviors/follow.ts、flee.ts、return-home.ts 的契约行为。
 - **不负责**：不连接真实 Minecraft 服务器或 OpenRouter；不测试其他模块的内部细节。
 - **输入**：来源：ava 测试运行器（npm test，仅运行 tests/**/*.test.ts）。 内容：模拟的 bot、实体、方块、事件存储与时钟（沿用现有 tests/_helpers.ts、tests/_world.ts 的做法）。 限制：使用 sinon 假时钟控制时间，避免依赖真实等待；不发网络请求。
@@ -716,7 +731,7 @@ src/main.ts（现有，改动）--创建并注册--> src/autopilot/autopilot.ts�
 
 ### F-027 · `tests/work-behaviors.test.ts`
 
-- **模块**：M-VER 验证　**里程碑**：M2　**状态**：placeholder　**设计**：已确定：覆盖范围；具体样例随实现补充，不能照抄实现行为
+- **模块**：M-VER 验证　**里程碑**：M2　**状态**：implemented-unverified　**设计**：已确定：覆盖范围；具体样例随实现补充，不能照抄实现行为
 - **职责**：验证 src/autopilot/behaviors/guard.ts、gather.ts、hunt.ts 的契约行为。
 - **不负责**：不连接真实 Minecraft 服务器或 OpenRouter；不测试其他模块的内部细节。
 - **输入**：来源：ava 测试运行器（npm test，仅运行 tests/**/*.test.ts）。 内容：模拟的 bot、实体、方块、事件存储与时钟（沿用现有 tests/_helpers.ts、tests/_world.ts 的做法）。 限制：使用 sinon 假时钟控制时间，避免依赖真实等待；不发网络请求。
@@ -818,13 +833,13 @@ src/main.ts（现有，改动）--创建并注册--> src/autopilot/autopilot.ts�
 
 | 条目 | 文件 | 里程碑 | 计划改动 | 不变的部分 | 验证 |
 |---|---|---|---|---|---|
-| E-001 | `src/tool-factory.ts` | M1（已实现） | 实现方式：在 `src/tool-factory.ts` 中集中维护身体类工具名单 `BODY_TOOLS`（也可用注册选项 `body` 覆盖），而不是在各工具文件里逐个标记；名单在下列工具之外还包含 equip-item（切换手中物品，符合 G1 的“身体”定义），以及 M2 改为任务之前的 collect-block。`registerTool` 增加“身体类”选项：执行前以手动优先级向仲裁器申请租约（立即抢占任务与日常反射，遇到关键反射时等待最长 10 秒），结束后释放；如果抢占了任务或日常反射，在工具结果末尾附上中断报告（被打断任务的快照，或被打断的反射名称，以及 resume-task / cancel-task 的用法）；等待过关键反射时说明等待了哪个反射多久；超时返回 “Busy: <持有者>” 错误。身体类工具：move-to-position、move-in-direction、look-at、jump、fly-to、dig-block、place-block、activate-block、activate-entity、attack-entity、mount-entity、dismount、sleep、consume、craft-item、smelt-item、container-deposit、container-withdraw、read-container、clear-region、fill-region、dig-tunnel、goto-waypoint | 连接检查、参数校验、错误包装、只读工具的行为 | 现有 `tests/tool-factory.test.ts`；`tests/task-tools.test.ts` 中的租约场景 |
+| E-001 | `src/tool-factory.ts` | M1（已实现） | 实现方式：在 `src/tool-factory.ts` 中集中维护身体类工具名单 `BODY_TOOLS`（也可用注册选项 `body` 覆盖），而不是在各工具文件里逐个标记；名单在下列工具之外还包含 equip-item（切换手中物品，符合 G1 的“身体”定义），以及 M2 改为任务之前的 collect-block（M2 起已移出名单，见 E-004）。`registerTool` 增加“身体类”选项：执行前以手动优先级向仲裁器申请租约（立即抢占任务与日常反射，遇到关键反射时等待最长 10 秒），结束后释放；如果抢占了任务或日常反射，在工具结果末尾附上中断报告（被打断任务的快照，或被打断的反射名称，以及 resume-task / cancel-task 的用法）；等待过关键反射时说明等待了哪个反射多久；超时返回 “Busy: <持有者>” 错误。身体类工具：move-to-position、move-in-direction、look-at、jump、fly-to、dig-block、place-block、activate-block、activate-entity、attack-entity、mount-entity、dismount、sleep、consume、craft-item、smelt-item、container-deposit、container-withdraw、read-container、clear-region、fill-region、dig-tunnel、goto-waypoint | 连接检查、参数校验、错误包装、只读工具的行为 | 现有 `tests/tool-factory.test.ts`；`tests/task-tools.test.ts` 中的租约场景 |
 | E-002 | `src/tools/follow-tools.ts` | M1（已实现） | follow-entity、flee-from 改为通过任务管理器启动 follow / flee 任务（替换当前任务），立即返回并在文字中附上任务 id | 工具名、参数、返回文字的开头（“Following …” / “Fleeing from …”） | 现有 `tests/interaction-tools.test.ts` 中的 follow/flee 场景（按新实现调整断言，不改变对外语义） |
 | E-003 | `src/tools/position-tools.ts` | M1（已实现） | stop-pathfinding 同时取消当前任务（原因 “stopped by stop-pathfinding”）；移动类工具标记为身体类 | stop-pathfinding 的停止语义与现有修复（清除 pathfinder 标志） | 现有 `tests/position-tools.test.ts`、`tests/new-tools.test.ts` |
-| E-004 | `src/tools/gathering-tools.ts` | M2 | collect-block 改为启动 gather 任务并等待其结束，返回与现在相同格式的文字；采集循环迁移到 `src/autopilot/behaviors/gather.ts` | 工具名、参数、返回文字格式、安全规则 | 现有 `tests/gathering-tools.test.ts` 全部通过 |
+| E-004 | `src/tools/gathering-tools.ts` | M2（已实现） | collect-block 改为启动 gather 任务（替换当前任务，并在结果中说明被替换、取消的任务）并等待其结束，同时从身体类工具名单中移除（任务自己以任务级申请租约）；任务被取消时返回错误并附进度。替换而不是暂停已由用户确认（2026-10-16）：M2 之前 collect-block 作为身体类工具会暂停当前任务（可 resume-task 恢复），返回与现在相同格式的文字；采集循环迁移到 `src/autopilot/behaviors/gather.ts` | 工具名、参数、返回文字格式、安全规则 | 现有 `tests/gathering-tools.test.ts` 全部通过 |
 | E-005 | `src/bot-connection.ts` | M1（onBotReady、onBotEnd 已实现；onDamage 在 M3） | 增加回调：onBotReady(bot)、onBotEnd()、onDamage({attackerId, type, time})（结构化受伤信息，复用现有伤害事件解析） | 现有事件、系统消息、声音、伤害文字描述 | 现有 `tests/perception*.test.ts`；`tests/autopilot.test.ts` |
 | E-006 | `src/config.ts` | M4 | 新增命令行参数 `--decision-model <id>`。聊天命令授权不提供启动参数（用户决定，只能由 LLM 设置）。API key 不经过此文件 | 现有参数 | 现有 `tests/config.test.ts` 补充新参数场景 |
-| E-007 | `src/main.ts` | M1（已实现；M3、M4 扩展） | 创建 Autopilot，连接 BotConnection 回调，把服务访问函数传给工具注册函数；注册 task-tools、policy-tools | 现有工具注册与启动流程 | 实机：`npm run test:live` 显示工具总数从 54 增加到 61 |
+| E-007 | `src/main.ts` | M1（已实现；M2 起只创建一个 WaypointStore 并同时交给路标工具与 Autopilot；M3、M4 扩展） | 创建 Autopilot，连接 BotConnection 回调，把服务访问函数传给工具注册函数；注册 task-tools、policy-tools | 现有工具注册与启动流程 | 实机：`npm run test:live` 显示工具总数从 54 增加到 61 |
 | E-008 | `package.json` | 规划阶段（已完成）、M6 | 规划阶段：ava `files` 限定为 `tests/**/*.test.ts`，防止 `blueprint/` 中的占位文件被当作测试运行。M6：增加 `test:scenarios` 脚本 | 其他脚本与依赖 | 规划阶段：`npm test` 仍为 273 个测试通过（已执行） |
 | E-009 | `scripts/test-live-world.mjs` | M1～M4、M6 | 覆盖 7 个新工具（start-task、list-tasks、resume-task、cancel-task、get-policy、set-policy、list-decision-models），以及“任务中调用移动工具 → 中断报告 → resume-task”流程；M6 改为使用 `scripts/lib/live-arena.mjs` | 已有的全部检查步骤与防护 | 实机连续两轮全部通过 |
 | E-010 | `README.md` | 规划阶段（已完成）、M6 | 规划阶段：增加一小节说明 Autopilot 处于设计阶段并链接本蓝图。M6：替换为实际使用说明（任务、策略、决策模型的隐私与费用说明） | 现有内容 | 人工阅读 |
@@ -874,7 +889,7 @@ done / failed / cancelled 为终态，不能再改变
 
 ### G4. 取消与暂停
 
-- 每个任务与反射动作都有一个取消信号（`AbortSignal`）。收到取消后必须调用现有的 `stopPathfinder` 并清除按键状态，再返回。
+- 每个任务与反射动作都有一个取消信号（`AbortSignal`）。收到取消后必须停止发出动作并返回。停止身体（`stopPathfinder` 与清除按键状态）由**当前租约持有者**负责：任务被取消时由任务管理器（租约仍有效时）停止；被抢占时由仲裁器停止；M3 起反射结束时由反射引擎停止。已失去租约的代码不得再停止身体，否则会打断新持有者的寻路（M2 实现时修订）。
 - 暂停与取消是不同的：暂停的任务保留进度，恢复后继续；取消是终态。
 
 ### G5. 单位与坐标

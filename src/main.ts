@@ -44,7 +44,8 @@ async function main() {
   const config = parseConfig();
   const messageStore = new MessageStore();
   const eventStore = new EventStore();
-  const autopilot = new Autopilot({ events: eventStore, log });
+  const waypointStore = new WaypointStore(config.waypointFile ?? defaultWaypointFile(), config.host);
+  const autopilot = new Autopilot({ events: eventStore, waypoints: waypointStore, log });
 
   const connection = new BotConnection(
     config,
@@ -91,9 +92,9 @@ async function main() {
   registerInteractionTools(factory, getBot);
   registerFollowTools(factory, getBot, getAutopilot);
   registerTaskTools(factory, getAutopilot);
-  registerWaypointTools(factory, getBot, new WaypointStore(config.waypointFile ?? defaultWaypointFile(), config.host));
+  registerWaypointTools(factory, getBot, waypointStore);
   registerRegionTools(factory, getBot);
-  registerGatheringTools(factory, getBot);
+  registerGatheringTools(factory, getAutopilot);
   registerVisionTools(factory, getBot);
 
   process.stdin.on('end', () => {

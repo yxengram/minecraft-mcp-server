@@ -15,13 +15,13 @@ type McpResponse = {
 };
 
 // Tools that move, look, attack or use items; they hold the action lease while running (BLUEPRINT E-001).
-// collect-block stays here until M2 turns it into a background task.
+// collect-block is not listed: it runs a gather task, which takes the body at task priority itself (E-004).
 export const BODY_TOOLS = new Set([
   'move-to-position', 'move-in-direction', 'look-at', 'jump', 'fly-to', 'goto-waypoint',
   'dig-block', 'place-block', 'activate-block', 'activate-entity', 'attack-entity',
   'mount-entity', 'dismount', 'sleep', 'consume', 'equip-item', 'craft-item', 'smelt-item',
   'read-container', 'container-deposit', 'container-withdraw',
-  'clear-region', 'fill-region', 'dig-tunnel', 'collect-block'
+  'clear-region', 'fill-region', 'dig-tunnel'
 ]);
 
 export interface ToolOptions {

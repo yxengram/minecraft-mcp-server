@@ -30,7 +30,7 @@ export function droppedItem(entity: BotEntity): DroppedItem | null {
   }
 }
 
-function metadataValue(bot: Bot, entity: BotEntity, key: string): unknown {
+export function metadataValue(bot: Bot, entity: BotEntity, key: string): unknown {
   const keys = (bot.registry as { entitiesByName?: Record<string, { metadataKeys?: string[] }> } | undefined)
     ?.entitiesByName?.[entity.name ?? '']?.metadataKeys;
   const index = keys?.indexOf(key) ?? -1;

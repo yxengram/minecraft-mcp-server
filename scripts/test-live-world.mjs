@@ -129,6 +129,22 @@ async function distanceTo(type) {
   return Number(text.match(/([\d.]+) blocks away/)?.[1] ?? Infinity);
 }
 
+async function startTask(behavior, params) {
+  const started = await call('start-task', { behavior, params });
+  expectIncludes(started, 'Started task', `start-task ${behavior}`);
+  return started.match(/task (t\d+)/)[1];
+}
+
+// Waits for the task's final event (done, failed or cancelled) and fails unless it is task_done.
+async function waitForTaskEnd(id, description, timeoutMs = 60000) {
+  const line = await waitFor(async () => {
+    const events = await call('get-events', { since: eventCursor, types: ['task_done', 'task_failed', 'task_cancelled'], limit: 100 });
+    return events.split('\n').find(text => text.includes(`] ${id} `));
+  }, description, timeoutMs);
+  expect(line.includes(`[task_done] ${id} `), `${description}: the task did not finish successfully:\n${line}`);
+  return line;
+}
+
 let cx, y0, cz;
 let arenaReady = false;
 
@@ -524,6 +540,75 @@ try {
     expectIncludes(await call('dismount'), 'Dismounted', 'dismount');
     expectIncludes(await call('dismount'), 'Not riding anything', 'dismount when not riding');
     await cmd('/kill @e[type=minecart,distance=..16]');
+  });
+
+  await step('tasks: guard the helper (kills hostiles, spares animals)', async () => {
+    // The helper stays in creative mode (set up above), so the zombie cannot hurt it.
+    await cmd(`/gamemode creative ${HELPER_NAME}`);
+    await cmd(`/tp ${HELPER_NAME} ${cx} ${y0} ${cz - 7}`);
+    await call('move-to-position', { x: cx, y: y0, z: cz - 4, range: 0, timeoutMs: 20000 });
+    const id = await startTask('guard', { target: HELPER_NAME, radius: 8 });
+    await sleep(1000);
+
+    // A pig inside the radius must be left alone; the zombie must be killed.
+    await cmd(`/summon pig ${cx - 3} ${y0} ${cz - 6} {NoAI:1b,PersistenceRequired:1b,CustomName:"Wilbur"}`);
+    await cmd(`/summon zombie ${cx + 3} ${y0} ${cz - 5} {NoAI:1b,PersistenceRequired:1b}`);
+    // Keep daylight from burning the zombie, so the kill is the bot's.
+    await cmd('/effect give @e[type=zombie,distance=..32] minecraft:fire_resistance 60 0 true');
+    await waitFor(async () => (await call('get-events', { since: eventCursor, types: ['task_progress'], limit: 100 }))
+      .includes(`[task_progress] ${id} guard: killed zombie`), 'the guard task to kill the zombie', 30000);
+    expect((await distanceTo('zombie')) === Infinity, 'the zombie is still alive after the kill report');
+    expectIncludes(await call('list-tasks'), `${id} guard [running]`, 'list-tasks guard running');
+    expectIncludes(await call('cancel-task', { id }), `Cancelled task ${id}`, 'cancel-task guard');
+    expectIncludes(await call('list-entities', { type: 'pig', maxDistance: 32 }), 'named "Wilbur"', 'pig inside the guard radius');
+
+    await cmd('/kill @e[type=zombie,distance=..32]');
+    await cmd('/kill @e[type=pig,distance=..32]');
+    await cmd('/kill @e[type=item,distance=..32]');
+    await call('move-to-position', { x: cx, y: y0, z: cz, range: 0, timeoutMs: 20000 });
+  });
+
+  await step('tasks: gather', async () => {
+    const logs = [[cx - 6, cz - 2], [cx - 6, cz], [cx - 6, cz + 2]];
+    for (const [x, z] of logs) await cmd(`/setblock ${x} ${y0} ${z} oak_log`);
+    await sleep(500);
+    const before = await inventoryCount('oak_log');
+    const id = await startTask('gather', { blockType: 'oak_log', count: 3 });
+    expectIncludes(await waitForTaskEnd(id, 'the gather task to finish', 90000), 'Mined 3 of 3 oak_log', 'gather result');
+    await waitForCount('oak_log', count => count >= before + 3, 'gathered logs to be picked up');
+    for (const [x, z] of logs) {
+      expect((await block(x, y0, z)) === 'air', `gather left an oak_log at ${x}, ${z}`);
+    }
+    await cmd('/kill @e[type=item,distance=..32]');
+  });
+
+  await step('tasks: hunt (and never players)', async () => {
+    await call('move-to-position', { x: cx, y: y0, z: cz, range: 0, timeoutMs: 20000 });
+    await cmd(`/summon cow ${cx - 4} ${y0} ${cz - 3} {NoAI:1b,PersistenceRequired:1b}`);
+    await sleep(1000);
+    const before = await inventoryCount('beef');
+    const id = await startTask('hunt', { animal: 'cow' });
+    expectIncludes(await waitForTaskEnd(id, 'the hunt task to finish', 60000), 'Killed 1 of 1 cow', 'hunt result');
+    await waitForCount('beef', count => count > before, 'beef from the hunted cow');
+
+    expectIncludes(await call('start-task', { behavior: 'hunt', params: { animal: 'player' } }, { expectError: true }),
+      'Players cannot be hunted', 'start-task hunt player');
+    await cmd('/kill @e[type=cow,distance=..32]');
+    await cmd('/kill @e[type=item,distance=..32]');
+  });
+
+  await step('tasks: return-home (daytime)', async () => {
+    expectIncludes(await call('set-waypoint', { name: 'home', x: cx - 4, y: y0, z: cz }), "Saved waypoint 'home'", 'set-waypoint home');
+    await call('move-to-position', { x: cx + 5, y: y0, z: cz + 1, range: 0, timeoutMs: 20000 });
+    await cmd('/time set day');
+    const id = await startTask('return-home', {});
+    const done = await waitForTaskEnd(id, 'the return-home task to finish', 60000);
+    expectIncludes(done, "Arrived at waypoint 'home'", 'return-home result');
+    expectIncludes(done, 'daytime', 'return-home result');
+    const [px, , pz] = await position();
+    expect(Math.hypot(px - (cx - 4), pz - cz) <= 3, `return-home ended at ${px}, ${pz}`);
+    await call('delete-waypoint', { name: 'home' });
+    await call('move-to-position', { x: cx, y: y0, z: cz, range: 0, timeoutMs: 20000 });
   });
 
   await step('sleep and wake', async () => {

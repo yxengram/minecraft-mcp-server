@@ -9,7 +9,7 @@
 | 里程碑 | 目标（完成后新增的可观察能力） | 前置 | 状态 |
 |---|---|---|---|
 | M1 | 动作仲裁 + 后台任务 + follow / flee 行为 + 任务工具：LLM 可以启动、查看、恢复、取消后台任务，事件流可见；LLM 的身体类命令立即执行并报告被打断的任务 | 无 | implemented-unverified（单元测试通过；实机验收待游戏重新开放） |
-| M2 | 威胁识别 + 近战 + guard / gather / hunt / return-home：bot 能自主守卫、采集、狩猎、回家 | M1 | planned |
+| M2 | 威胁识别 + 近战 + guard / gather / hunt / return-home：bot 能自主守卫、采集、狩猎、回家 | M1 | implemented-unverified（单元测试通过；实机验收待游戏重新开放） |
 | M3 | 反射 + 策略 + 策略工具：不依赖 LLM 的保命反应，LLM 可调整策略 | M2 | planned |
 | M4 | OpenRouter 客户端 + 模型目录 + 聊天筛选与聊天命令：对 bot 说的话以 chat_request 交给 LLM；LLM 授权过的玩家可以直接下命令（默认无人授权） | M3；OpenRouter API key（开始前通知用户并给出提供步骤） | planned |
 | M5 | 决策式战斗判断 + 阈值探测：自卫的 auto 姿态使用决策模型；所有阈值有观察依据 | M4 | planned |
@@ -37,13 +37,13 @@
 |---|---|
 | 目标 | `start-task guard`（守卫玩家）时僵尸进入半径会被击杀；`start-task gather` 能采集；`start-task hunt` 能猎到食物；`start-task return-home` 能回家并在夜晚睡觉；collect-block 改由 gather 行为实现且对外不变 |
 | 前置条件 | M1 verified |
-| 范围 | 新增：F-010 `src/autopilot/threats.ts`、F-011 `src/autopilot/combat.ts`、F-006 guard、F-007 gather、F-008 hunt、F-009 return-home，测试 F-023、F-024、F-026（return-home 部分）、F-027。改动：E-004 `src/tools/gathering-tools.ts` |
+| 范围 | 新增：F-010 `src/autopilot/threats.ts`、F-011 `src/autopilot/combat.ts`、F-006 guard、F-007 gather、F-008 hunt、F-009 return-home、F-035 `src/autopilot/behaviors/actions.ts`（实现时新增），测试 F-023、F-024、F-026（return-home 部分）、F-027。改动：E-004 `src/tools/gathering-tools.ts`；另见进展记录中的配套改动 |
 | 本步不做 | 反射、策略工具（行为暂用策略的默认值，策略模块在 M3 提供；M2 期间以常量形式读取默认值，M3 时改为读取策略，暂定） |
 | 实施顺序 | 1. threats 及测试（含合法目标规则 I1）。2. combat 及测试。3. guard、hunt。4. gather（迁移现有逻辑，现有 gathering 测试保持通过）。5. return-home。6. 实机验收 |
 | 验收 | 正常：实机守卫情景击杀一只僵尸（NoAI 与有 AI 各一次）；gather 3 根原木；hunt 1 头牛；return-home 白天到达、夜晚入睡。边界：守卫不攻击猪和玩家；hunt 拒绝 player；collect-block 现有测试与实机检查通过。回归：全部单元测试；全量实机测试 |
 | 可运行边界 | 同 M1 |
 | 恢复 | 独立提交；无外部状态 |
-| 状态与证据 | planned；未执行 |
+| 状态与证据 | implemented-unverified：单元测试与静态检查已通过（见进展记录）；实机验收尚未完成 |
 
 ## M3：反射与策略
 
@@ -130,6 +130,7 @@
 | Q7 | 用户是否接受把聊天与游戏状态摘要发送给 OpenRouter？**已解决**：接受 | M4 | 用户答复（2026-10-16） | — | — |
 | Q8 | 关键反射与日常反射的划分是否合适（自卫目前是日常反射，可被 LLM 命令打断） | M3 | 情景测试与用户体验 | M3 实机验收 | 把自卫改为关键反射 |
 | Q9 | 本地测试时如何安全地提供 API key（Claude Desktop 用其配置的 env 字段；代理运行的测试进程看不到用户终端的环境变量） | M4 | M4 开始前与用户确认 | M4 开始前 | 读取用户主目录下权限为 600 的单独文件（需修订 F-015 的“只读环境变量”约束并记录） |
+| Q10 | collect-block 打断当前任务时应替换（取消）还是暂停？**已解决**：替换，并在结果中说明被取消的任务 | M2 | 用户答复（2026-10-16） | — | — |
 
 ## 进展与变更
 
@@ -176,3 +177,31 @@
 - 实机验收：**未完成**。`npm run test:live:world` 在启动阶段失败，原因是 Minecraft 局域网端口 63320 已关闭（`nc` 确认端口不可连接），bot 无法进入游戏；与代码无关。另确认服务器在连接被拒绝时继续运行、不会退出。等待用户重新开放局域网并提供端口。
 - 备注：连接被拒绝时日志会出现一条 “Unhandled rejection: ECONNREFUSED”，M1 之前即存在，不影响运行，暂不处理。
 
+
+### 2026-10-16 M2 实现
+
+- 前置条件说明：PLAN 要求 “M1 verified”，但 M1 实机验收仍未完成（局域网未开放）。用户指示继续实现 M2，因此 M2 最多只能达到 implemented-unverified；M1、M2 的实机验收在游戏重新开放后一起进行。
+- 分支说明：本次在 worktree 分支 `claude/m2-implementation-739199` 上完成，基于 `extra-tools` 的 M1 提交 `7abf2af`；合入 `extra-tools` 由用户决定。
+- 新增：`src/autopilot/threats.ts`、`src/autopilot/combat.ts`、`src/autopilot/behaviors/guard.ts`、`gather.ts`、`hunt.ts`、`return-home.ts`、`src/autopilot/behaviors/actions.ts`（实现时新增，契约 F-035），测试 `tests/threats.test.ts`、`tests/combat.test.ts`、`tests/work-behaviors.test.ts`，以及 `tests/movement-behaviors.test.ts` 的 return-home 部分。对应的 9 个 `blueprint/` 占位文件已删除。
+- 改动：`src/autopilot/task-manager.ts`（行为可读取共享服务〔路标存储〕；先校验与 prepare 再替换旧任务；start 调用串行化；等待旧任务停止期间 bot 离开时拒绝启动）、`src/autopilot/autopilot.ts`（注册 6 种行为，接收路标存储）、`src/tools/gathering-tools.ts`（collect-block 改为启动 gather 任务并等待，最长等待 timeoutMs + 5 秒；结果中说明被替换的任务）、`src/tool-factory.ts`（collect-block 移出身体类名单）、`src/main.ts`（只创建一个 WaypointStore）、`src/tools/task-tools.ts`（start-task 说明列出 6 种行为的参数）、`src/tools/entity-utils.ts`（导出 metadataValue）、`src/tools/block-utils.ts`（digPrecheck；digBlockAt 可选的 shouldStop 与强制视角）、`tests/_helpers.ts`（假世界补充 setGoal、clearControlStates、stopDigging）、`tests/gathering-tools.test.ts`（setup 改为通过 Autopilot 运行；原有断言不变，新增 3 个测试）、`tests/task-manager.test.ts`（新增替换顺序与并发启动测试）、`scripts/test-live-world.mjs`（新增 guard、gather、hunt、return-home 四个实机步骤，未运行）。
+- 设计调整（已同步到蓝图）：
+
+| 变更 | 原方案 | 新方案 | 原因 | 影响 |
+|---|---|---|---|---|
+| 武器冷却来源 | 按 minecraft-data 攻击速度 | 原版数值表（剑 1.6、斧 0.8–1.0、三叉戟 1.1、其他 4 次/秒） | minecraft-data 没有攻击速度字段（已核对 1.21.8） | F-011 |
+| 敌对/中立判定 | 未细化 | 按实体名的显式名单，不用 minecraft-data 分类 | 该分类把疣猪兽归为动物、把末影人与猪灵归为敌对 | F-010 |
+| cancelled 的战斗 | 结束时停止寻路 | cancelled 时不触碰身体 | 暂停后身体已属于手动命令或反射，停止寻路会让手动命令的 goto 失败（违反 G1/G4） | F-011、F-024 |
+| 横扫保护 | 无 | 目标旁有非法生物（例如被守卫的玩家、宠物）时不用剑出手 | 满力度的剑击会横扫误伤旁边的玩家（I1） | F-011 |
+| 打不动的目标 | 无 | 连续出手 10 秒没有受伤事件则放弃 | 例如嘎吱怪会让守卫无限出手 | F-011 |
+| 被驯服判定 | 只看 owneruuid | 另读 flags：马类 0x02，狼/猫/鹦鹉 0x04 | 1.21 的马、驴、骡、羊驼、骆驼没有 owneruuid | F-008、F-010 |
+| 守卫追击距离 | maxChase 默认 16 | 实际追击距离不小于守卫半径 | 否则半径内的生物永远打不到 | F-006 |
+| 替换任务的顺序 | 先取消旧任务再 prepare | 先校验与 prepare，再取消旧任务 | 错误的参数（例如方块名拼错）不应毁掉正在运行的任务 | F-003 |
+| 暂停与失败 | 未区分 | 新增 F-035：被暂停打断的步骤等待后重试，不计失败 | 仲裁器抢占会让 goto 失败，否则 gather 会跳过本可挖的方块 | F-035、F-007 |
+| hunt 的类型 | 任何实体名 | 只限生物类别 | 攻击物品等实体会被服务器踢出 | F-008 |
+
+- 审查过程：用多代理工作流按契约编写测试，并从契约符合性、暂停与租约、安全、mineflayer 实际行为四个角度审查；每条发现由独立的验证代理复核（第一轮确认 15 条、驳回 5 条），修复后又进行了两轮回归测试与复审，复审发现的问题（并发启动竞态、史莱姆体积、gather 先走路再做安全检查等）都已修复并有回归测试。
+- 实际执行的检查（2026-10-16）：`tsc --noEmit` 通过；`npm run lint` 无错误；`npm test` 458 个测试通过（连续运行结果相同；原有 313 个全部保留）；`npm run build` 成功，生成 `dist/autopilot/{threats,combat}.js` 与 `dist/autopilot/behaviors/*.js`；`node --check scripts/test-live-world.mjs` 通过。
+- 实机验收：**未完成**。本地没有监听中的 Minecraft 局域网端口（63320 不可连接），`npm run test:live:world` 未运行。验收时需要：开启作弊的测试世界、局域网端口；运行 `npm run build` 后执行 `npm run test:live:world -- <端口> --allow-world-changes`，连续两轮。
+- 实机验收需要特别观察：①“连续出手 10 秒没有受伤事件则放弃”依赖 mineflayer 的 `entityHurt`（1.20+ 来自 damage_event 数据包），需在 26.1.2 上确认空手打僵尸时会持续收到该事件；②守卫时被守卫玩家站在目标旁，bot 不用剑出手。
+- 用户决定（2026-10-16）：collect-block 保持按 E-004 启动 gather 任务并**替换（取消）**当前任务，在结果中说明被取消的任务；不改回 M2 之前“暂停、可 resume-task 恢复”的做法。
+- 文件状态：M2 新增文件为 `implemented-unverified`。

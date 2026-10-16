@@ -36,11 +36,29 @@ export async function equipBestTool(bot: mineflayer.Bot, block: Block): Promise<
   }
 }
 
-export async function digBlockAt(bot: mineflayer.Bot, pos: Vec3): Promise<DigResult> {
+export class DigInterrupted extends Error {
+  constructor() {
+    super('digging interrupted');
+  }
+}
+
+/**
+ * `shouldStop` lets a background task back off when it loses the body: it is checked before each step, and the
+ * dig then uses a forced look so nothing can run between the last check and the start of digging.
+ */
+/** Why a block must not or cannot be dug, checked before walking to it; null when it can be dug. */
+export function digPrecheck(bot: mineflayer.Bot, pos: Vec3): Exclude<DigResult, 'dug'> | null {
   const block = bot.blockAt(pos);
   if (isAir(block) || isLiquid(block)) return 'air';
   if (!block!.diggable) return 'unbreakable';
   if (hasAdjacentLava(bot, pos)) return 'lava';
+  return null;
+}
+
+export async function digBlockAt(bot: mineflayer.Bot, pos: Vec3, shouldStop?: () => boolean): Promise<DigResult> {
+  const unsafe = digPrecheck(bot, pos);
+  if (unsafe) return unsafe;
+  const block = bot.blockAt(pos);
 
   if (!bot.canDigBlock(block!) || !bot.canSeeBlock(block!)) {
     await bot.pathfinder.goto(new goals.GoalNear(pos.x, pos.y, pos.z, 2));
@@ -50,8 +68,14 @@ export async function digBlockAt(bot: mineflayer.Bot, pos: Vec3): Promise<DigRes
   const current = bot.blockAt(pos);
   if (isAir(current)) return 'dug';
 
+  if (shouldStop?.()) throw new DigInterrupted();
   await equipBestTool(bot, current!);
-  await bot.dig(current!);
+  if (!shouldStop) {
+    await bot.dig(current!);
+    return 'dug';
+  }
+  if (shouldStop()) throw new DigInterrupted();
+  await bot.dig(current!, true);
   return 'dug';
 }
 

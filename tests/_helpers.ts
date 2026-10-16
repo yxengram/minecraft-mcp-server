@@ -37,7 +37,9 @@ export function createFakeWorld(initial: Record<string, string>, botPosition = n
     entity: { position: botPosition },
     entities: {},
     heldItem: null as unknown,
-    pathfinder: { goto: sinon.stub().resolves(), bestHarvestTool: sinon.stub().returns(null), stop: sinon.stub() },
+    pathfinder: { goto: sinon.stub().resolves(), bestHarvestTool: sinon.stub().returns(null), stop: sinon.stub(), setGoal: sinon.stub(), goal: null as unknown },
+    clearControlStates: sinon.stub(),
+    stopDigging: sinon.stub(),
     blockAt: (pos: Vec3) => {
       const name = blocks.get(key(pos)) ?? 'air';
       return { name, position: pos.floored(), diggable: name !== 'bedrock' };

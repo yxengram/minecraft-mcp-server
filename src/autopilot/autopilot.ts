@@ -1,16 +1,25 @@
-// Contract: docs/BLUEPRINT.md F-001 (M1 scope: arbiter, tasks, bind/unbind; reflexes, policy and decisions come later).
+// Contract: docs/BLUEPRINT.md F-001 (M1–M2 scope: arbiter, tasks, behaviors, bind/unbind; reflexes, policy and decisions come later).
 import type mineflayer from 'mineflayer';
 import { ActionArbiter, HolderInfo, PRIORITY } from './action-arbiter.js';
 import { TaskManager, TaskRecord, BehaviorDefinition } from './task-manager.js';
 import { followBehavior } from './behaviors/follow.js';
 import { fleeBehavior } from './behaviors/flee.js';
+import { guardBehavior } from './behaviors/guard.js';
+import { gatherBehavior } from './behaviors/gather.js';
+import { huntBehavior } from './behaviors/hunt.js';
+import { returnHomeBehavior } from './behaviors/return-home.js';
 import type { EventStore } from '../event-store.js';
+import type { WaypointStore } from '../waypoint-store.js';
 import { stopPathfinder } from '../tools/movement-utils.js';
 
-export const BEHAVIORS = [followBehavior, fleeBehavior] as unknown as BehaviorDefinition<never, never>[];
+export const BEHAVIORS = [
+  followBehavior, fleeBehavior, guardBehavior, gatherBehavior, huntBehavior, returnHomeBehavior
+] as unknown as BehaviorDefinition<never, never>[];
 
 export interface AutopilotOptions {
   events: EventStore;
+  /** Saved waypoints, read by guard and return-home. */
+  waypoints?: WaypointStore;
   log?: (level: string, message: string) => void;
 }
 
@@ -31,6 +40,7 @@ export class Autopilot {
       getArbiter: () => this.arbiter,
       events: options.events,
       behaviors: BEHAVIORS,
+      services: { waypoints: options.waypoints },
       log: options.log
     });
   }

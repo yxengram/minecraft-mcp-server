@@ -24,7 +24,7 @@ export function registerTaskTools(factory: ToolFactory, getAutopilot: () => Auto
 
   factory.registerTool(
     "start-task",
-    `Start a background task and return immediately. The task keeps running while you do other things; progress, pauses and the result appear in get-events (use wait-for-event to be woken up). Starting a task replaces the current one unless replace is false. Behaviors: ${behaviorHelp}. Params: follow {entityId | target, range?, maxDistance?}; flee {entityId | target, distance?, maxDistance?}, where target is a player name or entity type`,
+    `Start a background task and return immediately. The task keeps running while you do other things; progress, pauses and the result appear in get-events (use wait-for-event to be woken up). Starting a task replaces the current one unless replace is false. Behaviors: ${behaviorHelp}. Params: follow {entityId | target, range?, maxDistance?}; flee {entityId | target, distance?, maxDistance?}; guard {entityId | target | waypoint | x,y,z (default: current position), radius?, maxChase?}; gather {blockType, count?, maxDistance?, timeoutMs?}; hunt {animal, count?, maxDistance?, timeoutMs?}; return-home {waypoint? (default 'home'), sleep?, timeoutMs?}, where target is a player name or entity type`,
     {
       behavior: z.enum(behaviorNames).describe("Behavior to run"),
       params: z.record(z.unknown()).optional().describe("Behavior parameters, e.g. { \"target\": \"Steve\", \"range\": 3 }"),

@@ -3,14 +3,21 @@ import type mineflayer from 'mineflayer';
 import type { ZodType, ZodTypeDef } from 'zod';
 import { ActionArbiter, Lease, PRIORITY, Preemptor } from './action-arbiter.js';
 import type { EventStore } from '../event-store.js';
+import type { WaypointStore } from '../waypoint-store.js';
 import { stopPathfinder } from '../tools/movement-utils.js';
 
 export type TaskStatus = 'running' | 'paused' | 'done' | 'failed' | 'cancelled';
 export type TaskSource = 'llm' | 'chat' | 'tool';
 
+/** Shared stores behaviors may read, e.g. saved waypoints for guard and return-home. */
+export interface BehaviorServices {
+  waypoints?: WaypointStore;
+}
+
 export interface BehaviorContext<P, S> {
   bot: mineflayer.Bot;
   params: P;
+  services: BehaviorServices;
   /** Whatever `prepare` returned, e.g. the resolved target entity. */
   prepared: S;
   signal: AbortSignal;
@@ -30,7 +37,7 @@ export interface BehaviorDefinition<P = unknown, S = unknown> {
   /** One-line parameter summary for task listings and events. */
   summarize(params: P): string;
   /** Synchronous checks before the task exists; return { error } to refuse the start. */
-  prepare?(bot: mineflayer.Bot, params: P): { error: string } | { value: S };
+  prepare?(bot: mineflayer.Bot, params: P, services: BehaviorServices): { error: string } | { value: S };
   /** Runs in the background; returns the result text, throws to fail. */
   run(context: BehaviorContext<P, S>): Promise<string>;
 }
@@ -70,6 +77,7 @@ export interface TaskManagerOptions {
   getArbiter: () => ActionArbiter;
   events: EventStore;
   behaviors: BehaviorDefinition<never, never>[];
+  services?: BehaviorServices;
   log?: (level: string, message: string) => void;
 }
 
@@ -102,6 +110,8 @@ export class TaskManager {
   private current: RunningTask | null = null;
   private history: TaskRecord[] = [];
   private nextId = 1;
+  // start() awaits the old task's cancellation; queue calls so two starts can't both install a task.
+  private startQueue: Promise<unknown> = Promise.resolve();
   private readonly behaviors = new Map<string, BehaviorDefinition<unknown, unknown>>();
 
   constructor(private readonly options: TaskManagerOptions) {
@@ -130,7 +140,13 @@ export class TaskManager {
     return `task ${record.id} ${record.behavior} (${parts.join('; ')})`;
   }
 
-  async start(behaviorName: string, rawParams: unknown, { replace = true, source = 'llm' as TaskSource } = {}): Promise<StartResult> {
+  start(behaviorName: string, rawParams: unknown, options: { replace?: boolean; source?: TaskSource } = {}): Promise<StartResult> {
+    const run = this.startQueue.then(() => this.startNow(behaviorName, rawParams, options));
+    this.startQueue = run.catch(() => {});
+    return run;
+  }
+
+  private async startNow(behaviorName: string, rawParams: unknown, { replace = true, source = 'llm' as TaskSource }: { replace?: boolean; source?: TaskSource }): Promise<StartResult> {
     const behavior = this.behaviors.get(behaviorName);
     if (!behavior) {
       return { ok: false, error: `Unknown behavior '${behaviorName}'. Available: ${this.behaviorNames().join(', ')}` };
@@ -143,20 +159,31 @@ export class TaskManager {
     }
     const params = parsed.data;
 
-    if (this.current) {
-      if (!replace) {
-        return { ok: false, error: `Task ${this.current.record.id} (${this.current.record.behavior}) is already ${this.current.record.status}. Cancel it first or pass replace: true` };
-      }
-      await this.cancel(this.current.record.id, 'replaced');
+    if (this.current && !replace) {
+      return { ok: false, error: `Task ${this.current.record.id} (${this.current.record.behavior}) is already ${this.current.record.status}. Cancel it first or pass replace: true` };
     }
 
+    // Check the new task can start before replacing the current one, so a refused start leaves it running.
     const bot = this.options.getBot();
     let prepared: unknown;
     if (behavior.prepare) {
-      const outcome = behavior.prepare(bot, params);
+      const outcome = behavior.prepare(bot, params, this.options.services ?? {});
       if ('error' in outcome) return { ok: false, error: outcome.error };
       prepared = outcome.value;
     }
+
+    if (this.current) {
+      await this.cancel(this.current.record.id, 'replaced');
+      // The bot may have left (or rejoined) while the old task was stopping; don't start against a stale bot.
+      let stillHere: mineflayer.Bot | null = null;
+      try {
+        stillHere = this.options.getBot();
+      } catch {
+        // Not in the game any more.
+      }
+      if (stillHere !== bot) return { ok: false, error: 'The bot left the game while the task was starting. Try again' };
+    }
+    const arbiter = this.options.getArbiter();
 
     const record: TaskRecord = {
       id: `t${this.nextId++}`,
@@ -179,9 +206,9 @@ export class TaskManager {
     this.current = task;
     this.options.events.addEvent('task_started', `${record.id} ${record.behavior}: started (${record.summary}; source ${source})`);
 
-    task.lease = this.options.getArbiter().acquireOrQueue(this.leaseRequest(task));
+    task.lease = arbiter.acquireOrQueue(this.leaseRequest(task));
     if (!task.lease.isActive()) {
-      this.markPaused(task, `waiting for ${this.options.getArbiter().holder()?.holder ?? 'another action'}`, true);
+      this.markPaused(task, `waiting for ${arbiter.holder()?.holder ?? 'another action'}`, true);
     }
 
     void this.runBehavior(task, behavior, bot, params, prepared);
@@ -271,6 +298,7 @@ export class TaskManager {
     const context: BehaviorContext<unknown, unknown> = {
       bot,
       params,
+      services: this.options.services ?? {},
       prepared,
       signal: task.controller.signal,
       isPaused: () => task.record.status === 'paused',

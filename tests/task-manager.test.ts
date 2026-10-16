@@ -217,3 +217,313 @@ test.serial('describe summarizes the task for interruption reports', async (t) =
   t.is(tasks.describe(tasks.currentTask()!), 'task t1 demo (label a; running for 2m10s; step: working; started work)');
   await tasks.cancelAll('test finished');
 });
+
+// A second behavior whose prepare is a spy, so tests can see whether it ran and make it refuse.
+function setupWithPicky() {
+  const base = setup();
+  const prepare = sinon.spy((_bot: unknown, params: { target: string }) =>
+    (params.target === 'nowhere' ? { error: 'Unknown waypoint nowhere' } : { value: params.target }));
+  const picky: BehaviorDefinition<{ target: string }, string> = {
+    name: 'picky',
+    description: 'test behavior with a spied prepare',
+    schema: z.object({ target: z.string() }),
+    summarize: params => `target ${params.target}`,
+    prepare,
+    run: ({ signal }) => new Promise<string>((_resolve, reject) => {
+      signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+    })
+  };
+  const tasks = new TaskManager({
+    getBot: () => base.bot as never,
+    getArbiter: () => base.arbiter,
+    events: base.events,
+    behaviors: [controllable(base.controls), picky] as never
+  });
+  return { ...base, tasks, prepare };
+}
+
+test('a start refused by prepare leaves the running task untouched', async (t) => {
+  const { tasks, events, types, bot, arbiter } = setupWithPicky();
+  await tasks.start('demo', { label: 'one' });
+  const stopCalls = bot.pathfinder.setGoal.callCount + bot.pathfinder.stop.callCount + bot.clearControlStates.callCount;
+  const lastId = events.getLastId();
+
+  const refused = await tasks.start('picky', { target: 'nowhere' });
+  const refusedSame = await tasks.start('demo', { label: 'missing' });
+
+  t.false(refused.ok);
+  if (!refused.ok) t.is(refused.error, 'Unknown waypoint nowhere');
+  t.false(refusedSame.ok);
+  if (!refusedSame.ok) t.is(refusedSame.error, 'target missing');
+  const current = tasks.currentTask();
+  t.is(current?.id, 't1');
+  t.is(current?.status, 'running');
+  t.is(events.getLastId(), lastId);
+  t.false(types().includes('task_cancelled'));
+  t.is(tasks.list().history.length, 0);
+  t.true(arbiter.holder()?.holder.startsWith('task t1'));
+  t.is(bot.pathfinder.setGoal.callCount + bot.pathfinder.stop.callCount + bot.clearControlStates.callCount, stopCalls);
+  await tasks.cancelAll('test finished');
+});
+
+test('a start with invalid params leaves the running task untouched', async (t) => {
+  const { tasks, events, types, prepare } = setupWithPicky();
+  await tasks.start('demo', { label: 'one' });
+  const lastId = events.getLastId();
+
+  const invalid = await tasks.start('picky', { target: 7 });
+  const missing = await tasks.start('picky', {});
+
+  t.false(invalid.ok);
+  if (!invalid.ok) t.regex(invalid.error, /Invalid params for picky: target: Expected string/);
+  t.false(missing.ok);
+  if (!missing.ok) t.regex(missing.error, /Invalid params for picky: target:/);
+  t.false(prepare.called);
+  t.is(tasks.currentTask()?.id, 't1');
+  t.is(tasks.currentTask()?.status, 'running');
+  t.is(events.getLastId(), lastId);
+  t.false(types().includes('task_cancelled'));
+  await tasks.cancelAll('test finished');
+});
+
+test('a valid replacement cancels the old task as replaced before the new one starts', async (t) => {
+  const { tasks, events, prepare } = setupWithPicky();
+  await tasks.start('demo', { label: 'one' });
+
+  const replaced = await tasks.start('picky', { target: 'home' });
+
+  t.true(replaced.ok);
+  if (replaced.ok) t.is(replaced.task.id, 't2');
+  t.true(prepare.calledOnce);
+  const all = events.query({ limit: 100 }).events;
+  const cancelled = all.find(event => event.type === 'task_cancelled');
+  const started = all.find(event => event.type === 'task_started' && event.message.startsWith('t2 '));
+  t.truthy(cancelled);
+  t.truthy(started);
+  t.true(cancelled!.message.includes('t1 demo: cancelled (replaced)'));
+  t.true(started!.message.includes('t2 picky: started (target home'));
+  t.true(cancelled!.id < started!.id);
+  t.is(tasks.list().history[0].id, 't1');
+  t.is(tasks.list().history[0].status, 'cancelled');
+  t.is(tasks.currentTask()?.id, 't2');
+  await tasks.cancelAll('test finished');
+});
+
+test('replace false refuses before calling prepare', async (t) => {
+  const { tasks, events, prepare } = setupWithPicky();
+  await tasks.start('demo', { label: 'one' });
+  const lastId = events.getLastId();
+
+  const refused = await tasks.start('picky', { target: 'home' }, { replace: false });
+  const refusedBadTarget = await tasks.start('picky', { target: 'nowhere' }, { replace: false });
+
+  t.false(refused.ok);
+  if (!refused.ok) t.regex(refused.error, /Task t1 \(demo\) is already running/);
+  t.false(refusedBadTarget.ok);
+  if (!refusedBadTarget.ok) t.regex(refusedBadTarget.error, /Task t1 \(demo\) is already running/);
+  t.false(prepare.called);
+  t.is(tasks.currentTask()?.id, 't1');
+  t.is(events.getLastId(), lastId);
+  await tasks.cancelAll('test finished');
+});
+
+// A behavior that ignores its cancel signal for `ignoreMs` (like one stuck awaiting a pending promise),
+// plus the controllable demo behavior. Every run records its label and signal so tests can spot orphans.
+function setupWithStubborn(ignoreMs: number) {
+  const base = setup();
+  const runs: { label: string; signal: AbortSignal; finished: boolean }[] = [];
+  const stubborn: BehaviorDefinition<{ label: string }, string> = {
+    name: 'stubborn',
+    description: 'test behavior that is slow to honour abort',
+    schema: z.object({ label: z.string() }),
+    summarize: params => `label ${params.label}`,
+    run: async ({ params, signal }) => {
+      const entry = { label: params.label, signal, finished: false };
+      runs.push(entry);
+      await new Promise(resolve => setTimeout(resolve, ignoreMs));
+      entry.finished = true;
+      return `stubborn ${params.label} finished`;
+    }
+  };
+  const demo = controllable(base.controls);
+  const tracked: BehaviorDefinition<{ label: string }, string> = {
+    ...demo,
+    run: context => {
+      runs.push({ label: context.params.label, signal: context.signal, finished: false });
+      return demo.run(context);
+    }
+  };
+  const tasks = new TaskManager({
+    getBot: () => base.bot as never,
+    getArbiter: () => base.arbiter,
+    events: base.events,
+    behaviors: [tracked, stubborn] as never
+  });
+  return { ...base, tasks, runs };
+}
+
+test.serial('concurrent replacing starts while the old task is slow to stop leave only the last one running', async (t) => {
+  const clock = sinon.useFakeTimers({ now: 1.7e12 });
+  t.teardown(() => clock.restore());
+  const { tasks, arbiter, events, runs } = setupWithStubborn(1000);
+  const first = await tasks.start('stubborn', { label: 'A' });
+  t.true(first.ok);
+
+  // Neither start is awaited before the other is issued.
+  const startB = tasks.start('demo', { label: 'B' });
+  const startC = tasks.start('demo', { label: 'C' });
+  await clock.tickAsync(3000);
+  const [resultB, resultC] = await Promise.all([startB, startC]);
+
+  t.true(resultB.ok);
+  t.true(resultC.ok);
+  if (!resultB.ok || !resultC.ok) return;
+  t.is(resultB.task.id, 't2');
+  t.is(resultC.task.id, 't3');
+
+  const { current, history } = tasks.list();
+  t.is(current?.id, 't3');
+  t.is(current?.status, 'running');
+  t.is(current?.summary, 'label C');
+  t.deepEqual(history.map(record => [record.id, record.status, record.result]), [
+    ['t2', 'cancelled', 'replaced'],
+    ['t1', 'cancelled', 'replaced']
+  ]);
+  t.true(arbiter.holder()?.holder.startsWith('task t3 demo'));
+
+  // Each old task was cancelled before its successor started.
+  const all = events.query({ limit: 100 }).events;
+  const idOf = (type: string, prefix: string) => all.find(event => event.type === type && event.message.startsWith(prefix))?.id ?? -1;
+  t.true(idOf('task_cancelled', 't1 ') < idOf('task_started', 't2 '));
+  t.true(idOf('task_cancelled', 't2 ') < idOf('task_started', 't3 '));
+  t.is(all.filter(event => event.type === 'task_started').length, 3);
+
+  // No behavior is left running without a task: only C's signal is still live.
+  t.deepEqual(runs.map(run => [run.label, run.signal.aborted]), [['A', true], ['B', true], ['C', false]]);
+  t.true(runs[0].finished);
+
+  const cancelled = await tasks.cancel(undefined, 'cancelled by cancel-task');
+  t.true(cancelled.ok);
+  if (cancelled.ok) t.is(cancelled.task.id, 't3');
+  t.is(tasks.currentTask(), null);
+  t.is(arbiter.holder(), null);
+  t.true(runs.every(run => run.signal.aborted));
+  await clock.tickAsync(5000);
+  t.is(tasks.currentTask(), null);
+  t.is(arbiter.holder(), null);
+});
+
+test.serial('an old task that outlives the cancel grace period does not disturb the tasks started after it', async (t) => {
+  const clock = sinon.useFakeTimers({ now: 1.7e12 });
+  t.teardown(() => clock.restore());
+  const { tasks, arbiter, bot, runs } = setupWithStubborn(5000);
+  await tasks.start('stubborn', { label: 'A' });
+
+  const startB = tasks.start('stubborn', { label: 'B' });
+  const startC = tasks.start('stubborn', { label: 'C' });
+  // A's cancel gives up after the 2 s grace, then B's cancel gives up after another 2 s.
+  await clock.tickAsync(4500);
+  const [resultB, resultC] = await Promise.all([startB, startC]);
+  t.true(resultB.ok);
+  t.true(resultC.ok);
+  t.is(tasks.currentTask()?.id, 't3');
+  t.true(arbiter.holder()?.holder.startsWith('task t3 stubborn'));
+  const stopCalls = bot.clearControlStates.callCount;
+
+  // A (at 5 s) and B (at about 7 s) finish late, after they were replaced; C (about 9 s) keeps the body and its status.
+  await clock.tickAsync(3000);
+  t.true(runs[0].finished);
+  t.true(runs[1].finished);
+  t.false(runs[2].finished);
+  t.is(tasks.currentTask()?.id, 't3');
+  t.is(tasks.currentTask()?.status, 'running');
+  t.true(arbiter.holder()?.holder.startsWith('task t3 stubborn'));
+  t.is(bot.clearControlStates.callCount, stopCalls);
+  t.deepEqual(tasks.list().history.map(record => [record.id, record.status, record.result]), [
+    ['t2', 'cancelled', 'replaced'],
+    ['t1', 'cancelled', 'replaced']
+  ]);
+
+  // C also ignores the signal, so cancel returns after the grace period.
+  const cancelC = tasks.cancel('t3', 'cancelled by cancel-task');
+  t.is(tasks.currentTask(), null);
+  t.is(arbiter.holder(), null);
+  await clock.tickAsync(6000);
+  t.true((await cancelC).ok);
+  t.is(tasks.currentTask(), null);
+  t.is(arbiter.holder(), null);
+  t.is(tasks.list().history[0].status, 'cancelled');
+});
+
+test.serial('a replace:false start issued right after a replacing start is refused because that task is current', async (t) => {
+  const clock = sinon.useFakeTimers({ now: 1.7e12 });
+  t.teardown(() => clock.restore());
+  const { tasks, arbiter, events, runs } = setupWithStubborn(1000);
+  await tasks.start('stubborn', { label: 'A' });
+
+  const startY = tasks.start('demo', { label: 'Y' });
+  const startX = tasks.start('demo', { label: 'X' }, { replace: false });
+  await clock.tickAsync(3000);
+  const [resultY, resultX] = await Promise.all([startY, startX]);
+
+  t.true(resultY.ok);
+  if (resultY.ok) t.is(resultY.task.id, 't2');
+  t.false(resultX.ok);
+  if (!resultX.ok) t.regex(resultX.error, /Task t2 \(demo\) is already running/);
+  t.is(tasks.currentTask()?.id, 't2');
+  t.true(arbiter.holder()?.holder.startsWith('task t2 demo'));
+  t.false(runs.some(run => run.label === 'X'));
+  t.is(events.query({ types: ['task_started'], limit: 10 }).events.length, 2);
+  t.deepEqual(tasks.list().history.map(record => record.id), ['t1']);
+  await tasks.cancelAll('test finished');
+});
+
+test.serial('with no task running, a replace:false start right after another start is refused', async (t) => {
+  const clock = sinon.useFakeTimers({ now: 1.7e12 });
+  t.teardown(() => clock.restore());
+  const { tasks, runs } = setupWithStubborn(1000);
+
+  const startY = tasks.start('demo', { label: 'Y' });
+  const startX = tasks.start('demo', { label: 'X' }, { replace: false });
+  const [resultY, resultX] = await Promise.all([startY, startX]);
+
+  t.true(resultY.ok);
+  t.false(resultX.ok);
+  if (!resultX.ok) t.regex(resultX.error, /Task t1 \(demo\) is already running/);
+  t.is(tasks.currentTask()?.id, 't1');
+  t.deepEqual(runs.map(run => run.label), ['Y']);
+  await tasks.cancelAll('test finished');
+});
+
+// Final review: if the bot leaves while the old task is stopping, the replacement must not be installed half-way.
+test('a replacement started while the bot leaves the game is refused and leaves no task behind', async (t) => {
+  const bot = { pathfinder: { stop: sinon.stub(), setGoal: sinon.stub() }, clearControlStates: sinon.stub() };
+  let inGame = true;
+  const stubborn: BehaviorDefinition<Record<string, never>, null> = {
+    name: 'stubborn',
+    description: 'ignores cancellation for a moment',
+    schema: z.object({}),
+    summarize: () => 'stubborn',
+    run: () => new Promise(resolve => setTimeout(() => resolve('late'), 200))
+  };
+  const tasks = new TaskManager({
+    getBot: () => {
+      if (!inGame) throw new Error('not in game');
+      return bot as never;
+    },
+    getArbiter: () => new ActionArbiter({ stopBody: sinon.stub() }),
+    events: new EventStore(),
+    behaviors: [stubborn] as never
+  });
+
+  t.true((await tasks.start('stubborn', {})).ok);
+  const replacement = tasks.start('stubborn', {});
+  // Leave once the replacement is waiting for the old task to stop.
+  await new Promise(resolve => setTimeout(resolve, 20));
+  inGame = false;
+  const result = await replacement;
+
+  t.false(result.ok);
+  if (!result.ok) t.regex(result.error, /left the game/);
+  t.is(tasks.currentTask(), null, 'no phantom running task');
+});
