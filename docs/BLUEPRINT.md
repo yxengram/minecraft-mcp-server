@@ -10,7 +10,7 @@
 |---|---|
 | 设计版本 | v0.3（2026-10-16）：按用户对未决问题的答复修订，变更见 docs/PLAN.md |
 | 目标版本 | Autopilot v1：阶段一到四（任务与行为、反射与策略、决策模型、情景测试） |
-| 当前阶段 | M1、M2 已实现（单元测试通过，实机验收待完成）；M3～M6 仍为说明性骨架 |
+| 当前阶段 | M1、M2 已实现并通过实机验收（2026-10-16）；M3～M6 仍为说明性骨架 |
 | 状态标记 | **已确认**：用户已同意，或已用一手资料/实机核实。**暂定**：设计者提出的合理默认值，可在实现时调整，需记录。**待验证**：依赖实测结果，验证前不能当作事实 |
 | 与现有代码的关系 | 现有代码保持可构建、可测试。新增文件实现前只存在于 `blueprint/` 镜像目录；对现有文件的改动在「F2. 现有文件的计划改动」中描述，不创建占位副本 |
 
@@ -324,7 +324,7 @@ src/main.ts（现有，改动）--创建并注册--> src/autopilot/autopilot.ts�
 
 ### F-001 · `src/autopilot/autopilot.ts`
 
-- **模块**：M-WIRE 组装　**里程碑**：M1（M3、M4 扩展）　**状态**：implemented-unverified（M1 范围：仲裁器、任务、绑定与解绑；策略重置、反射与决策在 M3、M4 加入）　**设计**：已确定：模块划分已获同意；回调名称暂定
+- **模块**：M-WIRE 组装　**里程碑**：M1（M3、M4 扩展）　**状态**：verified（M1 范围：仲裁器、任务、绑定与解绑；策略重置、反射与决策在 M3、M4 加入）　**设计**：已确定：模块划分已获同意；回调名称暂定
 - **职责**：为当前 bot 创建并连接动作仲裁器、任务管理器、反射引擎、策略存储和决策钩子；bot 就绪时绑定，断线时解绑；bot 每次重新进入游戏（首次连接或断线后重连，例如重启游戏后）时把策略恢复为默认值；向工具层提供这些服务的访问入口。
 - **不负责**：不包含任何行为、反射或决策规则；不注册 MCP 工具（由 src/main.ts 注册）；不读取环境变量中的 API key（由 src/decisions/openrouter-client.ts 读取）。
 - **输入**：来源：src/main.ts（创建时传入）；src/bot-connection.ts 的新回调 onBotReady、onBotEnd、onDamage、onChatMessage、onWhisper（经 src/main.ts 转接）。 内容：当前 bot 实例、现有 EventStore 与 WaypointStore、启动配置（决策模型 id）。聊天命令授权名单不属于启动配置，只能由 LLM 通过 set-policy 设置。 限制：同一时刻只绑定一个 bot；bot 未就绪时，工具层访问服务应得到“bot 未就绪”的明确错误，而不是空对象。
@@ -338,7 +338,7 @@ src/main.ts（现有，改动）--创建并注册--> src/autopilot/autopilot.ts�
 
 ### F-002 · `src/autopilot/action-arbiter.ts`
 
-- **模块**：M-ARB 动作仲裁　**里程碑**：M1　**状态**：implemented-unverified　**设计**：已确定：唯一控制权与抢占/恢复；优先级数值暂定
+- **模块**：M-ARB 动作仲裁　**里程碑**：M1　**状态**：verified　**设计**：已确定：唯一控制权与抢占/恢复；优先级数值暂定
 - **职责**：维护 bot 身体（移动、视角、攻击、使用手中物品）的唯一控制权：按优先级（关键反射 30、手动 20、日常反射 15、任务 10）授予、抢占、暂停、恢复和释放租约。被反射抢占的持有者在反射结束后自动恢复；被手动命令抢占的持有者被挂起且不自动恢复，需要重新申请。
 - **不负责**：不知道持有者在做什么；不决定做什么；不写事件（由持有者写）。只在抢占时做兜底停止，不替持有者执行动作。
 - **输入**：来源：src/autopilot/reflex-engine.ts（关键反射级与日常反射级请求）、src/tool-factory.ts（手动级请求）、src/autopilot/task-manager.ts（任务级请求，包括 resume-task 时的重新申请）。 内容：请求者名称、优先级、暂停回调（附带抢占者类型：反射或手动）、恢复回调、可选的等待超时（手动级遇到关键反射时最长等待 10 秒）。 限制：优先级只能是四个固定值之一；同一请求者不能同时持有两个租约。
@@ -352,7 +352,7 @@ src/main.ts（现有，改动）--创建并注册--> src/autopilot/autopilot.ts�
 
 ### F-003 · `src/autopilot/task-manager.ts`
 
-- **模块**：M-TASK 任务与行为　**里程碑**：M1　**状态**：implemented-unverified　**设计**：已确定：生命周期与事件；进度节流间隔与历史条数暂定
+- **模块**：M-TASK 任务与行为　**里程碑**：M1　**状态**：verified　**设计**：已确定：生命周期与事件；进度节流间隔与历史条数暂定
 - **职责**：管理后台任务的生命周期：查找已注册行为、校验参数、启动、记录进度与当前步骤、响应仲裁器的暂停与恢复、恢复被手动命令挂起的任务、取消和结束；提供当前任务的快照，供手动命令报告中断前的状态；为每次状态变化写事件；保存当前任务与最近 20 个已结束任务。同时定义行为必须遵守的契约：参数模式、运行上下文、进度与当前步骤的报告方式、取消信号与暂停等待；M2 起，prepare 与运行上下文还会收到共享服务（目前只有路标存储，供 guard 与 return-home 读取）。
 - **不负责**：不实现具体行为（在 src/autopilot/behaviors/）；不决定何时启动任务（由 LLM 或决策钩子决定）；不做威胁检测。
 - **输入**：来源：src/tools/task-tools.ts（启动、恢复、取消、查询）；src/decisions/decision-hooks.ts、src/tools/follow-tools.ts、src/tools/gathering-tools.ts、src/tools/position-tools.ts（启动、取消）；src/tool-factory.ts（读取快照）；src/autopilot/action-arbiter.ts（暂停与恢复回调，附抢占者类型）。 内容：行为名、行为参数对象、是否替换当前任务（默认替换）、来源标记（llm / chat / tool）。 限制：同一时刻至多一个活动任务；参数必须通过该行为自己的 zod 模式；行为名必须已注册。
@@ -369,7 +369,7 @@ src/main.ts（现有，改动）--创建并注册--> src/autopilot/autopilot.ts�
 
 ### F-004 · `src/autopilot/behaviors/follow.ts`
 
-- **模块**：M-TASK 任务与行为　**里程碑**：M1　**状态**：implemented-unverified　**设计**：已确定；“目标丢失”判定时长暂定 10 秒
+- **模块**：M-TASK 任务与行为　**里程碑**：M1　**状态**：verified　**设计**：已确定；“目标丢失”判定时长暂定 10 秒
 - **职责**：持续跟随一个实体（玩家名、实体 id 或类型），保持在指定距离内，直到被取消。现有 follow-entity 工具改由本行为实现。
 - **不负责**：不攻击；不处理威胁（由反射负责）；不决定跟随谁。
 - **输入**：来源：src/autopilot/task-manager.ts（运行时传入参数、上下文和取消信号）。 内容：目标（entityId、玩家名或实体类型之一）、保持距离（默认 3，范围 1–16）、搜索距离（默认 32）。 限制：目标在启动时必须可见，否则启动失败；保持距离为正数。
@@ -383,7 +383,7 @@ src/main.ts（现有，改动）--创建并注册--> src/autopilot/autopilot.ts�
 
 ### F-005 · `src/autopilot/behaviors/flee.ts`
 
-- **模块**：M-TASK 任务与行为　**里程碑**：M1　**状态**：implemented-unverified　**设计**：已确定；“保持 2 秒视为完成”暂定
+- **模块**：M-TASK 任务与行为　**里程碑**：M1　**状态**：verified　**设计**：已确定；“保持 2 秒视为完成”暂定
 - **职责**：远离一个实体直到达到指定距离并保持 2 秒后完成。现有 flee-from 工具改由本行为实现。
 - **不负责**：不攻击；不选择逃离目标。
 - **输入**：来源：src/autopilot/task-manager.ts。 内容：目标（entityId、玩家名或实体类型之一）、逃离距离（默认 16，范围 2–64）。 限制：目标在启动时必须可见。
@@ -397,7 +397,7 @@ src/main.ts（现有，改动）--创建并注册--> src/autopilot/autopilot.ts�
 
 ### F-006 · `src/autopilot/behaviors/guard.ts`
 
-- **模块**：M-TASK 任务与行为　**里程碑**：M2　**状态**：implemented-unverified　**设计**：暂定：守卫半径与追击距离默认值待情景测试调整
+- **模块**：M-TASK 任务与行为　**里程碑**：M2　**状态**：verified　**设计**：暂定：守卫半径与追击距离默认值待情景测试调整
 - **职责**：守卫一个玩家（贴身保镖）或一个地点：清理守卫半径内的合法敌对目标，之后回到守卫位置，直到被取消。
 - **不负责**：不攻击玩家、被动生物和默认的中立生物（由 src/autopilot/threats.ts 判定）；不处理自身危险（由反射负责）。
 - **输入**：来源：src/autopilot/task-manager.ts。 内容：守卫对象：玩家名、实体 id、路标名或坐标之一（默认当前位置）；守卫半径（默认 8，范围 2–24）；最大追击距离（默认 16）。 限制：守卫玩家时该玩家必须可见；路标必须存在且在当前维度。
@@ -411,7 +411,7 @@ src/main.ts（现有，改动）--创建并注册--> src/autopilot/autopilot.ts�
 
 ### F-007 · `src/autopilot/behaviors/gather.ts`
 
-- **模块**：M-TASK 任务与行为　**里程碑**：M2　**状态**：implemented-unverified　**设计**：已确定：沿用现有 collect-block 的已验证逻辑
+- **模块**：M-TASK 任务与行为　**里程碑**：M2　**状态**：verified　**设计**：已确定：沿用现有 collect-block 的已验证逻辑
 - **职责**：寻找、挖掘并拾取指定数量的某种方块。逻辑从现有 src/tools/gathering-tools.ts 的 collect-block 迁移而来，collect-block 改为调用本行为并等待结果。
 - **不负责**：不合成、不存箱子；不在任务外挖掘其他方块（寻路自身的挖掘除外）。
 - **输入**：来源：src/autopilot/task-manager.ts（来自 start-task 或 collect-block）。 内容：方块名、数量（1–64）、搜索距离（默认 32）、时间上限（默认 120 秒）。 限制：方块名必须存在于 minecraft-data。
@@ -425,7 +425,7 @@ src/main.ts（现有，改动）--创建并注册--> src/autopilot/autopilot.ts�
 
 ### F-008 · `src/autopilot/behaviors/hunt.ts`
 
-- **模块**：M-TASK 任务与行为　**里程碑**：M2　**状态**：implemented-unverified　**设计**：暂定
+- **模块**：M-TASK 任务与行为　**里程碑**：M2　**状态**：verified　**设计**：暂定
 - **职责**：猎杀指定数量的某种动物并拾取掉落物，用于获取食物等资源。
 - **不负责**：不攻击未指定类型的生物；不攻击玩家或被驯服的动物。
 - **输入**：来源：src/autopilot/task-manager.ts。 内容：动物类型（例如 cow、pig、chicken、sheep、rabbit）、数量（1–16）、搜索距离（默认 32）、时间上限（默认 120 秒）。 限制：类型必须是 minecraft-data 中的生物实体名（物品、经验球、投射物、载具等不能攻击的实体被拒绝），且不能是 player。被驯服的判定包括有主人的狼、猫、鹦鹉，以及标志位为已驯服的马、驴、骡、羊驼、骆驼等。
@@ -439,7 +439,7 @@ src/main.ts（现有，改动）--创建并注册--> src/autopilot/autopilot.ts�
 
 ### F-009 · `src/autopilot/behaviors/return-home.ts`
 
-- **模块**：M-TASK 任务与行为　**里程碑**：M2　**状态**：implemented-unverified　**设计**：暂定：床的搜索范围 8 格
+- **模块**：M-TASK 任务与行为　**里程碑**：M2　**状态**：verified　**设计**：暂定：床的搜索范围 8 格
 - **职责**：走到指定路标（默认 home）；如果是夜晚且允许睡觉，找附近的床睡下。
 - **不负责**：不放置床；不保存路标（由现有路标工具负责）。
 - **输入**：来源：src/autopilot/task-manager.ts。 内容：路标名（默认 home）、是否睡觉（默认 true）、时间上限（默认 120 秒）。 限制：路标必须存在且在当前维度。
@@ -453,7 +453,7 @@ src/main.ts（现有，改动）--创建并注册--> src/autopilot/autopilot.ts�
 
 ### F-034 · `src/autopilot/behaviors/target.ts`
 
-- **模块**：M-TASK 任务与行为　**里程碑**：M1　**状态**：implemented-unverified　**设计**：实现时新增：follow 与 flee 共用的目标参数与解析，M2 的行为也会复用
+- **模块**：M-TASK 任务与行为　**里程碑**：M1　**状态**：verified　**设计**：实现时新增：follow 与 flee 共用的目标参数与解析，M2 的行为也会复用
 - **职责**：提供行为共用的目标参数模式（entityId、target、maxDistance）、目标解析、参数摘要与目标显示名。
 - **不负责**：不实现任何行为流程；不判断目标是否可以攻击（由 src/autopilot/threats.ts 负责）。
 - **输入**：来源：src/autopilot/behaviors/follow.ts、src/autopilot/behaviors/flee.ts（导入）。 内容：行为参数中的 entityId、target（玩家名或实体类型）与 maxDistance；bot 的实体表。 限制：entityId 与 target 至少提供一个；maxDistance 为正数，默认 32。
@@ -467,7 +467,7 @@ src/main.ts（现有，改动）--创建并注册--> src/autopilot/autopilot.ts�
 
 ### F-035 · `src/autopilot/behaviors/actions.ts`
 
-- **模块**：M-TASK 任务与行为　**里程碑**：M2　**状态**：implemented-unverified　**设计**：实现时新增：仲裁器抢占时会停止寻路，使进行中的 `pathfinder.goto` 失败；没有本文件时，工作行为会把暂停误判为失败（例如跳过本可挖掘的方块）
+- **模块**：M-TASK 任务与行为　**里程碑**：M2　**状态**：verified　**设计**：实现时新增：仲裁器抢占时会停止寻路，使进行中的 `pathfinder.goto` 失败；没有本文件时，工作行为会把暂停误判为失败（例如跳过本可挖掘的方块）
 - **职责**：为 gather、hunt、guard、return-home 提供暂停感知的动作步骤：等待任务恢复（可带截止时间）、执行一个可被暂停打断的动作（打断时调用停止回调，例如 `bot.stopDigging`，并让调用者重试同一步骤）、带暂停重试与截止时间的寻路、拾取附近掉落物、解析当前维度中的路标。
 - **不负责**：不实现行为流程；不申请或释放租约；不判断目标合法性。
 - **输入**：来源：src/autopilot/behaviors/gather.ts、hunt.ts、guard.ts、return-home.ts（导入）。 内容：行为上下文（bot、取消信号、isPaused、waitUntilRunning）、寻路目标、截止时间、路标名与 BehaviorServices 中的路标存储。 限制：只在任务持有租约时发出动作；暂停期间不发出任何动作。
@@ -484,7 +484,7 @@ src/main.ts（现有，改动）--创建并注册--> src/autopilot/autopilot.ts�
 
 ### F-010 · `src/autopilot/threats.ts`
 
-- **模块**：M-CMB 战斗与威胁　**里程碑**：M2（M3 扩展环境危险）　**状态**：implemented-unverified　**设计**：已确定：判定规则；中立生物名单暂定
+- **模块**：M-CMB 战斗与威胁　**里程碑**：M2（M3 扩展环境危险）　**状态**：verified　**设计**：已确定：判定规则；中立生物名单暂定
 - **职责**：根据当前游戏状态计算威胁信息：附近的敌对生物（按距离）、即将爆炸的苦力怕、自身是否着火/在岩浆中/氧气过低/低血量，以及远离威胁的方向；判断某个实体能否作为攻击目标。
 - **不负责**：不移动 bot；不做任何决定；不调用网络。
 - **输入**：来源：src/autopilot/reflexes.ts、src/autopilot/combat.ts、src/autopilot/behaviors/guard.ts、src/autopilot/behaviors/hunt.ts、src/decisions/decision-hooks.ts。 内容：bot（实体表、自身状态、方块查询）；当前策略中的攻击规则；可选的“明确允许的目标类型”（hunt 使用）。 限制：只读取内存数据；单次计算的目标耗时低于 1 毫秒（目标，待实测）。
@@ -498,7 +498,7 @@ src/main.ts（现有，改动）--创建并注册--> src/autopilot/autopilot.ts�
 
 ### F-011 · `src/autopilot/combat.ts`
 
-- **模块**：M-CMB 战斗与威胁　**里程碑**：M2　**状态**：implemented-unverified　**设计**：暂定：冷却数值与撤退血量默认值待情景测试调整
+- **模块**：M-CMB 战斗与威胁　**里程碑**：M2　**状态**：verified　**设计**：暂定：冷却数值与撤退血量默认值待情景测试调整
 - **职责**：对一个合法目标进行近战：装备最好的近战武器，接近到攻击距离，看向目标，按武器攻击冷却出手；目标死亡、丢失或超出追击距离时结束；自身血量低于阈值时撤退。
 - **不负责**：不选择目标（由调用者给出）；不判断是否应该参战；不使用弓、弩、盾牌（本版本非目标）。
 - **输入**：来源：src/autopilot/behaviors/guard.ts、src/autopilot/behaviors/hunt.ts、src/autopilot/reflexes.ts（self-defense）。 内容：目标实体、最大追击距离、撤退血量、取消信号。 限制：目标必须通过 src/autopilot/threats.ts 的合法性检查，否则立即返回非法目标，不出手。
@@ -588,7 +588,7 @@ src/main.ts（现有，改动）--创建并注册--> src/autopilot/autopilot.ts�
 
 ### F-017 · `src/tools/task-tools.ts`
 
-- **模块**：M-MCP 工具接口　**里程碑**：M1　**状态**：implemented-unverified　**设计**：已确定：工具名与参数；输出措辞暂定
+- **模块**：M-MCP 工具接口　**里程碑**：M1　**状态**：verified　**设计**：已确定：工具名与参数；输出措辞暂定
 - **职责**：注册 4 个 MCP 工具：start-task（behavior、params、replace）、list-tasks（当前任务与最近的已结束任务）、resume-task（id，默认当前暂停的任务，用于恢复被手动命令挂起的任务）、cancel-task（id，默认当前任务）。
 - **不负责**：不含任务逻辑；不校验行为参数的细节（由任务管理器按行为模式校验）。
 - **输入**：来源：LLM（经 MCP）。 内容：start-task：行为名（6 种之一）、参数对象、是否替换（默认 true）。resume-task、cancel-task：可选任务 id。 限制：行为名用 zod 枚举限制；参数对象原样交给任务管理器。
@@ -619,7 +619,7 @@ src/main.ts（现有，改动）--创建并注册--> src/autopilot/autopilot.ts�
 
 ### F-019 · `tests/autopilot.test.ts`
 
-- **模块**：M-VER 验证　**里程碑**：M1　**状态**：implemented-unverified（M1 范围）　**设计**：已确定：覆盖范围；具体样例随实现补充，不能照抄实现行为
+- **模块**：M-VER 验证　**里程碑**：M1　**状态**：verified（M1 范围）　**设计**：已确定：覆盖范围；具体样例随实现补充，不能照抄实现行为
 - **职责**：验证 src/autopilot/autopilot.ts 的契约行为。
 - **不负责**：不连接真实 Minecraft 服务器或 OpenRouter；不测试其他模块的内部细节。
 - **输入**：来源：ava 测试运行器（npm test，仅运行 tests/**/*.test.ts）。 内容：模拟的 bot、实体、方块、事件存储与时钟（沿用现有 tests/_helpers.ts、tests/_world.ts 的做法）。 限制：使用 sinon 假时钟控制时间，避免依赖真实等待；不发网络请求。
@@ -633,7 +633,7 @@ src/main.ts（现有，改动）--创建并注册--> src/autopilot/autopilot.ts�
 
 ### F-020 · `tests/action-arbiter.test.ts`
 
-- **模块**：M-VER 验证　**里程碑**：M1　**状态**：implemented-unverified　**设计**：已确定：覆盖范围；具体样例随实现补充，不能照抄实现行为
+- **模块**：M-VER 验证　**里程碑**：M1　**状态**：verified　**设计**：已确定：覆盖范围；具体样例随实现补充，不能照抄实现行为
 - **职责**：验证 src/autopilot/action-arbiter.ts 的契约行为。
 - **不负责**：不连接真实 Minecraft 服务器或 OpenRouter；不测试其他模块的内部细节。
 - **输入**：来源：ava 测试运行器（npm test，仅运行 tests/**/*.test.ts）。 内容：模拟的 bot、实体、方块、事件存储与时钟（沿用现有 tests/_helpers.ts、tests/_world.ts 的做法）。 限制：使用 sinon 假时钟控制时间，避免依赖真实等待；不发网络请求。
@@ -647,7 +647,7 @@ src/main.ts（现有，改动）--创建并注册--> src/autopilot/autopilot.ts�
 
 ### F-021 · `tests/task-manager.test.ts`
 
-- **模块**：M-VER 验证　**里程碑**：M1　**状态**：implemented-unverified　**设计**：已确定：覆盖范围；具体样例随实现补充，不能照抄实现行为
+- **模块**：M-VER 验证　**里程碑**：M1　**状态**：verified　**设计**：已确定：覆盖范围；具体样例随实现补充，不能照抄实现行为
 - **职责**：验证 src/autopilot/task-manager.ts 的契约行为。
 - **不负责**：不连接真实 Minecraft 服务器或 OpenRouter；不测试其他模块的内部细节。
 - **输入**：来源：ava 测试运行器（npm test，仅运行 tests/**/*.test.ts）。 内容：模拟的 bot、实体、方块、事件存储与时钟（沿用现有 tests/_helpers.ts、tests/_world.ts 的做法）。 限制：使用 sinon 假时钟控制时间，避免依赖真实等待；不发网络请求。
@@ -675,7 +675,7 @@ src/main.ts（现有，改动）--创建并注册--> src/autopilot/autopilot.ts�
 
 ### F-023 · `tests/threats.test.ts`
 
-- **模块**：M-VER 验证　**里程碑**：M2　**状态**：implemented-unverified　**设计**：已确定：覆盖范围；具体样例随实现补充，不能照抄实现行为
+- **模块**：M-VER 验证　**里程碑**：M2　**状态**：verified　**设计**：已确定：覆盖范围；具体样例随实现补充，不能照抄实现行为
 - **职责**：验证 src/autopilot/threats.ts 的契约行为。
 - **不负责**：不连接真实 Minecraft 服务器或 OpenRouter；不测试其他模块的内部细节。
 - **输入**：来源：ava 测试运行器（npm test，仅运行 tests/**/*.test.ts）。 内容：模拟的 bot、实体、方块、事件存储与时钟（沿用现有 tests/_helpers.ts、tests/_world.ts 的做法）。 限制：使用 sinon 假时钟控制时间，避免依赖真实等待；不发网络请求。
@@ -689,7 +689,7 @@ src/main.ts（现有，改动）--创建并注册--> src/autopilot/autopilot.ts�
 
 ### F-024 · `tests/combat.test.ts`
 
-- **模块**：M-VER 验证　**里程碑**：M2　**状态**：implemented-unverified　**设计**：已确定：覆盖范围；具体样例随实现补充，不能照抄实现行为
+- **模块**：M-VER 验证　**里程碑**：M2　**状态**：verified　**设计**：已确定：覆盖范围；具体样例随实现补充，不能照抄实现行为
 - **职责**：验证 src/autopilot/combat.ts 的契约行为。
 - **不负责**：不连接真实 Minecraft 服务器或 OpenRouter；不测试其他模块的内部细节。
 - **输入**：来源：ava 测试运行器（npm test，仅运行 tests/**/*.test.ts）。 内容：模拟的 bot、实体、方块、事件存储与时钟（沿用现有 tests/_helpers.ts、tests/_world.ts 的做法）。 限制：使用 sinon 假时钟控制时间，避免依赖真实等待；不发网络请求。
@@ -717,7 +717,7 @@ src/main.ts（现有，改动）--创建并注册--> src/autopilot/autopilot.ts�
 
 ### F-026 · `tests/movement-behaviors.test.ts`
 
-- **模块**：M-VER 验证　**里程碑**：M1（return-home 在 M2）　**状态**：implemented-unverified（follow / flee 在 M1，return-home 在 M2 补充）　**设计**：已确定：覆盖范围；具体样例随实现补充，不能照抄实现行为
+- **模块**：M-VER 验证　**里程碑**：M1（return-home 在 M2）　**状态**：verified（follow / flee 在 M1，return-home 在 M2 补充）　**设计**：已确定：覆盖范围；具体样例随实现补充，不能照抄实现行为
 - **职责**：验证 src/autopilot/behaviors/follow.ts、flee.ts、return-home.ts 的契约行为。
 - **不负责**：不连接真实 Minecraft 服务器或 OpenRouter；不测试其他模块的内部细节。
 - **输入**：来源：ava 测试运行器（npm test，仅运行 tests/**/*.test.ts）。 内容：模拟的 bot、实体、方块、事件存储与时钟（沿用现有 tests/_helpers.ts、tests/_world.ts 的做法）。 限制：使用 sinon 假时钟控制时间，避免依赖真实等待；不发网络请求。
@@ -731,7 +731,7 @@ src/main.ts（现有，改动）--创建并注册--> src/autopilot/autopilot.ts�
 
 ### F-027 · `tests/work-behaviors.test.ts`
 
-- **模块**：M-VER 验证　**里程碑**：M2　**状态**：implemented-unverified　**设计**：已确定：覆盖范围；具体样例随实现补充，不能照抄实现行为
+- **模块**：M-VER 验证　**里程碑**：M2　**状态**：verified　**设计**：已确定：覆盖范围；具体样例随实现补充，不能照抄实现行为
 - **职责**：验证 src/autopilot/behaviors/guard.ts、gather.ts、hunt.ts 的契约行为。
 - **不负责**：不连接真实 Minecraft 服务器或 OpenRouter；不测试其他模块的内部细节。
 - **输入**：来源：ava 测试运行器（npm test，仅运行 tests/**/*.test.ts）。 内容：模拟的 bot、实体、方块、事件存储与时钟（沿用现有 tests/_helpers.ts、tests/_world.ts 的做法）。 限制：使用 sinon 假时钟控制时间，避免依赖真实等待；不发网络请求。
@@ -773,7 +773,7 @@ src/main.ts（现有，改动）--创建并注册--> src/autopilot/autopilot.ts�
 
 ### F-030 · `tests/task-tools.test.ts`
 
-- **模块**：M-VER 验证　**里程碑**：M1　**状态**：implemented-unverified　**设计**：已确定：覆盖范围；具体样例随实现补充，不能照抄实现行为
+- **模块**：M-VER 验证　**里程碑**：M1　**状态**：verified　**设计**：已确定：覆盖范围；具体样例随实现补充，不能照抄实现行为
 - **职责**：验证 src/tools/task-tools.ts 的契约行为。
 - **不负责**：不连接真实 Minecraft 服务器或 OpenRouter；不测试其他模块的内部细节。
 - **输入**：来源：ava 测试运行器（npm test，仅运行 tests/**/*.test.ts）。 内容：模拟的 bot、实体、方块、事件存储与时钟（沿用现有 tests/_helpers.ts、tests/_world.ts 的做法）。 限制：使用 sinon 假时钟控制时间，避免依赖真实等待；不发网络请求。

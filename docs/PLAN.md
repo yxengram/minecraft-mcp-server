@@ -8,8 +8,8 @@
 
 | 里程碑 | 目标（完成后新增的可观察能力） | 前置 | 状态 |
 |---|---|---|---|
-| M1 | 动作仲裁 + 后台任务 + follow / flee 行为 + 任务工具：LLM 可以启动、查看、恢复、取消后台任务，事件流可见；LLM 的身体类命令立即执行并报告被打断的任务 | 无 | implemented-unverified（单元测试通过；实机验收待游戏重新开放） |
-| M2 | 威胁识别 + 近战 + guard / gather / hunt / return-home：bot 能自主守卫、采集、狩猎、回家 | M1 | implemented-unverified（单元测试通过；实机验收待游戏重新开放） |
+| M1 | 动作仲裁 + 后台任务 + follow / flee 行为 + 任务工具：LLM 可以启动、查看、恢复、取消后台任务，事件流可见；LLM 的身体类命令立即执行并报告被打断的任务 | 无 | verified（单元测试与实机验收通过，2026-10-16） |
+| M2 | 威胁识别 + 近战 + guard / gather / hunt / return-home：bot 能自主守卫、采集、狩猎、回家 | M1 | verified（单元测试与实机验收通过，2026-10-16） |
 | M3 | 反射 + 策略 + 策略工具：不依赖 LLM 的保命反应，LLM 可调整策略 | M2 | planned |
 | M4 | OpenRouter 客户端 + 模型目录 + 聊天筛选与聊天命令：对 bot 说的话以 chat_request 交给 LLM；LLM 授权过的玩家可以直接下命令（默认无人授权） | M3；OpenRouter API key（开始前通知用户并给出提供步骤） | planned |
 | M5 | 决策式战斗判断 + 阈值探测：自卫的 auto 姿态使用决策模型；所有阈值有观察依据 | M4 | planned |
@@ -29,7 +29,7 @@
 | 验收 | 正常：上面的端到端路径实机通过；`tests/action-arbiter.test.ts`、`tests/task-manager.test.ts`、`tests/task-tools.test.ts`、`tests/autopilot.test.ts` 通过。边界：手动工具打断任务后任务保持暂停、不自动恢复，中断报告内容完整；对运行中的任务调用 resume-task 返回错误；stop-pathfinding 取消任务；断线后任务被取消。回归：现有全部单元测试通过；`npm run test:live:world` 连续两轮通过且覆盖 start-task / list-tasks / resume-task / cancel-task 与中断报告流程 |
 | 可运行边界 | 只在最终路径创建本里程碑的文件，同时删除 `blueprint/` 中对应的占位；ava 只运行 `tests/**/*.test.ts`，tsc 与 eslint 只读取 `src/`、`tests/`，所以剩余的 `blueprint/` 占位不会被读取 |
 | 恢复 | 在 `extra-tools` 分支上以独立提交完成；回退该提交即可恢复。无外部数据或持久状态 |
-| 状态与证据 | implemented-unverified：单元测试与静态检查已通过（见进展记录）；实机验收尚未完成 |
+| 状态与证据 | verified：单元测试、静态检查与实机验收已通过（见进展记录 2026-10-16 M1、M2 实机验收） |
 
 ## M2：威胁、战斗与工作行为
 
@@ -43,7 +43,7 @@
 | 验收 | 正常：实机守卫情景击杀一只僵尸（NoAI 与有 AI 各一次）；gather 3 根原木；hunt 1 头牛；return-home 白天到达、夜晚入睡。边界：守卫不攻击猪和玩家；hunt 拒绝 player；collect-block 现有测试与实机检查通过。回归：全部单元测试；全量实机测试 |
 | 可运行边界 | 同 M1 |
 | 恢复 | 独立提交；无外部状态 |
-| 状态与证据 | implemented-unverified：单元测试与静态检查已通过（见进展记录）；实机验收尚未完成 |
+| 状态与证据 | verified：单元测试、静态检查与实机验收已通过（见进展记录 2026-10-16 M1、M2 实机验收） |
 
 ## M3：反射与策略
 
@@ -204,4 +204,16 @@
 - 实机验收：**未完成**。本地没有监听中的 Minecraft 局域网端口（63320 不可连接），`npm run test:live:world` 未运行。验收时需要：开启作弊的测试世界、局域网端口；运行 `npm run build` 后执行 `npm run test:live:world -- <端口> --allow-world-changes`，连续两轮。
 - 实机验收需要特别观察：①“连续出手 10 秒没有受伤事件则放弃”依赖 mineflayer 的 `entityHurt`（1.20+ 来自 damage_event 数据包），需在 26.1.2 上确认空手打僵尸时会持续收到该事件；②守卫时被守卫玩家站在目标旁，bot 不用剑出手。
 - 用户决定（2026-10-16）：collect-block 保持按 E-004 启动 gather 任务并**替换（取消）**当前任务，在结果中说明被取消的任务；不改回 M2 之前“暂停、可 resume-task 恢复”的做法。
-- 文件状态：M2 新增文件为 `implemented-unverified`。
+- 文件状态：M2 新增文件为 `implemented-unverified`（实机验收后改为 verified，见下一条记录）。
+
+### 2026-10-16 M1、M2 实机验收
+
+- 环境：用户开放的开启作弊的测试世界（局域网端口 63320）；代码为提交 `df9d06c`（`extra-tools`），`npm run build` 后运行。
+- `npm run test:live:world -- 63320 --allow-world-changes` **连续两轮通过**：每轮 26 个步骤全部 ok，58 个工具全部覆盖。其中 M1 的 “tasks: start, interrupt with a manual command, resume, cancel”（start-task、list-tasks、中断报告、resume-task、cancel-task）与 “follow and flee”，M2 新增的 guard（NoAI 僵尸被击杀，半径内名为 Wilbur 的猪存活）、gather（3 根原木，背包增加且原位为空气）、hunt（1 头牛，得到牛肉；hunt player 被拒绝）、return-home（白天到达）以及 “collect-block” 步骤均通过。
+- 额外的一次性验收脚本（运行后删除，未提交；场地与清理沿用 test-live-world 的做法）全部通过：
+  - 守卫任务击杀**有 AI** 的僵尸。
+  - 被守卫的辅助玩家处于**生存模式**、站在 NoAI 僵尸旁 1 格，bot 背包有钻石剑与铁斧且手持钻石剑：僵尸被击杀，辅助玩家血量 20 → 20（没有被横扫误伤）。注意：未单独确认该世界的 PvP 是否开启；若 PvP 关闭，此项不能单独证明横扫保护，单元测试仍覆盖该逻辑。
+  - **空手**守卫：11.1 秒击杀 NoAI 僵尸，期间没有出现 “did not hurt” 的放弃——说明 26.1.2 上 `entityHurt` 事件持续到达，10 秒无伤放弃规则不会误触发。
+  - 夜晚（time 18000）return-home：结果为 “Arrived at waypoint 'home' and sleeping in the red_bed …”，之后 wake 成功。
+- 结论：M1、M2 的验收项全部完成，状态改为 `verified`（蓝图中 M1、M2 的文件条目同步更新）。
+
