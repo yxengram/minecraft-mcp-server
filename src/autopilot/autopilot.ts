@@ -1,4 +1,4 @@
-// Contract: docs/BLUEPRINT.md F-001 (M1–M2 scope: arbiter, tasks, behaviors, bind/unbind; reflexes, policy and decisions come later).
+// Contract: docs/BLUEPRINT.md F-001 (M1–M3 scope: arbiter, tasks, behaviors, policy, reflexes, bind/unbind; decisions come in M4).
 import type mineflayer from 'mineflayer';
 import { ActionArbiter, HolderInfo, PRIORITY } from './action-arbiter.js';
 import { TaskManager, TaskRecord, BehaviorDefinition } from './task-manager.js';
@@ -8,6 +8,9 @@ import { guardBehavior } from './behaviors/guard.js';
 import { gatherBehavior } from './behaviors/gather.js';
 import { huntBehavior } from './behaviors/hunt.js';
 import { returnHomeBehavior } from './behaviors/return-home.js';
+import { PolicyStore } from './policy.js';
+import { DamageInfo, ReflexEngine } from './reflex-engine.js';
+import { REFLEXES } from './reflexes.js';
 import type { EventStore } from '../event-store.js';
 import type { WaypointStore } from '../waypoint-store.js';
 import { stopPathfinder } from '../tools/movement-utils.js';
@@ -32,7 +35,9 @@ export class AutopilotNotReady extends Error {
 export class Autopilot {
   private bot: mineflayer.Bot | null = null;
   private arbiterInstance: ActionArbiter | null = null;
+  private reflexEngine: ReflexEngine | null = null;
   readonly tasks: TaskManager;
+  readonly policy = new PolicyStore();
 
   constructor(private readonly options: AutopilotOptions) {
     this.tasks = new TaskManager({
@@ -40,7 +45,7 @@ export class Autopilot {
       getArbiter: () => this.arbiter,
       events: options.events,
       behaviors: BEHAVIORS,
-      services: { waypoints: options.waypoints },
+      services: { waypoints: options.waypoints, policy: () => this.policy.get() },
       log: options.log
     });
   }
@@ -54,24 +59,50 @@ export class Autopilot {
     return this.arbiterInstance;
   }
 
+  get reflexes(): ReflexEngine {
+    if (!this.reflexEngine) throw new AutopilotNotReady();
+    return this.reflexEngine;
+  }
+
   bind(bot: mineflayer.Bot): void {
     if (this.bot === bot) return;
     if (this.bot) this.unbind('rebound to a new bot');
     this.bot = bot;
-    this.arbiterInstance = new ActionArbiter({
+    const arbiter = new ActionArbiter({
       stopBody: () => {
         stopPathfinder(bot);
         bot.clearControlStates();
       },
       log: this.options.log
     });
+    this.arbiterInstance = arbiter;
+    // Every (re)join starts from the default policy (user decision, PLAN Q2).
+    this.policy.reset();
+    this.options.events.addEvent('policy', 'policy reset to defaults (bot joined the game)');
+    this.reflexEngine = new ReflexEngine({
+      bot,
+      arbiter,
+      getPolicy: () => this.policy.get(),
+      events: this.options.events,
+      reflexes: REFLEXES,
+      log: this.options.log
+    });
+    this.reflexEngine.start();
   }
 
   unbind(reason = 'disconnected'): void {
     if (!this.bot) return;
+    // Cancel tasks first: stopping a running reflex releases its lease, which would otherwise resume the paused task
+    // just before it is cancelled.
     void this.tasks.cancelAll(reason);
+    this.reflexEngine?.stop(reason);
+    this.reflexEngine = null;
     this.bot = null;
     this.arbiterInstance = null;
+  }
+
+  noteDamage(info: DamageInfo): void {
+    this.reflexEngine?.noteDamage(info);
   }
 
   /**

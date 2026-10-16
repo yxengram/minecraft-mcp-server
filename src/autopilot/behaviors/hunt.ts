@@ -3,7 +3,7 @@ import { z } from 'zod';
 import minecraftData from 'minecraft-data';
 import { BehaviorDefinition } from '../task-manager.js';
 import { checkTarget } from '../threats.js';
-import { DEFAULT_RETREAT_HEALTH, engage } from '../combat.js';
+import { combatSettings, engage } from '../combat.js';
 import { countItems } from '../../tools/item-utils.js';
 import { collectNearbyDrops, waitWhilePaused } from './actions.js';
 
@@ -36,9 +36,9 @@ export const huntBehavior: BehaviorDefinition<HuntParams, null> = {
     return { value: null };
   },
   async run(ctx) {
-    const { bot, params, signal, isPaused, setStep, report } = ctx;
+    const { bot, params, services, signal, isPaused, setStep, report } = ctx;
     const { animal, count, maxDistance } = params;
-    const rules = { allowTypes: [animal] };
+    const huntRules = () => ({ ...combatSettings(services.policy).rules, allowTypes: [animal] });
     const itemsBefore = countItems(bot.inventory.items());
     const deadline = Date.now() + params.timeoutMs;
     // Targets that got away or could not be reached are not chased again.
@@ -56,7 +56,7 @@ export const huntBehavior: BehaviorDefinition<HuntParams, null> = {
       const self = bot.entity.position;
       const target = Object.values(bot.entities ?? {})
         .filter(entity => entity?.name === animal && entity.position && !ignored.has(entity.id)
-          && entity.position.distanceTo(self) <= maxDistance && checkTarget(bot, entity, rules).legal)
+          && entity.position.distanceTo(self) <= maxDistance && checkTarget(bot, entity, huntRules()).legal)
         .sort((a, b) => a.position.distanceTo(self) - b.position.distanceTo(self))[0];
       if (!target) {
         stopReason = `no huntable ${animal} within ${maxDistance} blocks`;
@@ -68,8 +68,8 @@ export const huntBehavior: BehaviorDefinition<HuntParams, null> = {
         signal,
         shouldStop: () => isPaused() || Date.now() > deadline,
         maxChase: maxDistance,
-        retreatHealth: DEFAULT_RETREAT_HEALTH,
-        rules
+        retreatHealth: combatSettings(services.policy).retreatHealth,
+        rules: huntRules()
       });
       signal.throwIfAborted();
 

@@ -27,6 +27,8 @@ interface ConnectionCallbacks {
   onBotReady?: (bot: mineflayer.Bot) => void;
   /** The bot left the game. */
   onBotEnd?: (reason: string) => void;
+  /** The bot took damage; attackerId is the entity that caused it, if any (BLUEPRINT E-005). */
+  onDamage?: (info: { attackerId?: number; type: string; time: number }) => void;
 }
 
 const SOUND_RADIUS = 32;
@@ -146,6 +148,8 @@ export class BotConnection {
       if (cause) description += ` from ${cause}`;
       if (direct) description += ` via ${direct.name ?? direct.type ?? 'projectile'}`;
       lastDamage = { description, time: Date.now() };
+      // The cause id is the attacker's entity id + 1, or 0 when nothing caused it (fall, fire, drowning).
+      this.callbacks.onDamage?.({ attackerId: packet.sourceCauseId > 0 ? packet.sourceCauseId - 1 : undefined, type, time: lastDamage.time });
     });
 
     let lastHealth = bot.health;

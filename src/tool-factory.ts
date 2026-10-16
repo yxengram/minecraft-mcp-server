@@ -27,6 +27,8 @@ export const BODY_TOOLS = new Set([
 export interface ToolOptions {
   /** The tool drives the bot's body (moving, looking, attacking, using items) and must hold the action lease. */
   body?: boolean;
+  /** Reject unknown top-level arguments instead of silently dropping them (the SDK strips them otherwise). */
+  strict?: boolean;
 }
 
 export class ToolFactory {
@@ -49,7 +51,7 @@ export class ToolFactory {
     executor: (args: any) => Promise<McpResponse>,
     options: ToolOptions = {}
   ): void {
-    this.server.tool(name, description, schema, async (args: unknown): Promise<McpResponse> => {
+    const handler = async (args: unknown): Promise<McpResponse> => {
       const connectionCheck = await this.connection.checkConnectionAndReconnect();
 
       if (!connectionCheck.connected) {
@@ -70,7 +72,14 @@ export class ToolFactory {
       } catch (error) {
         return this.createErrorResponse(error as Error);
       }
-    });
+    };
+
+    if (options.strict) {
+      // server.tool() only takes a raw shape, which the SDK turns into a stripping object schema.
+      this.server.registerTool(name, { description, inputSchema: z.object(schema as ZodRawShape).strict() }, handler);
+    } else {
+      this.server.tool(name, description, schema, handler);
+    }
   }
 
   // LLM commands run right away: they pause the current task and routine reflexes, and only wait (up to

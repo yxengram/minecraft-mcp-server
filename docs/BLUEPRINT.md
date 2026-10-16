@@ -10,7 +10,7 @@
 |---|---|
 | 设计版本 | v0.3（2026-10-16）：按用户对未决问题的答复修订，变更见 docs/PLAN.md |
 | 目标版本 | Autopilot v1：阶段一到四（任务与行为、反射与策略、决策模型、情景测试） |
-| 当前阶段 | M1、M2 已实现并通过实机验收（2026-10-16）；M3～M6 仍为说明性骨架 |
+| 当前阶段 | M1～M3 已实现并通过实机验收（2026-10-16）；M4～M6 仍为说明性骨架 |
 | 状态标记 | **已确认**：用户已同意，或已用一手资料/实机核实。**暂定**：设计者提出的合理默认值，可在实现时调整，需记录。**待验证**：依赖实测结果，验证前不能当作事实 |
 | 与现有代码的关系 | 现有代码保持可构建、可测试。新增文件实现前只存在于 `blueprint/` 镜像目录；对现有文件的改动在「F2. 现有文件的计划改动」中描述，不创建占位副本 |
 
@@ -269,7 +269,7 @@ src/main.ts（现有，改动）--创建并注册--> src/autopilot/autopilot.ts�
 │   │   └── decision-hooks.ts         新增：聊天筛选、聊天命令与战斗判断
 │   ├── tools/
 │   │   ├── task-tools.ts             新增：start-task / list-tasks / resume-task / cancel-task
-│   │   ├── policy-tools.ts           新增：get-policy / set-policy / list-decision-models
+│   │   ├── policy-tools.ts           新增：get-policy / set-policy（M3）/ list-decision-models（M4）
 │   │   ├── follow-tools.ts           现有，改动
 │   │   ├── position-tools.ts         现有，改动
 │   │   └── gathering-tools.ts        现有，改动
@@ -349,6 +349,7 @@ src/main.ts（现有，改动）--创建并注册--> src/autopilot/autopilot.ts�
 - **关键约束**：关键反射不能被任何请求抢占；手动可以抢占日常反射与任务；日常反射可以抢占任务；同优先级的新请求不抢占：手动请求排队等待，任务级由任务管理器保证同时只有一个；手动请求遇到关键反射时排队等待（最长 10 秒，超时返回忙碌）；手动抢占时被抢占者从恢复栈中移除并收到“已挂起”通知；释放必须幂等。
 - **失败处理**：暂停或恢复回调抛错时记录日志并继续完成抢占/恢复，仲裁器状态保持一致；等待超时返回明确的忙碌原因，例如“busy: reflex creeper-evade”。
 - **验收**：正常：任务持有 → 关键反射请求 → 任务暂停回调（抢占者类型：反射）、反射获得租约 → 反射释放 → 任务恢复回调被调用。任务持有 → 手动请求 → 手动立即获得租约，返回值中带有被抢占任务的名称 → 手动释放 → 任务不被恢复。 边界或失败：手动请求抢占日常反射（例如 auto-eat）→ 立即获得租约，返回值带有被打断的反射名；手动请求在关键反射持有时等待，反射在 10 秒内释放则手动获得租约，否则返回忙碌；释放已失效的租约无效果；暂停回调抛错不影响抢占完成。 位置：tests/action-arbiter.test.ts（计划，未执行）
+- **实现说明（M3）**：新增同步的 `acquireNow(request, replacing?)` 供反射在游戏刻内取得身体；`replacing` 为调用者自己的当前租约时直接交接（不让暂停中的任务在中间恢复），交接同样视为抢占，会先兜底停止身体。
 
 ### F-003 · `src/autopilot/task-manager.ts`
 
@@ -512,7 +513,7 @@ src/main.ts（现有，改动）--创建并注册--> src/autopilot/autopilot.ts�
 
 ### F-012 · `src/autopilot/reflex-engine.ts`
 
-- **模块**：M-RFX 反射　**里程碑**：M3　**状态**：placeholder　**设计**：已确定：每刻评估、优先级、冷却、超时；耗时目标待实测
+- **模块**：M-RFX 反射　**里程碑**：M3　**状态**：verified　**设计**：已确定：每刻评估、优先级、冷却、超时；耗时目标待实测
 - **职责**：订阅每个游戏刻；按优先级评估已启用反射的触发条件；选出一个触发的反射，按其类别（关键反射 30、日常反射 15）取得身体控制权并执行；日常反射被手动命令打断时记为 interrupted；执行期间继续检查更高优先级的反射，可打断较低优先级的反射；管理冷却与最长时长；写 reflex 事件。
 - **不负责**：不定义具体反射（在 src/autopilot/reflexes.ts）；不等待网络；不管理任务（被抢占的任务由仲裁器通知任务管理器）。
 - **输入**：来源：src/autopilot/autopilot.ts（转交 mineflayer 的 physicsTick 与结构化受伤信息）；src/autopilot/reflexes.ts（反射定义）；src/autopilot/policy.ts（开关与阈值）。 内容：每刻通知；最近一次受伤（攻击者实体 id、伤害类型、时间）；当前策略。 限制：评估阶段只能做内存计算，所有反射的评估总耗时目标低于 2 毫秒（目标，待实测）。
@@ -523,10 +524,11 @@ src/main.ts（现有，改动）--创建并注册--> src/autopilot/autopilot.ts�
 - **关键约束**：同一时刻最多执行一个反射；每个反射动作有最长时长，超时强制取消并释放租约；关闭的反射不评估；评估异常不能影响下一刻。
 - **失败处理**：反射动作抛错 → 释放租约，写 reflex 事件（失败），进入冷却；触发条件评估抛错 → 跳过该反射本刻的评估并记录一次日志。
 - **验收**：正常：自卫和自动进食同时满足 → 只执行自卫；执行结束后进入冷却。 边界或失败：冷却期内条件再次满足 → 不触发；动作超过最长时长 → 被强制结束，事件结果为超时；执行自动进食时苦力怕开始膨胀 → 自动进食被打断，躲避苦力怕开始执行；手动命令到来时日常反射被打断（结果 interrupted），关键反射继续执行。 位置：tests/reflexes.test.ts（计划，未执行）
+- **实现说明（M3）**：持有者名称为 `reflex <名称>`；同一时刻至多一个反射，排名更高者可打断较低者（同为关键反射时用 `acquireNow` 交接）；日常反射拿不到身体（手动命令或关键反射持有）时静默退避 1 秒；被抢占时立即结束并释放租约，避免仲裁器日后恢复一个无人驱动的租约；结束时只在租约仍有效时先停止身体再释放；bot 死亡时中止当前反射，复活后清除自身残留的着火位与氧气值；30 秒内触发 4 次写一条重复警告事件；记录每刻评估耗时（get-policy 显示）。实测（2026-10-16，实机）：平均 0.05–0.09 毫秒/刻，最大 2.4 毫秒。
 
 ### F-013 · `src/autopilot/reflexes.ts`
 
-- **模块**：M-RFX 反射　**里程碑**：M3（self-defense 的 auto 姿态在 M5 接入决策）　**状态**：placeholder　**设计**：暂定：触发阈值与时长为默认值，待情景测试调整
+- **模块**：M-RFX 反射　**里程碑**：M3（self-defense 的 auto 姿态在 M5 接入决策）　**状态**：verified（M3 范围；auto 姿态在 M5 接入决策）　**设计**：暂定：触发阈值与时长为默认值，待情景测试调整
 - **职责**：定义 5 个反射，每个包含触发条件、动作、类别、优先级、冷却与最长时长。前三个是关键反射（保命，手动命令不能打断），后两个是日常反射（手动命令可以打断）。按优先级从高到低：1. creeper-evade：7 格内有膨胀中的苦力怕 → 冲刺到 8 格以外，最长 3 秒。2. hazard-escape：着火、在岩浆中或氧气 ≤ 6 → 移到最近的安全方块（在水中则向上），最长 5 秒。3. low-health-retreat：血量低于阈值（默认 6）且 16 格内有敌对生物 → 远离到 16 格以外，有食物时进食，最长 10 秒。4. self-defense：刚被敌对生物攻击 → 按姿态还手（fight）、逃离（flee）或交给决策钩子（auto，等待结果期间按规则默认），最长 20 秒。5. auto-eat：饥饿值低于阈值（默认 14）、8 格内没有敌对生物且有食物 → 进食，最长 3 秒。
 - **不负责**：不负责调度、冷却计时和租约（由 src/autopilot/reflex-engine.ts 负责）。
 - **输入**：来源：src/autopilot/reflex-engine.ts（评估与执行时传入上下文）。 内容：bot、威胁摘要、当前策略、最近一次受伤信息、取消信号。 限制：触发条件函数只能做内存计算。
@@ -537,13 +539,14 @@ src/main.ts（现有，改动）--创建并注册--> src/autopilot/autopilot.ts�
 - **关键约束**：永远不攻击玩家（由 combat.ts 与 threats.ts 保证）；逃离使用 pathfinder 的安全移动，不跳下高处或走进岩浆；auto-eat 不在附近有敌对生物时进食；auto 姿态下决策结果到达前先执行规则默认动作。
 - **失败处理**：动作失败返回失败结果，由引擎记录；找不到食物时 auto-eat 不触发（触发条件包含“有食物”）。
 - **验收**：正常：creeper-evade：膨胀中的苦力怕在 4 格处 → 爆炸前距离 ≥ 8。auto-eat：饥饿 10、有面包、附近无怪 → 吃下面包。 边界或失败：self-defense 姿态 flee → 不还手而是逃离；auto 姿态且决策不可用 → 按规则（血量 ≥ 10 且敌对生物 ≤ 2 则还手，否则逃离）；被玩家攻击 → 不还手，只写事件。 位置：tests/reflexes.test.ts；scripts/test-scenarios.mjs（计划，未执行）
+- **实现说明（M3，暂定值）**：冷却：creeper-evade 0.5 秒、hazard-escape 1 秒、low-health-retreat 5 秒、self-defense 2 秒、auto-eat 5 秒。逃跑（creeper-evade、low-health-retreat、self-defense 的 flee）为了在苦力怕 1.5 秒引信内起步，第一刻就用按键状态冲刺，并检查前方两格（含对角线两侧）：不进入岩浆、火、仙人掌、蜘蛛网等，不跳上 1.5 格高的栅栏/墙，落差不超过 3；没有安全方向或卡住 1 秒时改用 pathfinder（只设一次目标）。hazard-escape：在岩浆中自己转向最近的安全位置并持续跳跃（pathfinder 无法规划出岩浆池）；着火时只有接触火/岩浆或 8 格内有水才触发，优先走进水里，水不可达时记住 15 秒不再尝试；离开火源后仍会燃烧（原版约 8 秒），只有水能更快熄灭。low-health-retreat 也在血量 ≤ combat.retreatHealth 时触发（战斗在此脱离，由本反射接手撤退）。self-defense：从不还击玩家、被驯服的动物和非生物（只写事件）；被默认中立生物攻击时逃跑而不还手（avoidNeutral）；不插手 bot 正在进行的同一场战斗（例如狩猎或守卫任务正在打的目标）；auto 姿态在 M5 之前按规则（血量 ≥ 10 且敌对生物 ≤ 2 则还手，攻击者计入）。auto-eat 不吃有害或贵重食物（腐肉、蜘蛛眼、毒马铃薯、河豚、生鸡肉、紫颂果、金苹果、附魔金苹果、金胡萝卜、迷之炖菜），吃完换回原来手持的物品，被打断时立即停止进食。
 
 
 ### F1-d 策略与决策
 
 ### F-014 · `src/autopilot/policy.ts`
 
-- **模块**：M-POL 策略　**里程碑**：M3（M4 增加聊天命令与决策字段）　**状态**：placeholder　**设计**：暂定：字段与默认值。已确认：不跨游戏重启保存（用户决定）
+- **模块**：M-POL 策略　**里程碑**：M3（M4 增加聊天命令与决策字段）　**状态**：verified（M3 范围：reflexes 与 combat；chat 与 decisions 在 M4）　**设计**：暂定：字段与默认值。已确认：不跨游戏重启保存（用户决定）
 - **职责**：定义策略结构（zod 模式）与默认值；提供读取当前策略、合并部分更新并校验、恢复默认值（含启动参数）、生成可读摘要；强制硬性安全规则。策略分组：reflexes（5 个反射的开关与阈值，self-defense 的姿态 fight / flee / auto）；combat（attackPlayers 默认 false，avoidNeutral 默认 true）；chat（triage 默认 true：用决策模型筛选与 bot 有关的聊天并上报 LLM；commandsFrom 默认空：哪些玩家的聊天命令可以不经 LLM 直接执行，已确认默认谁都不授权，只能由 LLM 修改；replyInChat 默认 true）；decisions（enabled、model、actThreshold 默认 0.85、cautiousThreshold 默认 0.5、maxCallsPerMinute 默认 30，阈值待 M5 探测后修订）。
 - **不负责**：不执行任何动作；不保存到磁盘；不读取环境变量。
 - **输入**：来源：src/tools/policy-tools.ts（部分更新，来源 llm）；src/autopilot/autopilot.ts（启动配置中的决策模型 id，来源 startup；bot 重新进入游戏时请求恢复默认）。 内容：部分策略对象与来源标记。 限制：未知字段拒绝；血量与饥饿 0–20；距离 1–32；概率 0–1；速率 1–600 次/分钟；来源只能是 llm 或 startup。
@@ -554,6 +557,7 @@ src/main.ts（现有，改动）--创建并注册--> src/autopilot/autopilot.ts�
 - **关键约束**：combat.attackPlayers 只能被显式设为 true，且每次设为 true 都返回一条警告供调用者写入事件；任何来自聊天的路径都不能调用更新接口；chat.commandsFrom 只能由来源为 llm 的更新修改（startup 来源不能设置），名字区分大小写并按 Minecraft 用户名规则校验，每次修改返回一条提示供写入事件。
 - **失败处理**：校验失败 → 返回全部错误，原策略不变。
 - **验收**：正常：默认策略与本条目所列默认值一致（chat.commandsFrom 为空）；部分更新只改变指定字段；恢复默认后与启动时一致（包含启动参数设置的模型，授权名单清空）。 边界或失败：非法数值被拒绝且原策略不变；来源为 chat 的更新被拒绝；来源为 startup 的更新不能设置 chat.commandsFrom；把 attackPlayers 设为 true 返回警告。 位置：tests/policy.test.ts（计划，未执行）
+- **实现说明（M3）**：字段与默认值：reflexes.creeperEvade {enabled: true}；hazardEscape {enabled: true, lowAir: 6}；lowHealthRetreat {enabled: true, health: 6, radius: 16}；selfDefense {enabled: true, stance: auto}；autoEat {enabled: true, food: 14}；combat {attackPlayers: false, avoidNeutral: true, retreatHealth: 6}（retreatHealth 为实现时新增，供 combat、guard、hunt 读取）。每次请求把 attackPlayers 设为 true 都返回警告（即使已经是 true）；avoidNeutral 改为 false 时也返回警告；没有设置任何字段的更新（包括只有空分组）是错误；值为 undefined 的字段被忽略。M4 再加入 chat 与 decisions 分组。
 
 ### F-015 · `src/decisions/openrouter-client.ts`
 
@@ -602,7 +606,7 @@ src/main.ts（现有，改动）--创建并注册--> src/autopilot/autopilot.ts�
 
 ### F-018 · `src/tools/policy-tools.ts`
 
-- **模块**：M-MCP 工具接口　**里程碑**：M3（list-decision-models 在 M4）　**状态**：placeholder　**设计**：已确定：工具名；输出格式暂定
+- **模块**：M-MCP 工具接口　**里程碑**：M3（list-decision-models 在 M4）　**状态**：verified（M3 范围：get-policy、set-policy；list-decision-models 在 M4）　**设计**：已确定：工具名；输出格式暂定
 - **职责**：注册 3 个 MCP 工具：get-policy（当前策略摘要，以及决策功能状态与本小时调用次数）、set-policy（部分更新）、list-decision-models（实时决策模型目录）。
 - **不负责**：不含策略规则与校验（在 src/autopilot/policy.ts）；不发 HTTP 请求本身（经 src/decisions/openrouter-client.ts）。
 - **输入**：来源：LLM（经 MCP）。 内容：set-policy：部分策略对象。其余无参数。 限制：set-policy 的来源固定标记为 llm。
@@ -613,6 +617,7 @@ src/main.ts（现有，改动）--创建并注册--> src/autopilot/autopilot.ts�
 - **关键约束**：输出中绝不包含 API key；校验失败时不改变策略。
 - **失败处理**：校验错误、无 key、网络错误都以明确的工具错误或说明返回。
 - **验收**：正常：set-policy 关闭 autoEat → get-policy 显示 autoEat disabled。 边界或失败：set-policy 传入未知字段 → 返回错误且策略不变；没有 key 时 list-decision-models 说明未配置。 位置：tests/policy-tools.test.ts；scripts/test-live-world.mjs（计划，未执行）
+- **实现说明（M3）**：set-policy 以严格模式注册（tool-factory 的 `strict` 选项，经 `server.registerTool`），未知的顶层分组由 SDK 拒绝而不是被静默丢弃；bot 尚未进入游戏时拒绝修改（进入游戏时策略会重置）；每次有改动写一条 policy 事件（列出改动的字段），警告另写事件。get-policy 另外显示正在运行的反射与每刻评估耗时。
 
 
 ### F1-f 测试与脚本
@@ -661,7 +666,7 @@ src/main.ts（现有，改动）--创建并注册--> src/autopilot/autopilot.ts�
 
 ### F-022 · `tests/policy.test.ts`
 
-- **模块**：M-VER 验证　**里程碑**：M3　**状态**：placeholder　**设计**：已确定：覆盖范围；具体样例随实现补充，不能照抄实现行为
+- **模块**：M-VER 验证　**里程碑**：M3　**状态**：verified　**设计**：已确定：覆盖范围；具体样例随实现补充，不能照抄实现行为
 - **职责**：验证 src/autopilot/policy.ts 的契约行为。
 - **不负责**：不连接真实 Minecraft 服务器或 OpenRouter；不测试其他模块的内部细节。
 - **输入**：来源：ava 测试运行器（npm test，仅运行 tests/**/*.test.ts）。 内容：模拟的 bot、实体、方块、事件存储与时钟（沿用现有 tests/_helpers.ts、tests/_world.ts 的做法）。 限制：使用 sinon 假时钟控制时间，避免依赖真实等待；不发网络请求。
@@ -703,7 +708,7 @@ src/main.ts（现有，改动）--创建并注册--> src/autopilot/autopilot.ts�
 
 ### F-025 · `tests/reflexes.test.ts`
 
-- **模块**：M-VER 验证　**里程碑**：M3　**状态**：placeholder　**设计**：已确定：覆盖范围；具体样例随实现补充，不能照抄实现行为
+- **模块**：M-VER 验证　**里程碑**：M3　**状态**：verified　**设计**：已确定：覆盖范围；具体样例随实现补充，不能照抄实现行为
 - **职责**：验证 src/autopilot/reflex-engine.ts 与 src/autopilot/reflexes.ts 的契约行为。
 - **不负责**：不连接真实 Minecraft 服务器或 OpenRouter；不测试其他模块的内部细节。
 - **输入**：来源：ava 测试运行器（npm test，仅运行 tests/**/*.test.ts）。 内容：模拟的 bot、实体、方块、事件存储与时钟（沿用现有 tests/_helpers.ts、tests/_world.ts 的做法）。 限制：使用 sinon 假时钟控制时间，避免依赖真实等待；不发网络请求。
@@ -787,7 +792,7 @@ src/main.ts（现有，改动）--创建并注册--> src/autopilot/autopilot.ts�
 
 ### F-031 · `tests/policy-tools.test.ts`
 
-- **模块**：M-VER 验证　**里程碑**：M3　**状态**：placeholder　**设计**：已确定：覆盖范围；具体样例随实现补充，不能照抄实现行为
+- **模块**：M-VER 验证　**里程碑**：M3　**状态**：verified　**设计**：已确定：覆盖范围；具体样例随实现补充，不能照抄实现行为
 - **职责**：验证 src/tools/policy-tools.ts 的契约行为。
 - **不负责**：不连接真实 Minecraft 服务器或 OpenRouter；不测试其他模块的内部细节。
 - **输入**：来源：ava 测试运行器（npm test，仅运行 tests/**/*.test.ts）。 内容：模拟的 bot、实体、方块、事件存储与时钟（沿用现有 tests/_helpers.ts、tests/_world.ts 的做法）。 限制：使用 sinon 假时钟控制时间，避免依赖真实等待；不发网络请求。
@@ -833,13 +838,13 @@ src/main.ts（现有，改动）--创建并注册--> src/autopilot/autopilot.ts�
 
 | 条目 | 文件 | 里程碑 | 计划改动 | 不变的部分 | 验证 |
 |---|---|---|---|---|---|
-| E-001 | `src/tool-factory.ts` | M1（已实现） | 实现方式：在 `src/tool-factory.ts` 中集中维护身体类工具名单 `BODY_TOOLS`（也可用注册选项 `body` 覆盖），而不是在各工具文件里逐个标记；名单在下列工具之外还包含 equip-item（切换手中物品，符合 G1 的“身体”定义），以及 M2 改为任务之前的 collect-block（M2 起已移出名单，见 E-004）。`registerTool` 增加“身体类”选项：执行前以手动优先级向仲裁器申请租约（立即抢占任务与日常反射，遇到关键反射时等待最长 10 秒），结束后释放；如果抢占了任务或日常反射，在工具结果末尾附上中断报告（被打断任务的快照，或被打断的反射名称，以及 resume-task / cancel-task 的用法）；等待过关键反射时说明等待了哪个反射多久；超时返回 “Busy: <持有者>” 错误。身体类工具：move-to-position、move-in-direction、look-at、jump、fly-to、dig-block、place-block、activate-block、activate-entity、attack-entity、mount-entity、dismount、sleep、consume、craft-item、smelt-item、container-deposit、container-withdraw、read-container、clear-region、fill-region、dig-tunnel、goto-waypoint | 连接检查、参数校验、错误包装、只读工具的行为 | 现有 `tests/tool-factory.test.ts`；`tests/task-tools.test.ts` 中的租约场景 |
+| E-001 | `src/tool-factory.ts` | M1（已实现） | 实现方式：在 `src/tool-factory.ts` 中集中维护身体类工具名单 `BODY_TOOLS`（也可用注册选项 `body` 覆盖），而不是在各工具文件里逐个标记；名单在下列工具之外还包含 equip-item（切换手中物品，符合 G1 的“身体”定义），以及 M2 改为任务之前的 collect-block（M2 起已移出名单，见 E-004）。M3 起另有 `strict` 注册选项：用完整的严格对象模式经 `server.registerTool` 注册，未知的顶层参数被拒绝（set-policy 使用）。`registerTool` 增加“身体类”选项：执行前以手动优先级向仲裁器申请租约（立即抢占任务与日常反射，遇到关键反射时等待最长 10 秒），结束后释放；如果抢占了任务或日常反射，在工具结果末尾附上中断报告（被打断任务的快照，或被打断的反射名称，以及 resume-task / cancel-task 的用法）；等待过关键反射时说明等待了哪个反射多久；超时返回 “Busy: <持有者>” 错误。身体类工具：move-to-position、move-in-direction、look-at、jump、fly-to、dig-block、place-block、activate-block、activate-entity、attack-entity、mount-entity、dismount、sleep、consume、craft-item、smelt-item、container-deposit、container-withdraw、read-container、clear-region、fill-region、dig-tunnel、goto-waypoint | 连接检查、参数校验、错误包装、只读工具的行为 | 现有 `tests/tool-factory.test.ts`；`tests/task-tools.test.ts` 中的租约场景 |
 | E-002 | `src/tools/follow-tools.ts` | M1（已实现） | follow-entity、flee-from 改为通过任务管理器启动 follow / flee 任务（替换当前任务），立即返回并在文字中附上任务 id | 工具名、参数、返回文字的开头（“Following …” / “Fleeing from …”） | 现有 `tests/interaction-tools.test.ts` 中的 follow/flee 场景（按新实现调整断言，不改变对外语义） |
 | E-003 | `src/tools/position-tools.ts` | M1（已实现） | stop-pathfinding 同时取消当前任务（原因 “stopped by stop-pathfinding”）；移动类工具标记为身体类 | stop-pathfinding 的停止语义与现有修复（清除 pathfinder 标志） | 现有 `tests/position-tools.test.ts`、`tests/new-tools.test.ts` |
 | E-004 | `src/tools/gathering-tools.ts` | M2（已实现） | collect-block 改为启动 gather 任务（替换当前任务，并在结果中说明被替换、取消的任务）并等待其结束，同时从身体类工具名单中移除（任务自己以任务级申请租约）；任务被取消时返回错误并附进度。替换而不是暂停已由用户确认（2026-10-16）：M2 之前 collect-block 作为身体类工具会暂停当前任务（可 resume-task 恢复），返回与现在相同格式的文字；采集循环迁移到 `src/autopilot/behaviors/gather.ts` | 工具名、参数、返回文字格式、安全规则 | 现有 `tests/gathering-tools.test.ts` 全部通过 |
-| E-005 | `src/bot-connection.ts` | M1（onBotReady、onBotEnd 已实现；onDamage 在 M3） | 增加回调：onBotReady(bot)、onBotEnd()、onDamage({attackerId, type, time})（结构化受伤信息，复用现有伤害事件解析） | 现有事件、系统消息、声音、伤害文字描述 | 现有 `tests/perception*.test.ts`；`tests/autopilot.test.ts` |
+| E-005 | `src/bot-connection.ts` | M1（onBotReady、onBotEnd）、M3（onDamage，已实现） | 增加回调：onBotReady(bot)、onBotEnd()、onDamage({attackerId, type, time})（结构化受伤信息，复用现有伤害事件解析） | 现有事件、系统消息、声音、伤害文字描述 | 现有 `tests/perception*.test.ts`；`tests/autopilot.test.ts` |
 | E-006 | `src/config.ts` | M4 | 新增命令行参数 `--decision-model <id>`。聊天命令授权不提供启动参数（用户决定，只能由 LLM 设置）。API key 不经过此文件 | 现有参数 | 现有 `tests/config.test.ts` 补充新参数场景 |
-| E-007 | `src/main.ts` | M1（已实现；M2 起只创建一个 WaypointStore 并同时交给路标工具与 Autopilot；M3、M4 扩展） | 创建 Autopilot，连接 BotConnection 回调，把服务访问函数传给工具注册函数；注册 task-tools、policy-tools | 现有工具注册与启动流程 | 实机：`npm run test:live` 显示工具总数从 54 增加到 61 |
+| E-007 | `src/main.ts` | M1（已实现；M2 起只创建一个 WaypointStore 并同时交给路标工具与 Autopilot；M3 起转接 onDamage 并注册 policy-tools，工具总数 60；M4 扩展） | 创建 Autopilot，连接 BotConnection 回调，把服务访问函数传给工具注册函数；注册 task-tools、policy-tools | 现有工具注册与启动流程 | 实机：`npm run test:live` 显示工具总数从 54 增加到 61 |
 | E-008 | `package.json` | 规划阶段（已完成）、M6 | 规划阶段：ava `files` 限定为 `tests/**/*.test.ts`，防止 `blueprint/` 中的占位文件被当作测试运行。M6：增加 `test:scenarios` 脚本 | 其他脚本与依赖 | 规划阶段：`npm test` 仍为 273 个测试通过（已执行） |
 | E-009 | `scripts/test-live-world.mjs` | M1～M4、M6 | 覆盖 7 个新工具（start-task、list-tasks、resume-task、cancel-task、get-policy、set-policy、list-decision-models），以及“任务中调用移动工具 → 中断报告 → resume-task”流程；M6 改为使用 `scripts/lib/live-arena.mjs` | 已有的全部检查步骤与防护 | 实机连续两轮全部通过 |
 | E-010 | `README.md` | 规划阶段（已完成）、M6 | 规划阶段：增加一小节说明 Autopilot 处于设计阶段并链接本蓝图。M6：替换为实际使用说明（任务、策略、决策模型的隐私与费用说明） | 现有内容 | 人工阅读 |
@@ -884,7 +889,7 @@ done / failed / cancelled 为终态，不能再改变
 | `task_done` / `task_failed` / `task_cancelled` | `t5 gather: Mined 16 of 16 oak_log; inventory gained 16 item(s)` / `t3 guard: failed (target lost)` / `t3 guard: cancelled (replaced)` |
 | `reflex` | `creeper-evade: creeper (id 812) about to explode 4 blocks east → moved 9 blocks away (1.2s)` |
 | `decision` | `chat-triage: addressed p=0.96, request p=0.91 (perplexity/pplx-decider-v1.1-27b; 431ms) → reported` / `chat-command: follow_me p=0.93 from authorized player Thomas_Summon → started t6 follow` |
-| `policy` | `policy reset to defaults (bot rejoined the game)` / `warning: attackPlayers enabled by set-policy` |
+| `policy` | `policy reset to defaults (bot joined the game)` / `set-policy changed reflexes.autoEat.enabled` / `warning: attackPlayers enabled by set-policy; the bot may now attack players` |
 | `chat_request` | `Steve: "ClaudeBot, can you bring me some wood?" (request p=0.91, addressed p=0.96)` / `Steve (whisper): "hi" (rule: whisper; no decision model)` |
 
 ### G4. 取消与暂停

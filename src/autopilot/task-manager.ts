@@ -4,6 +4,7 @@ import type { ZodType, ZodTypeDef } from 'zod';
 import { ActionArbiter, Lease, PRIORITY, Preemptor } from './action-arbiter.js';
 import type { EventStore } from '../event-store.js';
 import type { WaypointStore } from '../waypoint-store.js';
+import type { Policy } from './policy.js';
 import { stopPathfinder } from '../tools/movement-utils.js';
 
 export type TaskStatus = 'running' | 'paused' | 'done' | 'failed' | 'cancelled';
@@ -12,6 +13,8 @@ export type TaskSource = 'llm' | 'chat' | 'tool';
 /** Shared stores behaviors may read, e.g. saved waypoints for guard and return-home. */
 export interface BehaviorServices {
   waypoints?: WaypointStore;
+  /** The current policy; read it at each decision so set-policy takes effect at once. */
+  policy?: () => Policy;
 }
 
 export interface BehaviorContext<P, S> {

@@ -34,6 +34,11 @@ export function surfaceName(name: string): string {
   return WATER_LIKE.has(name) ? 'water' : name;
 }
 
+/** Water, or a block the game treats as water (kelp, seagrass, bubble columns, waterlogged blocks). */
+export function isWaterLike(block: { name: string; isWaterlogged?: boolean } | null | undefined): boolean {
+  return Boolean(block && (WATER_LIKE.has(block.name) || block.isWaterlogged === true));
+}
+
 export function isLiquid(name: string): boolean {
   return name === 'water' || name === 'lava';
 }

@@ -29,6 +29,7 @@ import { registerVisionTools } from './tools/vision-tools.js';
 import { WaypointStore, defaultWaypointFile } from './waypoint-store.js';
 import { Autopilot } from './autopilot/autopilot.js';
 import { registerTaskTools } from './tools/task-tools.js';
+import { registerPolicyTools } from './tools/policy-tools.js';
 
 setupStdioFiltering();
 
@@ -62,7 +63,8 @@ async function main() {
         }
       },
       onBotReady: bot => autopilot.bind(bot),
-      onBotEnd: () => autopilot.unbind('disconnected')
+      onBotEnd: () => autopilot.unbind('disconnected'),
+      onDamage: info => autopilot.noteDamage(info)
     }
   );
 
@@ -92,6 +94,7 @@ async function main() {
   registerInteractionTools(factory, getBot);
   registerFollowTools(factory, getBot, getAutopilot);
   registerTaskTools(factory, getAutopilot);
+  registerPolicyTools(factory, getAutopilot, eventStore);
   registerWaypointTools(factory, getBot, waypointStore);
   registerRegionTools(factory, getBot);
   registerGatheringTools(factory, getAutopilot);

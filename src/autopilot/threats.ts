@@ -4,12 +4,14 @@ import { Vec3 } from 'vec3';
 import { BotEntity, entityLabel, metadataValue } from '../tools/entity-utils.js';
 import { airLevel } from '../tools/gamestate-tools.js';
 
-/** The policy's attack rules. M2 uses the defaults as constants; M3 reads them from the policy store (F-014). */
+/** The policy's attack rules (F-014 combat group); callers pass the current policy's values. */
 export interface CombatRules {
   attackPlayers: boolean;
+  /** Leave neutral mobs alone unless their type is named explicitly. */
+  avoidNeutral: boolean;
 }
 
-export const DEFAULT_COMBAT_RULES: CombatRules = { attackPlayers: false };
+export const DEFAULT_COMBAT_RULES: CombatRules = { attackPlayers: false, avoidNeutral: true };
 
 export interface TargetRules extends Partial<CombatRules> {
   /** Entity names the caller asked for explicitly (hunt), which makes passive and neutral mobs of that type legal. */
@@ -111,7 +113,11 @@ export function checkTarget(bot: mineflayer.Bot, entity: BotEntity | null | unde
     if (!name) return { legal: false, reason: 'unknown entity' };
     if (isTamed(bot, entity)) return { legal: false, reason: `${label} is tamed; tamed animals are never attacked` };
     if (rules.allowTypes?.includes(name)) return { legal: true };
-    if (NEUTRAL_MOBS.has(name)) return { legal: false, reason: `${label} is neutral and is only attacked when named explicitly` };
+    if (NEUTRAL_MOBS.has(name)) {
+      return (rules.avoidNeutral ?? DEFAULT_COMBAT_RULES.avoidNeutral)
+        ? { legal: false, reason: `${label} is neutral and is only attacked when named explicitly` }
+        : { legal: true };
+    }
     if (HOSTILE_MOBS.has(name)) return { legal: true };
     return { legal: false, reason: `${label} is not hostile` };
   } catch {
@@ -119,12 +125,16 @@ export function checkTarget(bot: mineflayer.Bot, entity: BotEntity | null | unde
   }
 }
 
-/** Hostile mobs the bot may attack within `radius` of `center`, nearest to the center first. */
+/**
+ * Mobs the bot may attack within `radius` of `center`, nearest to the center first: hostile mobs, plus neutral ones
+ * when the policy turned avoidNeutral off.
+ */
 export function legalHostilesNear(bot: mineflayer.Bot, center: Vec3, radius: number, rules: TargetRules = {}): Threat[] {
   const found: Threat[] = [];
+  const withNeutral = (rules.avoidNeutral ?? DEFAULT_COMBAT_RULES.avoidNeutral) === false;
   for (const entity of Object.values(bot.entities ?? {})) {
     try {
-      if (!entity?.position || !entity.name || !HOSTILE_MOBS.has(entity.name)) continue;
+      if (!entity?.position || !entity.name || !(HOSTILE_MOBS.has(entity.name) || (withNeutral && NEUTRAL_MOBS.has(entity.name)))) continue;
       const distance = entity.position.distanceTo(center);
       if (distance > radius || !checkTarget(bot, entity, rules).legal) continue;
       found.push({ entity, distance });

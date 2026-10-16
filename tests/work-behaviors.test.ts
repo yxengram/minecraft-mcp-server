@@ -9,6 +9,7 @@ import { guardBehavior } from '../src/autopilot/behaviors/guard.js';
 import { gatherBehavior } from '../src/autopilot/behaviors/gather.js';
 import { huntBehavior } from '../src/autopilot/behaviors/hunt.js';
 import { EventStore } from '../src/event-store.js';
+import { PolicyStore } from '../src/autopilot/policy.js';
 import { createFakeWorld } from './_helpers.js';
 
 // Contract: docs/BLUEPRINT.md F-027 (verifies F-006 guard, F-007 gather, F-008 hunt) and invariant I1 (G6).
@@ -959,4 +960,283 @@ test.serial('a paused gather does not stop a manual dig on another block', async
   t.false(bot.dig.called);
   if (manual.ok) manual.lease.release();
   await tasks.cancel(undefined, 'done');
+});
+
+// ---------------------------------------------------------------- M3: guard and hunt read the policy at each fight (F-014 combat group, F-006, F-008, I1)
+
+/** A combat world whose behaviors read the live policy, as the autopilot wires it (services.policy). */
+function policyWorld(entities: FakeEntity[], store: PolicyStore) {
+  // Keep the lambda: every update replaces the frozen policy object, so a captured store.get() would go stale.
+  return combatWorld(entities, { policy: () => store.get() });
+}
+
+function updatePolicy(t: { true: (value: boolean, message?: string) => void }, store: PolicyStore, update: unknown) {
+  const result = store.update(update, 'llm');
+  t.true(result.ok, result.ok ? undefined : result.errors.join('; '));
+  return result;
+}
+
+function goalTargets(pathfinder: { setGoal: sinon.SinonSpy }, id: number): boolean {
+  return pathfinder.setGoal.getCalls().some(call => (call.args[0] as Goal)?.entity?.id === id);
+}
+
+function swordEquips(bot: { equip: sinon.SinonStub }): string[] {
+  return bot.equip.getCalls()
+    .map(call => (call.args[0] as { name?: string } | undefined)?.name ?? '')
+    .filter(name => name.endsWith('_sword'));
+}
+
+test.serial('guard reads combat.retreatHealth at each check: too hurt at 12 of 15 it leaves a zombie alone, and fights it once set-policy lowers the threshold, without restarting the task', async (t) => {
+  const clock = fakeTimers();
+  t.teardown(() => clock.restore());
+  const store = new PolicyStore();
+  updatePolicy(t, store, { combat: { retreatHealth: 15 } });
+  const zombie = mob(20, 'zombie', 5);
+  const { tasks, bot, pathfinder, events } = policyWorld([player(5, 'Steve', 2), zombie], store);
+  bot.health = 12;
+
+  const started = await tasks.start('guard', { target: 'Steve' });
+  t.true(started.ok, started.ok ? undefined : started.error);
+  await clock.tickAsync(3000);
+
+  t.true(bot.attack.notCalled, 'health 12 is not above retreatHealth 15: no fight');
+  t.false(goalTargets(pathfinder, 20), 'the zombie is not even chased');
+  t.true(20 in bot.entities);
+  t.is(tasks.currentTask()?.status, 'running');
+  t.regex(tasks.currentTask()?.step ?? '', /guarding Steve/);
+
+  // The LLM lowers the threshold; the running task sees it at its next check.
+  updatePolicy(t, store, { combat: { retreatHealth: 6 } });
+  await clock.tickAsync(3000);
+
+  t.true(bot.attack.called, 'the zombie is attacked once health 12 is above retreatHealth 6');
+  t.true(bot.attack.getCalls().every(call => call.args[0].id === 20));
+  t.false(20 in bot.entities, 'the zombie died');
+  t.true(progressMessages(events).some(message => /^t1 guard: .*killed zombie/.test(message)), JSON.stringify(progressMessages(events)));
+  t.is(tasks.currentTask()?.id, 't1', 'the same task, not a restarted one');
+  t.is(tasks.currentTask()?.status, 'running');
+  t.is(events.query({ types: ['task_started'], limit: 10 }).events.length, 1, 'only one task was ever started');
+
+  await cancelTask(tasks, clock);
+});
+
+test.serial('guard with the default policy (avoidNeutral true) never attacks an enderman in its radius, and attacks it once set-policy turns avoidNeutral off', async (t) => {
+  const clock = fakeTimers();
+  t.teardown(() => clock.restore());
+  const store = new PolicyStore();
+  t.true(store.get().combat.avoidNeutral, 'the default leaves neutral mobs alone');
+  const enderman = mob(70, 'enderman', 4, 1);
+  const { tasks, bot, pathfinder, events } = policyWorld([player(5, 'Steve', 2), enderman], store);
+
+  const started = await tasks.start('guard', { target: 'Steve' });
+  t.true(started.ok, started.ok ? undefined : started.error);
+  await clock.tickAsync(5000);
+
+  t.true(bot.attack.notCalled, 'the enderman is never attacked with the default policy');
+  t.false(goalTargets(pathfinder, 70), 'nor chased');
+  t.true(70 in bot.entities);
+  t.regex(tasks.currentTask()?.step ?? '', /guarding Steve/, 'the guard loop is alive');
+
+  updatePolicy(t, store, { combat: { avoidNeutral: false } });
+  await clock.tickAsync(3000);
+
+  t.true(bot.attack.called, 'with avoidNeutral off the enderman inside the radius is fought');
+  t.true(bot.attack.getCalls().every(call => call.args[0].id === 70));
+  t.false(70 in bot.entities, 'the enderman died');
+  t.is(tasks.currentTask()?.id, 't1');
+  t.is(tasks.currentTask()?.status, 'running');
+  t.is(events.query({ types: ['task_started'], limit: 10 }).events.length, 1);
+
+  await cancelTask(tasks, clock);
+});
+
+test.serial('guard with avoidNeutral false attacks an enderman in its radius but still never a tamed wolf or a player', async (t) => {
+  const clock = fakeTimers();
+  t.teardown(() => clock.restore());
+  const store = new PolicyStore();
+  updatePolicy(t, store, { combat: { avoidNeutral: false } });
+  const ownerIndex = registry.entitiesByName.wolf.metadataKeys!.indexOf('owneruuid');
+  t.true(ownerIndex >= 0);
+  const tamedWolf = mob(71, 'wolf', 3, -2);
+  tamedWolf.metadata = [];
+  tamedWolf.metadata[ownerIndex] = '6f0e1a2b-0000-4000-8000-000000000001';
+  const enderman = mob(70, 'enderman', 5, 1);
+  const { tasks, bot, events } = policyWorld([player(5, 'Steve', 2), enderman, tamedWolf, player(31, 'Alex', 1, 2)], store);
+
+  const started = await tasks.start('guard', { target: 'Steve' });
+  t.true(started.ok, started.ok ? undefined : started.error);
+  await clock.tickAsync(5000);
+
+  t.true(bot.attack.called, 'the enderman is attacked');
+  t.true(bot.attack.getCalls().every(call => call.args[0].id === 70), `targets: ${JSON.stringify(bot.attack.getCalls().map(call => call.args[0].name))}`);
+  t.false(70 in bot.entities, 'the enderman died');
+  t.true(71 in bot.entities, 'the tamed wolf is never attacked (I1: tamed animals are never legal)');
+  t.true(31 in bot.entities && 5 in bot.entities, 'no player is attacked');
+  t.true(progressMessages(events).some(message => /^t1 guard: .*killed enderman/.test(message)), JSON.stringify(progressMessages(events)));
+  t.is(tasks.currentTask()?.status, 'running');
+
+  await cancelTask(tasks, clock);
+});
+
+test.serial('hunt still refuses players with combat.attackPlayers true: player is rejected as the animal and a player next to the cows is never hit', async (t) => {
+  const clock = fakeTimers();
+  t.teardown(() => clock.restore());
+  const store = new PolicyStore();
+  const enabled = updatePolicy(t, store, { combat: { attackPlayers: true } });
+  t.true(enabled.ok && enabled.warnings.length > 0, 'turning attackPlayers on returns a warning (F-014)');
+  t.true(store.get().combat.attackPlayers);
+  const { tasks, bot } = policyWorld([player(5, 'Steve', 1), mob(40, 'cow', 2, 1)], store);
+
+  const lower = await tasks.start('hunt', { animal: 'player' });
+  const upper = await tasks.start('hunt', { animal: 'Player' });
+  t.false(lower.ok, 'players cannot be hunted, whatever the policy says');
+  if (!lower.ok) t.regex(lower.error, /Invalid params for hunt/);
+  t.false(upper.ok);
+  t.is(tasks.currentTask(), null);
+
+  const started = await tasks.start('hunt', { animal: 'cow', count: 1 });
+  t.true(started.ok, started.ok ? undefined : started.error);
+  const end = tasks.waitForEnd(started.ok ? started.task.id : 't1');
+  await clock.tickAsync(5000);
+  const final = await end;
+
+  t.is(final.status, 'done');
+  t.true(bot.attack.called, 'the cow was fought');
+  t.true(bot.attack.getCalls().every(call => call.args[0].type !== 'player' && call.args[0].name === 'cow'));
+  t.true(5 in bot.entities, 'Steve is untouched');
+});
+
+test.serial('hunt with combat.attackPlayers false does not swing a sword at a cow with a player right next to it (control)', async (t) => {
+  const clock = fakeTimers();
+  t.teardown(() => clock.restore());
+  const store = new PolicyStore();
+  const { tasks, bot, inventory } = policyWorld([player(5, 'Steve', 1, 1), mob(40, 'cow', 1)], store);
+  inventory.push({ name: 'iron_sword', count: 1, type: registry.itemsByName.iron_sword.id });
+
+  const started = await tasks.start('hunt', { animal: 'cow', count: 1 });
+  t.true(started.ok, started.ok ? undefined : started.error);
+  const end = tasks.waitForEnd('t1');
+  await clock.tickAsync(5000);
+  const final = await end;
+
+  t.is(final.status, 'done');
+  t.deepEqual(swordEquips(bot), [], 'the sword sweep would hit Steve, so no sword is taken out');
+  t.true(bot.attack.getCalls().every(call => call.args[0].name === 'cow'));
+});
+
+// F-008: hunt never attacks players, whatever the policy says. A full-strength sword hit sweeps everything within a
+// block of the cow (F-011), so with Steve next to the cow a sword hit would hurt him. With attackPlayers true, hunt
+// passes the policy's rules (attackPlayers: true) to engage, sweepBystanders then counts Steve as a legal target rather
+// than a bystander, and equipBestWeapon takes the sword out. Expected: hunt keeps players illegal for its fights.
+test.serial('hunt with combat.attackPlayers true still does not swing a sword at a cow with a player right next to it', async (t) => {
+  const clock = fakeTimers();
+  t.teardown(() => clock.restore());
+  const store = new PolicyStore();
+  updatePolicy(t, store, { combat: { attackPlayers: true } });
+  const { tasks, bot, inventory } = policyWorld([player(5, 'Steve', 1, 1), mob(40, 'cow', 1)], store);
+  inventory.push({ name: 'iron_sword', count: 1, type: registry.itemsByName.iron_sword.id });
+
+  const started = await tasks.start('hunt', { animal: 'cow', count: 1 });
+  t.true(started.ok, started.ok ? undefined : started.error);
+  const end = tasks.waitForEnd('t1');
+  await clock.tickAsync(5000);
+  const final = await end;
+
+  t.is(final.status, 'done');
+  t.deepEqual(swordEquips(bot), [], 'the sword sweep would hit Steve, so no sword is taken out');
+});
+
+test.serial('guard with combat.attackPlayers false does not swing a sword at a zombie right next to the guarded player (control)', async (t) => {
+  const clock = fakeTimers();
+  t.teardown(() => clock.restore());
+  const store = new PolicyStore();
+  const zombie = mob(20, 'zombie', 2, 1, Infinity);
+  const { tasks, bot, inventory } = policyWorld([player(5, 'Steve', 2), zombie], store);
+  inventory.push({ name: 'iron_sword', count: 1, type: registry.itemsByName.iron_sword.id });
+
+  await tasks.start('guard', { target: 'Steve' });
+  await clock.tickAsync(1500);
+
+  t.true(bot.attack.called, 'the zombie is fought');
+  t.true(bot.attack.getCalls().every(call => call.args[0].id === 20));
+  t.deepEqual(swordEquips(bot), [], 'a sword sweep at the zombie would hit Steve');
+  await cancelTask(tasks, clock);
+});
+
+// F-006 guard never attacks players, and F-011 names the guarded player as the bystander a sword sweep must spare.
+// With attackPlayers true guard passes attackPlayers: true to engage, so the guarded player stops counting as a
+// bystander and the sword comes out next to him.
+test.serial('guard with combat.attackPlayers true still does not swing a sword at a zombie right next to the guarded player', async (t) => {
+  const clock = fakeTimers();
+  t.teardown(() => clock.restore());
+  const store = new PolicyStore();
+  updatePolicy(t, store, { combat: { attackPlayers: true } });
+  const zombie = mob(20, 'zombie', 2, 1, Infinity);
+  const { tasks, bot, inventory } = policyWorld([player(5, 'Steve', 2), zombie], store);
+  inventory.push({ name: 'iron_sword', count: 1, type: registry.itemsByName.iron_sword.id });
+
+  await tasks.start('guard', { target: 'Steve' });
+  await clock.tickAsync(1500);
+
+  t.true(bot.attack.called, 'the zombie is fought');
+  t.deepEqual(swordEquips(bot), [], 'a sword sweep at the zombie would hit Steve');
+  await cancelTask(tasks, clock);
+});
+
+test.serial('hunt reads combat.retreatHealth: at health 12 below a threshold of 15 it does not fight, and a hunt after set-policy lowers it kills the cow', async (t) => {
+  const clock = fakeTimers();
+  t.teardown(() => clock.restore());
+  const store = new PolicyStore();
+  updatePolicy(t, store, { combat: { retreatHealth: 15 } });
+  const { tasks, bot } = policyWorld([mob(40, 'cow', 2, 1)], store);
+  bot.health = 12;
+
+  const first = await tasks.start('hunt', { animal: 'cow', count: 1 });
+  t.true(first.ok, first.ok ? undefined : first.error);
+  const firstEnd = tasks.waitForEnd('t1');
+  await clock.tickAsync(3000);
+  const firstFinal = await firstEnd;
+
+  t.is(firstFinal.status, 'failed', 'nothing was killed');
+  t.true(bot.attack.notCalled, 'no hit at or below retreatHealth');
+  t.true(40 in bot.entities);
+
+  updatePolicy(t, store, { combat: { retreatHealth: 6 } });
+  const second = await tasks.start('hunt', { animal: 'cow', count: 1 });
+  t.true(second.ok, second.ok ? undefined : second.error);
+  const secondEnd = tasks.waitForEnd(second.ok ? second.task.id : 't2');
+  await clock.tickAsync(5000);
+  const secondFinal = await secondEnd;
+
+  t.is(secondFinal.status, 'done');
+  t.true(bot.attack.called);
+  t.false(40 in bot.entities, 'the cow died');
+});
+
+test.serial('hunt reads combat.retreatHealth before each fight: raised after the first kill, the second cow is left alone and the hunt ends with a partial result', async (t) => {
+  const clock = fakeTimers();
+  t.teardown(() => clock.restore());
+  const store = new PolicyStore();
+  const { tasks, bot } = policyWorld([mob(40, 'cow', 2, 1), mob(41, 'cow', 0, -6)], store);
+  bot.health = 12;
+  // The LLM raises the threshold right after the first kill, while the task is still running.
+  let raised = false;
+  bot.on('entityDead', () => {
+    if (raised) return;
+    raised = true;
+    updatePolicy(t, store, { combat: { retreatHealth: 15 } });
+  });
+
+  const started = await tasks.start('hunt', { animal: 'cow', count: 2 });
+  t.true(started.ok, started.ok ? undefined : started.error);
+  const end = tasks.waitForEnd('t1');
+  await clock.tickAsync(5000);
+  const final = await end;
+
+  t.true(raised, 'the first cow died');
+  t.false(40 in bot.entities);
+  t.true(41 in bot.entities, 'the second cow is not fought at health 12 with retreatHealth 15');
+  t.true(bot.attack.getCalls().every(call => call.args[0].id === 40));
+  t.is(final.status, 'done', 'one cow was killed, so the result is partial rather than a failure');
+  t.regex(final.result ?? '', /^Killed 1 of 2 cow/);
 });

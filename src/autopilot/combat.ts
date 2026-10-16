@@ -3,7 +3,8 @@ import type mineflayer from 'mineflayer';
 import { Vec3 } from 'vec3';
 import pathfinderPkg from 'mineflayer-pathfinder';
 const { goals } = pathfinderPkg;
-import { checkTarget, DEFAULT_COMBAT_RULES, TargetRules } from './threats.js';
+import { checkTarget, CombatRules, DEFAULT_COMBAT_RULES, TargetRules } from './threats.js';
+import type { Policy } from './policy.js';
 import { delay } from './task-manager.js';
 import { BotEntity, entityLabel, metadataValue, refreshEntity } from '../tools/entity-utils.js';
 import { stopPathfinder } from '../tools/movement-utils.js';
@@ -83,6 +84,15 @@ function dps(itemName: string | undefined): number {
   return damage * speed;
 }
 
+/** The policy's combat settings, read fresh for each fight; the defaults when no policy is wired in. */
+export function combatSettings(policy?: () => Policy): { retreatHealth: number; rules: CombatRules } {
+  const combat = policy?.().combat;
+  return {
+    retreatHealth: combat?.retreatHealth ?? DEFAULT_RETREAT_HEALTH,
+    rules: { attackPlayers: combat?.attackPlayers ?? DEFAULT_COMBAT_RULES.attackPlayers, avoidNeutral: combat?.avoidNeutral ?? DEFAULT_COMBAT_RULES.avoidNeutral }
+  };
+}
+
 export function isSword(itemName: string | undefined): boolean {
   return Boolean(itemName?.endsWith('_sword'));
 }
@@ -132,7 +142,8 @@ export function sweepBystanders(bot: mineflayer.Bot, target: BotEntity, rules?: 
     try {
       if (!entity?.position || entity === bot.entity || entity.id === target.id || entity.isValid === false) return false;
       if (NON_LIVING_TYPES.has(entity.type) || entity.name === 'item' || entity.name === 'experience_orb') return false;
-      if (checkTarget(bot, entity, rules ?? DEFAULT_COMBAT_RULES).legal) return false;
+      // Players are never acceptable sweep collateral, even with attackPlayers on: only the chosen target may be hit.
+      if (checkTarget(bot, entity, { ...DEFAULT_COMBAT_RULES, ...rules, attackPlayers: false }).legal) return false;
       const size = entitySize(bot, entity);
       const half = size.width / 2;
       if (Math.abs(entity.position.x - target.position.x) > reachX + half) return false;
@@ -144,6 +155,13 @@ export function sweepBystanders(bot: mineflayer.Bot, target: BotEntity, rules?: 
       return true;
     }
   });
+}
+
+// The entity each bot is fighting right now, so self-defense stays out of a fight a task is already having.
+const activeTargets = new WeakMap<mineflayer.Bot, number>();
+
+export function currentCombatTarget(bot: mineflayer.Bot): number | undefined {
+  return activeTargets.get(bot);
 }
 
 export async function engage(bot: mineflayer.Bot, target: BotEntity, options: EngageOptions = {}): Promise<CombatResult> {
@@ -175,8 +193,10 @@ export async function engage(bot: mineflayer.Bot, target: BotEntity, options: En
   };
   bot.on?.('entityDead', onDead);
   bot.on?.('entityHurt', onHurt);
+  activeTargets.set(bot, target.id);
 
   const end = (outcome: CombatOutcome, detail: string): CombatResult => {
+    if (activeTargets.get(bot) === target.id) activeTargets.delete(bot);
     bot.removeListener?.('entityDead', onDead);
     bot.removeListener?.('entityHurt', onHurt);
     // A cancelled fight no longer owns the body: after a pause it belongs to a manual command or reflex, and a

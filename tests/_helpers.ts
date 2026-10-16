@@ -9,7 +9,7 @@ type ToolResult = { content: { text: string }[]; isError?: boolean };
 type Executor = (args: Record<string, unknown>) => Promise<ToolResult>;
 
 export function createFactory() {
-  const server = { tool: sinon.stub() } as unknown as McpServer;
+  const server = { tool: sinon.stub(), registerTool: sinon.stub() } as unknown as McpServer;
   const connection = {
     checkConnectionAndReconnect: sinon.stub().resolves({ connected: true })
   } as unknown as BotConnection;
@@ -17,7 +17,10 @@ export function createFactory() {
 
   const getTool = (name: string) => {
     const call = (server.tool as sinon.SinonStub).getCalls().find(c => c.args[0] === name);
-    return call ? { description: call.args[1] as string, execute: call.args[3] as Executor } : undefined;
+    if (call) return { description: call.args[1] as string, execute: call.args[3] as Executor };
+    // Strict tools are registered with registerTool(name, { description, inputSchema }, handler).
+    const strict = (server.registerTool as sinon.SinonStub).getCalls().find(c => c.args[0] === name);
+    return strict ? { description: strict.args[1].description as string, execute: strict.args[2] as Executor, inputSchema: strict.args[1].inputSchema } : undefined;
   };
 
   return { factory, getTool };

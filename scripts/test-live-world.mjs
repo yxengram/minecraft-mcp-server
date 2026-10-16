@@ -273,6 +273,34 @@ try {
     expectIncludes(await call('list-inventory'), 'empty', 'list-inventory');
   });
 
+  await step('policy: get-policy and set-policy', async () => {
+    const defaults = await call('get-policy');
+    expectIncludes(defaults, 'autoEat: on', 'get-policy defaults');
+    expectIncludes(defaults, 'attackPlayers: false', 'get-policy defaults');
+    expectIncludes(defaults, 'Reflex checks:', 'get-policy reflex timing');
+    // A local cursor: the shared eventCursor is only set by the next step.
+    const since = Number((await call('get-events', { limit: 1 })).match(/nextSince: (\d+)/)[1]);
+    try {
+      expectIncludes(await call('set-policy', { reflexes: { autoEat: { enabled: false } } }), 'Changed: reflexes.autoEat.enabled', 'set-policy autoEat off');
+      expectIncludes(await call('get-policy'), 'autoEat: off', 'get-policy after set-policy');
+
+      // A misspelled nested field is rejected and changes nothing.
+      expectIncludes(await call('set-policy', { reflexes: { autoEat: { enable: true } } }, { expectError: true }), 'enable', 'set-policy misspelled field');
+      expectIncludes(await call('get-policy'), 'autoEat: off', 'get-policy after a rejected set-policy');
+
+      expectIncludes(await call('set-policy', { combat: { attackPlayers: true } }), 'warning: attackPlayers enabled', 'set-policy attackPlayers warning');
+      const events = await call('get-events', { since, types: ['policy'], limit: 20 });
+      expectIncludes(events, '[policy] set-policy changed reflexes.autoEat.enabled', 'policy event for autoEat');
+      expectIncludes(events, '[policy] warning: attackPlayers enabled by set-policy', 'policy warning event');
+    } finally {
+      // Restore the defaults even if a check failed, so later steps never run with attackPlayers on.
+      await call('set-policy', { reflexes: { autoEat: { enabled: true } }, combat: { attackPlayers: false } });
+    }
+    const restored = await call('get-policy');
+    expectIncludes(restored, 'autoEat: on', 'get-policy after restoring the defaults');
+    expectIncludes(restored, 'attackPlayers: false', 'get-policy after restoring the defaults');
+  });
+
   await step('players, chat and whispers', async () => {
     expectIncludes(await call('list-players'), HELPER_NAME, 'list-players');
     expectIncludes(await call('find-entity', { type: 'player', maxDistance: 16 }), HELPER_NAME, 'find-entity');

@@ -5,7 +5,7 @@ import pathfinderPkg from 'mineflayer-pathfinder';
 const { goals } = pathfinderPkg;
 import { BehaviorDefinition, delay } from '../task-manager.js';
 import { legalHostilesNear } from '../threats.js';
-import { DEFAULT_RETREAT_HEALTH, engage } from '../combat.js';
+import { combatSettings, engage } from '../combat.js';
 import { BotEntity, entityLabel, formatPosition, refreshEntity } from '../../tools/entity-utils.js';
 import { stopPathfinder } from '../../tools/movement-utils.js';
 import { resolveWaypoint } from './actions.js';
@@ -71,7 +71,7 @@ export const guardBehavior: BehaviorDefinition<GuardParams, Post> = {
       : bot.entity.position.floored().offset(0.5, 0, 0.5);
     return { value: { kind: 'point', position, label: formatPosition(position) } };
   },
-  async run({ bot, params, prepared, signal, isPaused, waitUntilRunning, setStep, report }) {
+  async run({ bot, params, prepared, services, signal, isPaused, waitUntilRunning, setStep, report }) {
     let guarded = prepared.kind === 'entity' ? prepared.entity : null;
     const label = prepared.kind === 'entity' ? targetLabel(prepared.entity) : prepared.label;
     const ignoredUntil = new Map<number, number>();
@@ -126,9 +126,10 @@ export const guardBehavior: BehaviorDefinition<GuardParams, Post> = {
       }
 
       const now = Date.now();
-      const fitToFight = typeof bot.health !== 'number' || bot.health > DEFAULT_RETREAT_HEALTH;
+      const { retreatHealth, rules } = combatSettings(services.policy);
+      const fitToFight = typeof bot.health !== 'number' || bot.health > retreatHealth;
       const threat = fitToFight
-        ? legalHostilesNear(bot, post, params.radius).find(({ entity }) => (ignoredUntil.get(entity.id) ?? 0) <= now)
+        ? legalHostilesNear(bot, post, params.radius, rules).find(({ entity }) => (ignoredUntil.get(entity.id) ?? 0) <= now)
         : undefined;
 
       if (threat) {
@@ -141,7 +142,8 @@ export const guardBehavior: BehaviorDefinition<GuardParams, Post> = {
           shouldStop: isPaused,
           maxChase: chaseLimit(params),
           anchor: () => (anchorEntity ? refreshEntity(bot, anchorEntity)?.position ?? post : post),
-          retreatHealth: DEFAULT_RETREAT_HEALTH
+          retreatHealth,
+          rules
         });
         signal.throwIfAborted();
         // The fight cleared the pathfinder; the return trip sets a new goal.

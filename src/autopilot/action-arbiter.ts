@@ -113,6 +113,22 @@ export class ActionArbiter {
     return lease;
   }
 
+  /**
+   * Take the body right now, or return null. Used by reflexes on the game tick, which cannot wait. `replacing` is the
+   * caller's own current lease: it is handed over directly, so nothing paused resumes in between (one reflex
+   * interrupting another of the same priority).
+   */
+  acquireNow(request: LeaseRequest, replacing?: Lease): Lease | null {
+    if (replacing && this.current === replacing) {
+      this.current.state = 'released';
+      this.current = null;
+      // A handover is still a preemption: clear the old holder's goal and controls (G4).
+      this.safeStop();
+    }
+    if (!this.canTake(request.priority)) return null;
+    return this.grant(request, Date.now()).lease;
+  }
+
   /** Take the body, preempting lower priorities and waiting up to `waitMs` behind equal or higher ones. */
   acquire(request: LeaseRequest, waitMs = request.priority === PRIORITY.MANUAL ? DEFAULT_MANUAL_WAIT_MS : 0): Promise<AcquireResult> {
     const started = Date.now();

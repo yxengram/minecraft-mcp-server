@@ -1132,3 +1132,52 @@ test.serial('a player stepping beside the target while the bot looks at it: no s
   assertFullCooldownAfterSwitches(t, log.switches, log.hits);
   assertClean(t, fake);
 });
+
+// --- review fix 11: players are never acceptable sweep collateral, even with attackPlayers on ---------------------
+// F-011: no sword hit while a player stands next to the target (the sweep would hit them too). attackPlayers only
+// makes a player a legal *chosen* target; it does not make it acceptable to hit players standing nearby (I1).
+
+test('fix 11: with attackPlayers true, a player beside the target still counts as a sweep bystander', (t) => {
+  const zombie = mob(2, 'zombie', 2);
+  const alex = player(6, 'Alex', 0);
+  alex.position = BESIDE.clone();
+  const far = player(9, 'Sam', 0);
+  far.position = AWAY.clone();
+  const fake = fakeBot([zombie, alex, far]);
+
+  for (const rules of [{ attackPlayers: true }, { attackPlayers: true, avoidNeutral: false }, { attackPlayers: true, allowTypes: ['player'] }]) {
+    const ids = sweepBystanders(fake.bot as never, zombie as never, rules).map(entity => entity.id);
+    t.deepEqual(ids, [6], `rules ${JSON.stringify(rules)}: the player beside the zombie is a bystander, the far one is not`);
+  }
+});
+
+test('fix 11: with attackPlayers true and a player as the chosen target, another player beside it is a sweep bystander', (t) => {
+  const steve = player(5, 'Steve', 2);
+  const alex = player(6, 'Alex', 0);
+  alex.position = BESIDE.clone();
+  const fake = fakeBot([steve, alex]);
+
+  const ids = sweepBystanders(fake.bot as never, steve as never, { attackPlayers: true }).map(entity => entity.id);
+
+  t.deepEqual(ids, [6], 'the chosen target is not its own bystander; the other player is');
+});
+
+test.serial('fix 11: with attackPlayers true, a player beside the zombie still makes the bot fight with the axe, never the sword', async (t) => {
+  const zombie = mob(2, 'zombie', 2);
+  const alex = player(6, 'Alex', 0);
+  alex.position = BESIDE.clone();
+  const sword = item('diamond_sword');
+  const fake = fakeBot([zombie, alex], [sword, item('iron_axe')]);
+  fake.bot.heldItem = sword;
+  const log = trackHands(fake, () => true);
+  log.extra.hook = (count) => { if (count === 3) zombie.isValid = false; };
+
+  const result = await runFight(t, startFight(t, fake, zombie, { rules: { attackPlayers: true } }));
+
+  t.is(result.outcome, 'killed');
+  t.is(log.hits.length, 3);
+  assertNoSwordNextToBystander(t, log.hits);
+  t.true(log.hits.every(hit => hit.held === 'iron_axe'), `hits with ${log.hits.map(hit => String(hit.held)).join(', ')}`);
+  t.true(fake.bot.attack.alwaysCalledWith(zombie), 'only the zombie is attacked');
+  assertClean(t, fake);
+});
