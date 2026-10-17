@@ -47,6 +47,8 @@ const decisionsSchema = z.object({
   actThreshold: probability(),
   /** Messages at or above this probability of being meant for the bot are reported. */
   cautiousThreshold: probability(),
+  /** The model's fight / flee / hold choice is followed at or above this probability; below it the rule decides. */
+  combatThreshold: probability(),
   maxCallsPerMinute: z.number().int().min(1).max(600)
 }).strict();
 
@@ -85,8 +87,10 @@ export const DEFAULT_POLICY: Policy = {
   },
   combat: { attackPlayers: false, avoidNeutral: true, retreatHealth: 6 },
   chat: { triage: true, commandsFrom: [], replyInChat: true },
-  // Thresholds are tentative until M5 probes them with real messages.
-  decisions: { enabled: true, model: DEFAULT_DECISION_MODEL, actThreshold: 0.85, cautiousThreshold: 0.5, maxCallsPerMinute: 30 }
+  // Thresholds set from the M5 probe of the pinned model (PLAN M5): clear commands scored 1.00 while ambiguous,
+  // negated and spoofed ones reached 0.93; meant-for-the-bot messages 0.92+ against 0.24 at most for the rest; combat
+  // choices below about 0.6 were the model being unsure. Probe again whenever the model changes (G7).
+  decisions: { enabled: true, model: DEFAULT_DECISION_MODEL, actThreshold: 0.95, cautiousThreshold: 0.5, combatThreshold: 0.6, maxCallsPerMinute: 30 }
 };
 
 /** Settings given at startup (command line); they survive every reset. */
@@ -234,6 +238,6 @@ export function describePolicy(policy: Policy): string {
     `- replyInChat: ${onOff(chat.replyInChat)} (confirm those commands in chat)`,
     'Decisions:',
     `- enabled: ${onOff(d.enabled)}, model ${d.model}`,
-    `- actThreshold: ${d.actThreshold}, cautiousThreshold: ${d.cautiousThreshold}, maxCallsPerMinute: ${d.maxCallsPerMinute}`
+    `- actThreshold: ${d.actThreshold}, cautiousThreshold: ${d.cautiousThreshold}, combatThreshold: ${d.combatThreshold}, maxCallsPerMinute: ${d.maxCallsPerMinute}`
   ].join('\n');
 }

@@ -23,9 +23,9 @@ const EXPECTED_DEFAULTS: Policy = {
     autoEat: { enabled: true, food: 14 }
   },
   combat: { attackPlayers: false, avoidNeutral: true, retreatHealth: 6 },
-  // M4 groups (F-014): nobody is authorized by default; thresholds 0.85 / 0.5 until M5 probes them.
+  // M4 groups (F-014): nobody is authorized by default; thresholds set by the M5 probe (PLAN M5).
   chat: { triage: true, commandsFrom: [], replyInChat: true },
-  decisions: { enabled: true, model: DEFAULT_DECISION_MODEL, actThreshold: 0.85, cautiousThreshold: 0.5, maxCallsPerMinute: 30 }
+  decisions: { enabled: true, model: DEFAULT_DECISION_MODEL, actThreshold: 0.95, cautiousThreshold: 0.5, combatThreshold: 0.6, maxCallsPerMinute: 30 }
 };
 
 type Accepted = Extract<UpdateResult, { ok: true }>;
@@ -651,7 +651,7 @@ test('M4: commandsFrom only takes valid Minecraft usernames', t => {
 
 test('M4: the cautious threshold cannot be above the act threshold, and probabilities stay within 0-1', t => {
   const store = new PolicyStore();
-  t.false(store.update({ decisions: { cautiousThreshold: 0.9 } }, 'llm').ok, 'cautious 0.9 above act 0.85');
+  t.false(store.update({ decisions: { cautiousThreshold: 0.97 } }, 'llm').ok, 'cautious 0.97 above act 0.95');
   t.false(store.update({ decisions: { actThreshold: 1.2 } }, 'llm').ok);
   t.false(store.update({ decisions: { maxCallsPerMinute: 0 } }, 'llm').ok);
   t.true(store.update({ decisions: { actThreshold: 0.95, cautiousThreshold: 0.9 } }, 'llm').ok);
@@ -673,5 +673,5 @@ test('M4: describePolicy shows the chat and decision settings', t => {
   t.true(store.update({ chat: { commandsFrom: ['Steve'] } }, 'llm').ok);
   const text = describePolicy(store.get());
   t.regex(text, /commandsFrom: Steve/);
-  t.regex(text, /actThreshold: 0\.85, cautiousThreshold: 0\.5/);
+  t.regex(text, /actThreshold: 0\.95, cautiousThreshold: 0\.5, combatThreshold: 0\.6/);
 });

@@ -93,6 +93,13 @@ export function combatSettings(policy?: () => Policy): { retreatHealth: number; 
   };
 }
 
+/** The melee weapon the bot would fight with (what equipBestWeapon picks), or 'bare hand'. */
+export function bestWeaponName(bot: mineflayer.Bot): string {
+  const names = [bot.heldItem?.name, ...bot.inventory.items().map(item => item.name)].filter((name): name is string => Boolean(name));
+  const best = names.filter(name => dps(name) > dps(undefined)).sort((a, b) => dps(b) - dps(a))[0];
+  return best ?? 'bare hand';
+}
+
 export function isSword(itemName: string | undefined): boolean {
   return Boolean(itemName?.endsWith('_sword'));
 }

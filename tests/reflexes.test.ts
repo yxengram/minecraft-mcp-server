@@ -10,8 +10,9 @@ import pathfinderPkg from 'mineflayer-pathfinder';
 import { z } from 'zod';
 import { AcquireResult, ActionArbiter, PRIORITY } from '../src/autopilot/action-arbiter.js';
 import {
-  ReflexDefinition, ReflexEngine, ReflexName, ReflexRunContext, TriggerContext, TriggerResult
+  ReflexDefinition, ReflexEngine, ReflexEngineOptions, ReflexName, ReflexRunContext, TriggerContext, TriggerResult
 } from '../src/autopilot/reflex-engine.js';
+import type { CombatJudgment, CombatSituation } from '../src/decisions/decision-hooks.js';
 import { REFLEXES, nearestWater, runAway } from '../src/autopilot/reflexes.js';
 import { engage } from '../src/autopilot/combat.js';
 import { Policy, PolicyStore, PolicyUpdate } from '../src/autopilot/policy.js';
@@ -219,7 +220,7 @@ function useClock(t: ExecutionContext) {
   return clock;
 }
 
-function createEngine(t: ExecutionContext, world: World, reflexes: ReflexDefinition[] = REFLEXES) {
+function createEngine(t: ExecutionContext, world: World, reflexes: ReflexDefinition[] = REFLEXES, extra: Pick<ReflexEngineOptions, 'judgeCombat'> = {}) {
   const { bot } = world;
   const events = new EventStore();
   // As in autopilot.ts: the arbiter stops the body whenever it hands it to someone else.
@@ -231,7 +232,7 @@ function createEngine(t: ExecutionContext, world: World, reflexes: ReflexDefinit
   const arbiter = new ActionArbiter({ stopBody });
   const policy = new PolicyStore();
   const log = sinon.spy();
-  const engine = new ReflexEngine({ bot: bot as never, arbiter, getPolicy: () => policy.get(), events, reflexes, log });
+  const engine = new ReflexEngine({ bot: bot as never, arbiter, getPolicy: () => policy.get(), events, reflexes, log, ...extra });
   let loop: ReturnType<typeof setInterval> | undefined;
   t.teardown(() => {
     if (loop) clearInterval(loop);
@@ -1815,4 +1816,319 @@ test.serial('hazard-escape reports air recovered after swimming up', async (t) =
   await clock.tickAsync(200);
   t.is(holder(), null);
   t.regex(lastReflexEvent('hazard-escape') ?? '', /running out of air .* → air recovered/);
+});
+
+// ---- M5: self-defense 'auto' stance with the combat judge (F-013, F-016; I1, I5, I6) ------------------------------
+// The rule acts at once; the decision model, asked in the background, may switch the mode to fight, flee or hold.
+
+type Judge = sinon.SinonSpy<[number, CombatSituation], Promise<CombatJudgment>>;
+
+/** A judge the test answers by hand: every call returns a promise that stays pending until `answer`. */
+function manualJudge() {
+  const pending: { resolve: (judgment: CombatJudgment) => void; reject: (error: Error) => void }[] = [];
+  const judge: Judge = sinon.spy((_attackerId: number, _situation: CombatSituation) =>
+    new Promise<CombatJudgment>((resolve, reject) => { pending.push({ resolve, reject }); }));
+  return {
+    judge,
+    answer: (judgment: CombatJudgment, call = 0) => pending[call].resolve(judgment),
+    fail: (error: Error, call = 0) => pending[call].reject(error)
+  };
+}
+
+const modelSays = (stance: 'fight' | 'flee' | 'hold', probability = 0.9): CombatJudgment =>
+  ({ source: 'model', stance, probability, detail: 'test/decider-1; 80ms' });
+
+/** What armorPoints() reads from a real bot: the equipment slots (all empty here). */
+function withEquipment(world: World): World {
+  Object.assign(world.bot.inventory, { slots: [] as unknown[] });
+  const slots: Record<string, number> = { head: 5, torso: 6, legs: 7, feet: 8 };
+  Object.assign(world.bot, { getEquipmentDestSlot: (destination: string) => slots[destination] });
+  return world;
+}
+
+function kill(world: World, entity: FakeEntity): void {
+  entity.isValid = false;
+  delete world.entities[entity.id];
+}
+
+/** Calls of a spy made after the first `from` calls. */
+function callsSince<A extends unknown[], R>(spy: sinon.SinonSpy<A, R>, from: number) {
+  return spy.getCalls().slice(from);
+}
+
+test.serial('self-defense, stance auto: fights at once by the rule; a later "flee 0.9" stops attacking, stops the body and runs away', async (t) => {
+  const clock = useClock(t);
+  const zombie: FakeEntity & { displayName: string } = { ...mob('zombie', 2), displayName: 'Bob the Zombie' };
+  const steve: FakeEntity = { ...player('Steve', 0), position: new Vec3(0.5, 64, 8.5) };
+  const world = withEquipment(createWorld({ health: 20, entities: [zombie, steve] }));
+  const { judge, answer } = manualJudge();
+  const { engine, holder, lastReflexEvent, startGame } = createEngine(t, world, REFLEXES, { judgeCombat: judge });
+  startGame();
+
+  hitBy(engine, zombie);
+  await clock.tickAsync(TICK);
+  t.deepEqual(holder(), { holder: 'reflex self-defense', priority: PRIORITY.ROUTINE_REFLEX });
+  t.true(judge.calledOnce, 'the judge is asked once, in the background');
+  const [attackerId, situation] = judge.firstCall.args;
+  t.is(attackerId, zombie.id);
+  t.is(situation.attacker.type, 'zombie');
+  t.is(situation.health, 20);
+  t.true(situation.hostiles.every(hostile => hostile.type === 'zombie'));
+  const json = JSON.stringify(situation);
+  t.false(json.includes('Bob'), 'no custom names reach the model');
+  t.false(json.includes('Steve'), 'no player names reach the model');
+
+  await clock.tickAsync(300);
+  t.true(world.bot.attack.calledWith(sinon.match({ id: zombie.id })), 'the rule (fight at health 20, one zombie) runs while the judge thinks');
+
+  const attacks = world.bot.attack.callCount;
+  const stops = world.pathfinder.stop.callCount;
+  const goalsSet = world.pathfinder.setGoal.callCount;
+  const clears = world.bot.clearControlStates.callCount;
+  answer(modelSays('flee'));
+  await clock.tickAsync(TICK * 2);
+
+  t.true(world.pathfinder.stop.callCount > stops, 'the pathfinder is stopped on the switch');
+  t.true(callsSince(world.pathfinder.setGoal, goalsSet).some(call => call.args[0] === null), 'its goal is cleared');
+  t.true(world.bot.clearControlStates.callCount > clears, 'the control states are cleared');
+
+  await clock.tickAsync(500);
+  t.is(world.bot.attack.callCount, attacks, 'no more attacks after the switch');
+  t.true(world.controls.forward, 'running');
+  t.true(facing(world, zombie.position) <= -0.7, 'away from the zombie');
+  t.true(distanceTo(world, zombie) > 3, `got further away (${distanceTo(world, zombie).toFixed(1)})`);
+
+  await clock.tickAsync(4000);
+  t.is(holder(), null, 'the reflex ended');
+  t.is(world.bot.attack.callCount, attacks);
+  t.true(distanceTo(world, zombie) >= 16, `16+ blocks away (${distanceTo(world, zombie).toFixed(1)})`);
+  const event = lastReflexEvent('self-defense') ?? '';
+  t.regex(event, resultFormat('self-defense'));
+  t.regex(event, /\(flee by model p=0\.90\) \(\d+\.\ds\)$/);
+});
+
+const UNANSWERED: { label: string; settle: (judge: ReturnType<typeof manualJudge>) => void }[] = [
+  { label: 'never answers', settle: () => {} },
+  { label: 'falls back to the rule (decision timeout)', settle: judge => judge.answer({ source: 'rule', reason: 'decision timeout' }) },
+  { label: 'throws', settle: judge => judge.fail(new Error('network down')) }
+];
+
+for (const { label, settle } of UNANSWERED) {
+  test.serial(`self-defense, stance auto: a judge that ${label} leaves the rule action running to the end (I5)`, async (t) => {
+    const clock = useClock(t);
+    const zombie = mob('zombie', 2);
+    const world = withEquipment(createWorld({ health: 20, entities: [zombie] }));
+    const judge = manualJudge();
+    const { engine, holder, lastReflexEvent } = createEngine(t, world, REFLEXES, { judgeCombat: judge.judge });
+
+    hitBy(engine, zombie);
+    engine.tick();
+    t.deepEqual(holder(), { holder: 'reflex self-defense', priority: PRIORITY.ROUTINE_REFLEX });
+    t.true(judge.judge.calledOnce);
+    await clock.tickAsync(150);
+    settle(judge);
+    await clock.tickAsync(300);
+    t.true(world.bot.attack.calledWith(sinon.match({ id: zombie.id })), 'fights back by the rule');
+    t.false(world.bot.setControlState.calledWith('forward', true), 'does not run');
+
+    kill(world, zombie);
+    await clock.tickAsync(200);
+    t.is(holder(), null, 'the reflex finished');
+    const event = lastReflexEvent('self-defense') ?? '';
+    t.regex(event, resultFormat('self-defense'));
+    t.regex(event, /killed/);
+    t.regex(event, /\(fight by rule\) \(\d+\.\ds\)$/);
+  });
+}
+
+test.serial('self-defense, stance auto: an answer that arrives after the reflex ended changes nothing', async (t) => {
+  const clock = useClock(t);
+  const zombie = mob('zombie', 2);
+  const world = withEquipment(createWorld({ health: 20, entities: [zombie] }));
+  const { judge, answer } = manualJudge();
+  const { engine, holder, reflexEvents, lastReflexEvent, startGame } = createEngine(t, world, REFLEXES, { judgeCombat: judge });
+  startGame();
+
+  hitBy(engine, zombie);
+  await clock.tickAsync(TICK);
+  t.deepEqual(holder(), { holder: 'reflex self-defense', priority: PRIORITY.ROUTINE_REFLEX });
+  // The fake zombie never gets hurt, so the fight gives up after a while with the zombie still standing next to the bot.
+  await clock.tickAsync(11_000);
+  t.is(holder(), null, 'the reflex ended');
+  t.truthy(world.entities[zombie.id], 'the zombie is still there');
+  t.regex(lastReflexEvent('self-defense') ?? '', /\(fight by rule\)/);
+
+  const controls = world.bot.setControlState.callCount;
+  const goalsSet = world.pathfinder.setGoal.callCount;
+  const attacks = world.bot.attack.callCount;
+  const position = world.self.position.clone();
+  const events = reflexEvents().length;
+  answer(modelSays('flee'));
+  await clock.tickAsync(1000);
+
+  t.false(callsSince(world.bot.setControlState, controls).some(call => call.args[1] === true), 'no movement afterwards');
+  t.is(world.pathfinder.setGoal.callCount, goalsSet, 'no pathfinder goal afterwards');
+  t.is(world.bot.attack.callCount, attacks);
+  t.true(world.self.position.equals(position), 'the bot did not move');
+  t.is(holder(), null, 'the body is not taken again');
+  t.is(reflexEvents().length, events, 'no new reflex event');
+});
+
+test.serial('self-defense, stance auto: an answer equal to the rule (fight) does not switch; the fight goes on', async (t) => {
+  const clock = useClock(t);
+  const zombie = mob('zombie', 2);
+  const world = withEquipment(createWorld({ health: 20, entities: [zombie] }));
+  const { judge, answer } = manualJudge();
+  const { engine, holder, lastReflexEvent } = createEngine(t, world, REFLEXES, { judgeCombat: judge });
+
+  hitBy(engine, zombie);
+  engine.tick();
+  await clock.tickAsync(300);
+  const attacks = world.bot.attack.callCount;
+  t.true(attacks > 0);
+  const stops = world.pathfinder.stop.callCount;
+  const clears = world.bot.clearControlStates.callCount;
+
+  answer(modelSays('fight'));
+  await clock.tickAsync(600);
+
+  t.true(world.bot.attack.callCount > attacks, 'keeps attacking');
+  t.is(world.pathfinder.stop.callCount, stops, 'the body is not stopped');
+  t.is(world.bot.clearControlStates.callCount, clears, 'the controls are not cleared');
+  t.false(world.bot.setControlState.calledWith('forward', true), 'does not run');
+  t.deepEqual(holder(), { holder: 'reflex self-defense', priority: PRIORITY.ROUTINE_REFLEX });
+
+  kill(world, zombie);
+  await clock.tickAsync(200);
+  t.is(holder(), null);
+  t.regex(lastReflexEvent('self-defense') ?? '', /\(fight by model p=0\.90\) \(\d+\.\ds\)$/);
+});
+
+test.serial('self-defense, stance auto: "hold" → does not chase a zombie 6 blocks away, does not run, and hits it once within reach', async (t) => {
+  const clock = useClock(t);
+  const zombie = mob('zombie', 6);
+  const world = withEquipment(createWorld({ health: 20, entities: [zombie] }));
+  const { judge, answer } = manualJudge();
+  const { engine, holder, lastReflexEvent, startGame } = createEngine(t, world, REFLEXES, { judgeCombat: judge });
+  startGame();
+
+  hitBy(engine, zombie);
+  await clock.tickAsync(TICK);
+  t.deepEqual(holder(), { holder: 'reflex self-defense', priority: PRIORITY.ROUTINE_REFLEX });
+  t.true(world.pathfinder.goal instanceof goals.GoalFollow, 'the rule is chasing before the judge answers');
+  answer(modelSays('hold'));
+  await clock.tickAsync(TICK * 2);
+
+  const goalsSet = world.pathfinder.setGoal.callCount;
+  const controls = world.bot.setControlState.callCount;
+  const position = world.self.position.clone();
+  t.is(world.pathfinder.goal, null, 'the rule\'s chase goal is cleared on the switch');
+  await clock.tickAsync(1000);
+
+  t.false(callsSince(world.pathfinder.setGoal, goalsSet).some(call => call.args[0] !== null), 'no chase goal');
+  t.is(world.pathfinder.goal, null);
+  t.false(callsSince(world.bot.setControlState, controls).some(call => call.args[1] === true), 'no running or walking');
+  t.true(world.self.position.equals(position), 'stands still');
+  t.true(world.bot.attack.notCalled, 'out of reach: no attack');
+  t.deepEqual(holder(), { holder: 'reflex self-defense', priority: PRIORITY.ROUTINE_REFLEX }, 'still holding its ground');
+
+  zombie.position = new Vec3(2.5, 64, 0.5);
+  await clock.tickAsync(500);
+  t.true(world.bot.attack.calledWith(sinon.match({ id: zombie.id })), 'hits it within reach');
+  t.false(callsSince(world.pathfinder.setGoal, goalsSet).some(call => call.args[0] !== null), 'still no chase goal');
+  t.true(world.self.position.equals(position), 'still in place');
+
+  kill(world, zombie);
+  await clock.tickAsync(200);
+  t.is(holder(), null);
+  t.regex(lastReflexEvent('self-defense') ?? '', /\(hold by model p=0\.90\) \(\d+\.\ds\)$/);
+});
+
+for (const stance of ['fight', 'flee'] as const) {
+  test.serial(`self-defense, stance ${stance} (not auto): the combat judge is never asked`, async (t) => {
+    const clock = useClock(t);
+    const zombie = mob('zombie', 2);
+    const world = withEquipment(createWorld({ health: 20, entities: [zombie] }));
+    const { judge } = manualJudge();
+    const { engine, policy, holder } = createEngine(t, world, REFLEXES, { judgeCombat: judge });
+    t.true(policy.update({ reflexes: { selfDefense: { stance } } }, 'llm').ok);
+
+    hitBy(engine, zombie);
+    engine.tick();
+    t.deepEqual(holder(), { holder: 'reflex self-defense', priority: PRIORITY.ROUTINE_REFLEX });
+    await clock.tickAsync(500);
+
+    t.true(judge.notCalled);
+    if (stance === 'fight') t.true(world.bot.attack.called);
+    else t.true(world.bot.setControlState.calledWith('forward', true));
+  });
+}
+
+const NEVER_JUDGED: { label: string; attacker: () => FakeEntity; type?: string }[] = [
+  { label: 'a player', attacker: () => player('Steve', 2), type: 'player_attack' },
+  { label: 'a tamed wolf', attacker: () => tamedWolf(2) },
+  { label: 'an iron golem (neutral, default policy)', attacker: () => neutral('iron_golem', 2) }
+];
+
+for (const { label, attacker, type } of NEVER_JUDGED) {
+  test.serial(`self-defense, stance auto: hit by ${label} → the combat judge is never asked (I1)`, async (t) => {
+    const clock = useClock(t);
+    const entity = attacker();
+    const world = withEquipment(createWorld({ health: 20, entities: [entity] }));
+    const { judge } = manualJudge();
+    const { engine, policy, lastReflexEvent, startGame } = createEngine(t, world, REFLEXES, { judgeCombat: judge });
+    t.is(policy.get().reflexes.selfDefense.stance, 'auto');
+    startGame();
+
+    hitBy(engine, entity, type);
+    await clock.tickAsync(4000);
+
+    t.true(judge.notCalled, 'such cases never reach the model');
+    t.true(world.bot.attack.notCalled, 'never attacked');
+    if (entity.name === 'iron_golem') t.regex(lastReflexEvent('self-defense') ?? '', /\(flee by policy\)/);
+  });
+}
+
+test.serial('I6: no reflex trigger calls the combat judge; only self-defense\'s run gets it, and the tick does not wait for it', async (t) => {
+  useClock(t);
+  const zombieNear = mob('zombie', 2);
+  const scenarios: { name: ReflexName; world: World; before?: (engine: ReflexEngine) => void }[] = [
+    { name: 'creeper-evade', world: createWorld({ entities: [ignitedCreeper(4)] }) },
+    { name: 'hazard-escape', world: createWorld({ blocks: { '0,64,0': 'lava' } }) },
+    { name: 'low-health-retreat', world: createWorld({ health: 5, entities: [mob('zombie', 10)] }) },
+    { name: 'self-defense', world: createWorld({ entities: [zombieNear] }), before: engine => hitBy(engine, zombieNear) },
+    { name: 'auto-eat', world: createWorld({ food: 10, inventory: [item('bread')] }) }
+  ];
+
+  for (const { name, world, before } of scenarios) {
+    withEquipment(world);
+    const original = REFLEXES.find(reflex => reflex.name === name)!;
+    const trigger = sinon.spy(original.trigger);
+    const run = sinon.spy((_context: ReflexRunContext) => new Promise<string>(() => {}));
+    const { judge } = manualJudge();
+    const { engine } = createEngine(t, world, [{ ...original, trigger, run }], { judgeCombat: judge });
+    before?.(engine);
+
+    engine.tick();
+
+    t.true(trigger.calledOnce, `${name} was evaluated`);
+    t.true(run.calledOnce, `${name} fired`);
+    t.true(judge.notCalled, `${name}: evaluating the trigger never asks the judge`);
+    t.is(run.firstCall.args[0].judgeCombat, judge, `${name}: the run context carries the judge`);
+    engine.stop('scenario done');
+  }
+
+  // With the real self-defense run, the judge is asked from the run, and the tick returns without waiting for it.
+  const zombie = mob('zombie', 2);
+  const world = withEquipment(createWorld({ entities: [zombie] }));
+  const original = REFLEXES.find(reflex => reflex.name === 'self-defense')!;
+  const trigger = sinon.spy(original.trigger);
+  const { judge } = manualJudge();
+  const { engine, holder } = createEngine(t, world, [{ ...original, trigger }], { judgeCombat: judge });
+  hitBy(engine, zombie);
+
+  t.is(engine.tick(), undefined);
+  t.true(judge.calledOnce);
+  t.true(trigger.calledBefore(judge), 'the trigger ran first and did not ask');
+  t.deepEqual(holder(), { holder: 'reflex self-defense', priority: PRIORITY.ROUTINE_REFLEX }, 'the rule action started while the judge has not answered');
 });

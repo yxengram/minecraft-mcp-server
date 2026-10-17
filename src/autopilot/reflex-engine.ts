@@ -6,6 +6,7 @@ import { ActionArbiter, Lease, Preemptor, PRIORITY } from './action-arbiter.js';
 import type { Policy } from './policy.js';
 import { assessThreats, DEFAULT_THREAT_RADIUS, ThreatSummary } from './threats.js';
 import type { EventStore } from '../event-store.js';
+import type { CombatJudgment, CombatSituation } from '../decisions/decision-hooks.js';
 import { stopPathfinder } from '../tools/movement-utils.js';
 
 export type ReflexName = 'creeper-evade' | 'hazard-escape' | 'low-health-retreat' | 'self-defense' | 'auto-eat';
@@ -28,6 +29,8 @@ export interface TriggerContext {
 
 export interface ReflexRunContext extends TriggerContext {
   signal: AbortSignal;
+  /** Asks the decision model whether to fight, flee or hold (M5); absent in tests that do not need it. */
+  judgeCombat?: (attackerId: number, situation: CombatSituation) => Promise<CombatJudgment>;
 }
 
 /** A trigger returns why it fires, a note to report without acting (e.g. hit by a player), or null. */
@@ -53,6 +56,7 @@ export interface ReflexEngineOptions {
   events: EventStore;
   /** In priority order, highest first. */
   reflexes: ReflexDefinition[];
+  judgeCombat?: ReflexRunContext['judgeCombat'];
   log?: (level: string, message: string) => void;
 }
 
@@ -233,7 +237,7 @@ export class ReflexEngine {
     this.running = running;
     this.noteTrigger(reflex.name, context.now);
 
-    reflex.run({ ...context, bot, signal: controller.signal })
+    reflex.run({ ...context, bot, signal: controller.signal, judgeCombat: this.options.judgeCombat })
       .then(result => this.finish(running, 'done', result))
       .catch(error => {
         if (controller.signal.aborted) return;

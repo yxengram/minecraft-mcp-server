@@ -10,7 +10,7 @@ import { huntBehavior } from './behaviors/hunt.js';
 import { returnHomeBehavior } from './behaviors/return-home.js';
 import { PolicyStore } from './policy.js';
 import { OpenRouterClient, OpenRouterClientOptions } from '../decisions/openrouter-client.js';
-import { ChatCommand, ChatCommandOutcome, DecisionHooks, planChatCommand } from '../decisions/decision-hooks.js';
+import { ChatCommand, ChatCommandOutcome, CombatJudge, DecisionHooks, planChatCommand } from '../decisions/decision-hooks.js';
 import { findNearbyEntities } from '../tools/entity-utils.js';
 import minecraftData from 'minecraft-data';
 import { DamageInfo, ReflexEngine } from './reflex-engine.js';
@@ -48,10 +48,18 @@ export class Autopilot {
   readonly policy: PolicyStore;
   readonly decisions: OpenRouterClient;
   private readonly hooks: DecisionHooks;
+  private readonly combatJudge: CombatJudge;
 
   constructor(private readonly options: AutopilotOptions) {
     this.policy = new PolicyStore({ decisionModel: options.decisionModel });
     this.decisions = new OpenRouterClient({ getPolicy: () => this.policy.get(), ...options.decisions });
+    // Combat judgments share the decision client, and so its per-minute budget, with chat triage.
+    this.combatJudge = new CombatJudge({
+      decide: (state, questions) => this.decisions.decide(state, questions),
+      canDecide: () => this.decisions.isConfigured() && this.policy.get().decisions.enabled,
+      getPolicy: () => this.policy.get(),
+      events: options.events
+    });
     this.hooks = new DecisionHooks({
       decide: (state, questions) => this.decisions.decide(state, questions),
       canDecide: () => this.decisions.isConfigured() && this.policy.get().decisions.enabled,
@@ -118,6 +126,7 @@ export class Autopilot {
       getPolicy: () => this.policy.get(),
       events: this.options.events,
       reflexes: REFLEXES,
+      judgeCombat: (attackerId, situation) => this.combatJudge.judge(attackerId, situation),
       log: this.options.log
     });
     this.reflexEngine.start();

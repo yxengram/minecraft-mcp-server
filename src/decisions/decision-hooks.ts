@@ -236,3 +236,110 @@ export function planChatCommand(command: ChatCommand, speaker: string, message: 
       return { kind: 'stop', reply: 'stopped' };
   }
 }
+
+// ---- combat judgment (M5): fight, flee or hold when the self-defense stance is 'auto' -----------------------------
+
+export type CombatStance = 'fight' | 'flee' | 'hold';
+
+/** Structured facts only: no names or other player-typed text ever reach the model. */
+export interface CombatSituation {
+  health: number;
+  food: number;
+  armorPoints: number;
+  /** Held item name, or 'bare hand'. */
+  weapon: string;
+  attacker: { type: string; distance: number };
+  /** Hostile mobs within 16 blocks, the attacker included. */
+  hostiles: { type: string; distance: number }[];
+}
+
+export type CombatJudgment =
+  | { source: 'model' | 'cache'; stance: CombatStance; probability: number; detail: string }
+  | { source: 'rule'; reason: string };
+
+export const COMBAT_CACHE_MS = 10_000;
+
+const STANCES: Record<CombatStance | 'none', string> = {
+  fight: 'fight back now: the bot is likely to win without getting badly hurt',
+  flee: 'run away now: staying is likely to get the bot killed or badly hurt',
+  hold: 'stand its ground: hit only what comes within reach, do not chase and do not run',
+  none: 'not enough information to choose'
+};
+
+export function combatState(situation: CombatSituation): Record<string, unknown> {
+  const round = (value: number) => Math.round(value * 10) / 10;
+  const counts: Record<string, number> = {};
+  for (const hostile of situation.hostiles) counts[hostile.type] = (counts[hostile.type] ?? 0) + 1;
+  return {
+    bot: {
+      health: `${round(situation.health)} of 20`,
+      food: `${round(situation.food)} of 20`,
+      armor_points: `${situation.armorPoints} of 20`,
+      weapon: situation.weapon
+    },
+    attacker: { type: situation.attacker.type, distance_blocks: round(situation.attacker.distance) },
+    hostile_mobs_within_16_blocks: { total: situation.hostiles.length, by_type: counts }
+  };
+}
+
+export function combatQuestions(): Record<string, DecisionQuestion> {
+  return {
+    stance: {
+      type: 'choice',
+      instructions: 'A Minecraft bot was just hit by the attacker. Given its health, armor, weapon and the hostile mobs around it, what should it do right now?',
+      criteria: STANCES
+    }
+  };
+}
+
+export interface CombatJudgeOptions {
+  decide: DecisionHooksOptions['decide'];
+  canDecide: () => boolean;
+  getPolicy: () => Policy;
+  events: EventStore;
+  now?: () => number;
+}
+
+/** Asks the decision model once per encounter (attacker) every 10 seconds; every judgment is written as an event. */
+export class CombatJudge {
+  // Every outcome is cached for the encounter, unsure and failed ones too: one question per attacker per 10 s (F-016).
+  private readonly cache = new Map<number, { at: number } & ({ stance: CombatStance; probability: number } | { rule: string })>();
+
+  constructor(private readonly options: CombatJudgeOptions) {}
+
+  async judge(attackerId: number, situation: CombatSituation): Promise<CombatJudgment> {
+    const now = this.options.now?.() ?? Date.now();
+    const subject = `${situation.attacker.type} (id ${attackerId})`;
+    const cached = this.cache.get(attackerId);
+    if (cached && now - cached.at < COMBAT_CACHE_MS) {
+      if ('rule' in cached) {
+        this.options.events.addEvent('decision', `combat-judgment: ${cached.rule} for ${subject} (cached) → rule fallback`);
+        return { source: 'rule', reason: `${cached.rule} (cached)` };
+      }
+      this.options.events.addEvent('decision', `combat-judgment: ${cached.stance} p=${percent(cached.probability)} for ${subject} (cached) → ${cached.stance}`);
+      return { source: 'cache', stance: cached.stance, probability: cached.probability, detail: 'cached' };
+    }
+    if (!this.options.canDecide()) return { source: 'rule', reason: 'no decision model' };
+
+    const result = await this.options.decide(combatState(situation), combatQuestions());
+    if (!result.ok) {
+      this.options.events.addEvent('decision', `combat-judgment: ${result.error} (${result.message}) for ${subject} → rule fallback`);
+      this.cache.set(attackerId, { rule: `decision ${result.error}`, at: now });
+      return { source: 'rule', reason: `decision ${result.error}` };
+    }
+    const answer = result.answers.stance as Extract<DecisionAnswer, { type: 'choice' }>;
+    const probabilities = Object.entries(answer.probabilities).map(([name, p]) => `${name} ${percent(p)}`).join(', ');
+    const probability = answer.probabilities[answer.choice] ?? answer.confidence;
+    const threshold = this.options.getPolicy().decisions.combatThreshold;
+    const where = `(${result.model}; ${result.latencyMs}ms)`;
+    if (answer.choice === 'none' || probability < threshold) {
+      this.options.events.addEvent('decision', `combat-judgment: ${answer.choice} p=${percent(probability)} [${probabilities}] for ${subject} ${where} → rule fallback (not clear enough)`);
+      this.cache.set(attackerId, { rule: `model unsure (${answer.choice} p=${percent(probability)})`, at: now });
+      return { source: 'rule', reason: `model unsure (${answer.choice} p=${percent(probability)})` };
+    }
+    const stance = answer.choice as CombatStance;
+    this.cache.set(attackerId, { stance, probability, at: now });
+    this.options.events.addEvent('decision', `combat-judgment: ${stance} p=${percent(probability)} [${probabilities}] for ${subject} ${where} → ${stance}`);
+    return { source: 'model', stance, probability, detail: `${result.model}; ${result.latencyMs}ms` };
+  }
+}

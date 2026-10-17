@@ -7,10 +7,13 @@ const { goals } = pathfinderPkg;
 import minecraftData from 'minecraft-data';
 import { PRIORITY } from './action-arbiter.js';
 import { checkTarget, isPlayer, isTamed, NEUTRAL_MOBS, ThreatSummary } from './threats.js';
-import { currentCombatTarget, engage } from './combat.js';
+import { ATTACK_REACH, bestWeaponName, currentCombatTarget, engage } from './combat.js';
 import { delay } from './task-manager.js';
 import type { ReflexDefinition, ReflexRunContext } from './reflex-engine.js';
 import type { Policy, Stance } from './policy.js';
+import type { CombatSituation, CombatStance } from '../decisions/decision-hooks.js';
+import { armorPoints } from '../tools/gamestate-tools.js';
+import { stopPathfinder } from '../tools/movement-utils.js';
 import { BotEntity, entityLabel, refreshEntity } from '../tools/entity-utils.js';
 import { describeOffset, isPassable, isWaterLike } from '../tools/terrain-utils.js';
 
@@ -480,7 +483,8 @@ const lowHealthRetreat: ReflexDefinition = {
   }
 };
 
-type DefensePlan = { act: 'fight' | 'flee'; reason: string } | { note: string };
+// judgeable: the stance was 'auto' against a legal hostile, so the decision model may refine the rule's choice (M5).
+type DefensePlan = { act: 'fight' | 'flee'; reason: string; judgeable: boolean } | { note: string };
 
 /** What self-defense does about a hit: fight or flee (by stance), or only report it. Never against players (I1). */
 function defensePlan(bot: mineflayer.Bot, attacker: BotEntity, policy: Policy, threats: ThreatSummary, type: string): DefensePlan {
@@ -490,7 +494,7 @@ function defensePlan(bot: mineflayer.Bot, attacker: BotEntity, policy: Policy, t
   if (!legality.legal) {
     // A neutral mob that turned on the bot (iron golem, wolf pack, zombified piglins) is not fought by default: run.
     if (attacker.name && NEUTRAL_MOBS.has(attacker.name) && !isTamed(bot, attacker)) {
-      return { act: 'flee', reason: `hit by ${label(attacker)} (${type}); neutral mobs are not fought (avoidNeutral) → flee` };
+      return { act: 'flee', reason: `hit by ${label(attacker)} (${type}); neutral mobs are not fought (avoidNeutral) → flee`, judgeable: false };
     }
     return { note: `hit by ${label(attacker)}; not fighting back (${legality.reason})` };
   }
@@ -498,7 +502,7 @@ function defensePlan(bot: mineflayer.Bot, attacker: BotEntity, policy: Policy, t
   // The attacker counts even when it is not on the hostile list (a neutral mob with avoidNeutral off).
   const hostiles = threats.hostiles.length + (threats.hostiles.some(threat => threat.entity.id === attacker.id) ? 0 : 1);
   const act = resolveStance(stance, threats.health, hostiles);
-  return { act, reason: `hit by ${label(attacker)} (${type}); stance ${stance} → ${act}` };
+  return { act, reason: `hit by ${label(attacker)} (${type}); stance ${stance} → ${act}`, judgeable: stance === 'auto' };
 }
 
 function resolveStance(stance: Stance, health: number | undefined, hostiles: number): 'fight' | 'flee' {
@@ -521,28 +525,117 @@ const selfDefense: ReflexDefinition = {
     const plan = defensePlan(bot, attacker, policy, threats, damage.type);
     return 'note' in plan ? plan : { fire: plan.reason };
   },
-  async run({ bot, signal, policy, damage, threats }) {
+  async run({ bot, signal, policy, damage, threats, judgeCombat }) {
     const attacker = bot.entities[damage!.attackerId!];
     const plan = defensePlan(bot, attacker, policy, threats, damage!.type);
     if ('note' in plan) return plan.note;
-    if (plan.act === 'fight') {
-      const fight = await engage(bot, attacker, {
+
+    // 'auto': act on the rule at once and switch if the decision model, asked in the background, disagrees (F-013).
+    let mode = plan.act as CombatStance;
+    let switchTo: CombatStance | null = null;
+    let via = plan.judgeable ? 'rule' : 'policy';
+    const run = { alive: true };
+    let situation: CombatSituation | null = null;
+    try {
+      if (plan.judgeable && judgeCombat) situation = combatSituation(bot, attacker, threats);
+    } catch {
+      // Without the facts there is nothing to ask: the rule decides (I5).
+    }
+    if (situation && judgeCombat) {
+      judgeCombat(attacker.id, situation).then(judgment => {
+        // An answer that arrives after the reflex ended is only recorded (the judge writes the event).
+        if (!run.alive || !('stance' in judgment)) return;
+        via = `${judgment.source} p=${judgment.probability.toFixed(2)}`;
+        if (judgment.stance !== mode) switchTo = judgment.stance;
+      }).catch(() => {});
+    }
+
+    try {
+      for (;;) {
+        const switching = () => switchTo !== null;
+        let result: string;
+        if (mode === 'fight') {
+          const fight = await engage(bot, attacker, {
+            signal,
+            shouldStop: switching,
+            maxChase: SELF_DEFENSE_FLEE_DISTANCE,
+            retreatHealth: policy.combat.retreatHealth,
+            rules: { attackPlayers: false, avoidNeutral: policy.combat.avoidNeutral }
+          });
+          result = `fought back: ${fight.detail}`;
+        } else if (mode === 'hold') {
+          result = await holdGround(bot, attacker, signal, switching, policy);
+        } else {
+          let live: BotEntity | null = attacker;
+          await runAway(bot, signal, () => {
+            live = refreshEntity(bot, attacker);
+            return live ? [live.position] : [];
+          }, () => switching() || !live || bot.entity.position.distanceTo(live.position) >= SELF_DEFENSE_FLEE_DISTANCE);
+          result = `fled from ${label(attacker)}`;
+        }
+        signal.throwIfAborted();
+        if (switchTo) {
+          // Still our lease: clear the previous mode's goal and keys before the next one takes over.
+          stopPathfinder(bot);
+          bot.clearControlStates();
+          mode = switchTo;
+          switchTo = null;
+          continue;
+        }
+        return `${result} (${mode} by ${via})`;
+      }
+    } finally {
+      run.alive = false;
+    }
+  }
+};
+
+/** The facts the decision model sees about a fight: numbers and mob types only, never names. */
+function combatSituation(bot: mineflayer.Bot, attacker: BotEntity, threats: ThreatSummary): CombatSituation {
+  const within = threats.hostiles.filter(threat => threat.distance <= SELF_DEFENSE_FLEE_DISTANCE);
+  const hostiles = within.map(threat => ({ type: threat.entity.name ?? 'unknown', distance: threat.distance }));
+  if (!within.some(threat => threat.entity.id === attacker.id)) {
+    hostiles.unshift({ type: attacker.name ?? 'unknown', distance: bot.entity.position.distanceTo(attacker.position) });
+  }
+  return {
+    health: typeof bot.health === 'number' ? bot.health : 20,
+    food: typeof bot.food === 'number' ? bot.food : 20,
+    armorPoints: armorPoints(bot),
+    weapon: bestWeaponName(bot),
+    attacker: { type: attacker.name ?? 'unknown', distance: bot.entity.position.distanceTo(attacker.position) },
+    hostiles
+  };
+}
+
+/**
+ * 'hold' (tentative, F-016): stand still and hit the attacker only while it is within reach; never chase, never run.
+ * Ends when the attacker is gone or more than 16 blocks away.
+ */
+async function holdGround(bot: mineflayer.Bot, attacker: BotEntity, signal: AbortSignal, switching: () => boolean, policy: Policy): Promise<string> {
+  const post = bot.entity.position.clone();
+  for (;;) {
+    signal.throwIfAborted();
+    if (switching()) return `held ground against ${label(attacker)}`;
+    const live = refreshEntity(bot, attacker);
+    if (!live) return `held ground; ${label(attacker)} is gone`;
+    const distance = bot.entity.position.distanceTo(live.position);
+    if (distance > SELF_DEFENSE_FLEE_DISTANCE) return `held ground; ${label(attacker)} left`;
+    if (distance <= ATTACK_REACH) {
+      const fight = await engage(bot, live, {
         signal,
-        maxChase: SELF_DEFENSE_FLEE_DISTANCE,
+        shouldStop: switching,
+        maxChase: ATTACK_REACH,
+        anchor: () => post,
         retreatHealth: policy.combat.retreatHealth,
         rules: { attackPlayers: false, avoidNeutral: policy.combat.avoidNeutral }
       });
-      signal.throwIfAborted();
-      return `fought back: ${fight.detail}`;
+      if (fight.outcome === 'killed' || fight.outcome === 'retreated' || fight.outcome === 'illegal_target') return `held ground: ${fight.detail}`;
+    } else {
+      void bot.lookAt(live.position.offset(0, (live.height ?? 1) * 0.9, 0), true).catch(() => {});
     }
-    let live: BotEntity | null = attacker;
-    await runAway(bot, signal, () => {
-      live = refreshEntity(bot, attacker);
-      return live ? [live.position] : [];
-    }, () => !live || bot.entity.position.distanceTo(live.position) >= SELF_DEFENSE_FLEE_DISTANCE);
-    return `fled from ${label(attacker)}`;
+    await delay(TICK_MS, signal);
   }
-};
+}
 
 const autoEat: ReflexDefinition = {
   name: 'auto-eat',
