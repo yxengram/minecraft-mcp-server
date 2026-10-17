@@ -162,11 +162,75 @@ Both tools look down from the sky by default and switch to the bot's own level w
 - `get-events` - Read recent game events (chat, system messages, titles, death, damage with its type and attacker, hostile mob sounds, loud sounds, explosions, item pickups, joins/leaves, kicks). Pass `nextSince` back as `since` to read only new events
 - `wait-for-event` - Wait until something happens instead of polling: a new event (optionally of certain types), a hostile mob coming close or health dropping low (up to 55 seconds)
 
-## Planned: Autopilot (design only)
+## Autopilot
 
-An autopilot subsystem is being designed so the bot can react in real time without waiting for the LLM: background tasks and behaviors (follow, guard, gather, hunt, return home), reflexes (dodge creepers, escape fire and lava, retreat when hurt, eat), a policy the LLM can adjust, and optional fast decisions through OpenRouter decision models.
+The bot does not have to wait for the LLM for everything. Long jobs run as **background tasks**, and **reflexes** react within a game tick (50 ms) to things the LLM could never answer in time, such as a creeper about to explode. The LLM stays in charge: it starts and stops tasks, adjusts the **policy**, and is woken up through events when something needs its attention.
 
-**It is not implemented yet.** The design is in [docs/BLUEPRINT.md](docs/BLUEPRINT.md) and the roadmap in [docs/PLAN.md](docs/PLAN.md). Files under `blueprint/` are design notes only and must not be run.
+### Background tasks
+- `start-task` - Start a task and return at once: `follow`, `flee`, `guard`, `gather`, `hunt` or `return-home`. Starting a task replaces the current one unless `replace` is false
+- `list-tasks` - The current task (running or paused, why it is paused, what it is doing) and recently finished tasks
+- `resume-task` - Resume a task that one of your own commands paused
+- `cancel-task` - Cancel the current task (`stop-pathfinding` does too)
+
+Examples:
+
+```json
+{ "behavior": "guard", "params": { "target": "Steve", "radius": 8 } }
+{ "behavior": "gather", "params": { "blockType": "oak_log", "count": 16 } }
+{ "behavior": "hunt", "params": { "animal": "cow", "count": 2 } }
+{ "behavior": "return-home", "params": { "waypoint": "home" } }
+```
+
+`guard` protects a player, a waypoint or a position and fights hostile mobs that come close; it never attacks players, animals or neutral mobs. `hunt` never attacks players or tamed animals. `return-home` walks to a waypoint and sleeps in a bed next to it at night. `follow-entity`, `flee-from` and `collect-block` run as tasks too.
+
+Any command that moves the bot (for example `move-to-position`) runs immediately: it pauses the current task and its reply says what was interrupted, so you can `resume-task` or `cancel-task` it. Progress, pauses and results are events (`task_started`, `task_progress`, `task_paused`, `task_resumed`, `task_done`, `task_failed`, `task_cancelled`); use `wait-for-event` to be woken up instead of polling.
+
+### Reflexes
+Checked on every game tick, without the LLM:
+
+| Reflex | When | What it does | Your commands |
+|---|---|---|---|
+| `creeperEvade` | a creeper within 7 blocks is about to explode | sprints at least 8 blocks away | wait for it (up to 10 s) |
+| `hazardEscape` | in lava, on fire next to fire or water, or out of air under water | gets out, into water if one is near, or swims up | wait for it |
+| `lowHealthRetreat` | health below 6 (or at the combat retreat health) with hostiles near | runs away, then eats | wait for it |
+| `selfDefense` | hit by a hostile mob | fights back or runs, depending on the stance | interrupt it |
+| `autoEat` | food below 14, no hostile within 8 blocks | eats the best safe food | interrupt it |
+
+Reflexes never attack players. A task paused by a reflex resumes on its own afterwards. Reflex runs are reported as `reflex` events.
+
+### Policy
+- `get-policy` - Show the reflex switches and thresholds, the combat rules, the chat settings and the decision model status
+- `set-policy` - Change part of it; unknown fields are rejected. Example: `{ "reflexes": { "autoEat": { "enabled": false } }, "combat": { "retreatHealth": 8 } }`
+
+The policy lives in memory only and goes back to its defaults whenever the bot (re)joins the game. Turning on `combat.attackPlayers` is possible but always writes a warning event.
+
+### Optional: decision model (OpenRouter)
+With an [OpenRouter](https://openrouter.ai) API key, a fast decision model (about 0.6 s per call) handles two things the LLM is too slow for:
+
+- **Chat triage:** messages meant for the bot become `chat_request` events, so the LLM can wait for them with `wait-for-event` instead of reading all chat. Small talk between other players is not reported.
+- **Combat judgment:** with the self-defense stance `auto` (the default), the model decides whether to fight, flee or hold when the bot is attacked. The bot acts on a simple rule at once and switches if the model disagrees.
+
+By default, chat never makes the bot do anything by itself. If you want a player to be able to say "follow me", "guard me", "gather 20 wood", "go home" or "stop" directly, authorize them with `set-policy { "chat": { "commandsFrom": ["Steve"] } }`. Only clear commands that are meant for the bot run; everything else is reported to the LLM.
+
+To enable it, put the key in the `env` field of the MCP server entry (it is read only from the `OPENROUTER_API_KEY` environment variable and never written to logs, events or tool output):
+
+```json
+{
+  "mcpServers": {
+    "minecraft": {
+      "command": "npx",
+      "args": ["-y", "github:yuniko-software/minecraft-mcp-server", "--host", "localhost", "--port", "25565", "--username", "ClaudeBot"],
+      "env": { "OPENROUTER_API_KEY": "sk-or-..." }
+    }
+  }
+}
+```
+
+`list-decision-models` shows the available decision models; `--decision-model <id>` or `set-policy { "decisions": { "model": "<id>" } }` picks another one (the thresholds were tuned for the default model, so re-check them after a change).
+
+**Privacy and cost:** with a key, chat messages from other players and a summary of the bot's combat situation (health, armor, weapon, mob types and distances) are sent to OpenRouter and the model provider. A call costs about $0.00002 and calls are capped at 30 per minute by default (`decisions.maxCallsPerMinute`). Without a key nothing is sent: whispers and messages that mention the bot's name are reported by rule, and everything else works the same.
+
+The design and the evidence behind the defaults are in [docs/BLUEPRINT.md](docs/BLUEPRINT.md) and [docs/PLAN.md](docs/PLAN.md).
 
 ## Contributing
 
@@ -199,5 +263,15 @@ npm run test:live:world -- LAN_PORT --allow-world-changes
 ```
 
 This test **modifies the world**. It builds a floating stone arena at y=240 above the bot (and removes it at the end), gives itself items with `/give`, summons a pig and a minecart, places a bed, crafting table, chest and furnace, changes the time and game mode, and kills the bot at the end to check death and respawn events. A second bot named `MCPHelper` joins to act as another player for the chat, whisper and follow tests. The script reports any tool it did not exercise, so newly added tools show up as missing coverage.
+
+### Scenario test
+
+To compare how the bot copes with and without the autopilot, run in a throwaway world with cheats enabled:
+
+```sh
+npm run test:scenarios -- LAN_PORT --allow-world-changes
+```
+
+It plays five scenarios (`zombie-wave`, `creeper-ambush`, `hunger`, `fire`, `chat-triage`) under three configurations: reflexes off (only what the LLM's tools would do), reflexes on, and reflexes with the decision model (only when `OPENROUTER_API_KEY` is set). It prints a table of the results and fails if any scenario fails with reflexes on. Use `--only <scenario>` to run one scenario and `--rounds <n>` to repeat. It **modifies the world** in the same way as the full world test, and also sets the bot on fire, starves it and summons hostile mobs, so the bot can die.
 
 Minecraft Java 26.1.2 (protocol 775) was also manually verified with a Survival bot: place a dirt block, read it back, dig it, and restore the borrowed dirt to its original location.

@@ -7,134 +7,27 @@
 // It builds a floating stone arena at y=240 above the bot (removed again at the end), gives itself items, summons entities, changes
 // time and game mode, and kills the bot at the end to test death/respawn events. A second
 // in-process bot (MCPHelper) acts as another player for chat, whisper and follow tests.
+// With OPENROUTER_API_KEY set, the decision model is used as well; without it, the no-key behavior is checked.
 
-import { Client } from '@modelcontextprotocol/sdk/client/index.js';
-import { StdioClientTransport, getDefaultEnvironment } from '@modelcontextprotocol/sdk/client/stdio.js';
-import mineflayer from 'mineflayer';
 import { Vec3 } from 'vec3';
-import { fileURLToPath } from 'node:url';
-import fs from 'node:fs';
-import os from 'node:os';
-import path from 'node:path';
+import { createArena, parseLiveArgs, responseText, SetupFailed, sleep } from './lib/live-arena.mjs';
 
-const args = process.argv.slice(2);
-const port = Number(args.find(arg => /^\d+$/.test(arg)) ?? 25565);
-if (!Number.isInteger(port) || port < 1 || port > 65535) {
-  throw new Error('Pass a LAN port between 1 and 65535');
-}
-if (!args.includes('--allow-world-changes')) {
-  console.error(
-    'This test modifies the world (builds an arena, summons entities, changes time and game mode, kills the bot).\n' +
-    'Only run it in a throwaway world with cheats enabled, and pass --allow-world-changes to confirm.'
-  );
-  process.exit(2);
-}
-
+const { port } = parseLiveArgs('This test');
 const BOT_NAME = 'MCPWorldTest';
 const HELPER_NAME = 'MCPHelper';
-// A fixed altitude keeps repeated runs from stacking arenas on top of each other.
-const ARENA_Y = 240;
-const ARENA_RADIUS = 10;
-
-const waypointDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-live-world-'));
-const client = new Client({ name: 'minecraft-world-test', version: '1.0.0' });
-const transport = new StdioClientTransport({
-  command: process.execPath,
-  args: [
-    fileURLToPath(new URL('../dist/main.js', import.meta.url)),
-    '--host', '127.0.0.1',
-    '--port', String(port),
-    '--username', BOT_NAME,
-    '--waypoint-file', path.join(waypointDir, 'waypoints.json')
-  ],
-  stderr: 'ignore',
-  // The transport only passes a whitelist of environment variables, so hand the decision key over explicitly
-  // (and only when it is set, so a run without a key really tests the no-key fallback).
-  env: {
-    ...getDefaultEnvironment(),
-    ...(process.env.OPENROUTER_API_KEY ? { OPENROUTER_API_KEY: process.env.OPENROUTER_API_KEY } : {})
-  }
-});
 const hasDecisionKey = Boolean(process.env.OPENROUTER_API_KEY);
 
-const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
-const covered = new Set();
-const results = [];
-let helper;
-
-function responseText(result) {
-  return result.content.filter(item => item.type === 'text').map(item => item.text).join('\n');
-}
-
-async function call(name, toolArgs = {}, { expectError = false, timeout = 120000 } = {}) {
-  covered.add(name);
-  const result = await client.callTool({ name, arguments: toolArgs }, undefined, { timeout });
-  const text = responseText(result);
-  if (Boolean(result.isError) !== expectError) {
-    throw new Error(`${name}(${JSON.stringify(toolArgs)}) ${expectError ? 'should have failed' : 'failed'}: ${text}`);
-  }
-  return text;
-}
-
-function expect(condition, message) {
-  if (!condition) throw new Error(message);
-}
-
-function expectIncludes(text, fragment, context) {
-  expect(text.includes(fragment), `${context}: expected "${fragment}" in:\n${text}`);
-}
-
-async function waitFor(check, description, timeoutMs = 10000) {
-  const deadline = Date.now() + timeoutMs;
-  let last;
-  while (Date.now() < deadline) {
-    last = await check();
-    if (last) return last;
-    await sleep(500);
-  }
-  throw new Error(`Timed out waiting for ${description}`);
-}
-
-async function cmd(command) {
-  await call('send-chat', { message: command });
-  await sleep(700);
-}
-
-async function position() {
-  const text = await call('get-position');
-  return text.match(/\((-?\d+), (-?\d+), (-?\d+)\)/).slice(1).map(Number);
-}
-
-async function inventoryCount(itemName) {
-  const text = await call('list-inventory');
-  return [...text.matchAll(new RegExp(`- ${itemName} \\(x(\\d+)\\)`, 'g'))].reduce((sum, m) => sum + Number(m[1]), 0);
-}
-
-async function waitForCount(itemName, predicate, description) {
-  let last;
-  try {
-    await waitFor(async () => predicate(last = await inventoryCount(itemName)), description);
-  } catch {
-    throw new Error(`Timed out waiting for ${description} (have ${last} ${itemName})`);
-  }
-}
-
-async function placeAndVerify(itemName, x, y, z) {
-  await call('equip-item', { itemName });
-  const text = await call('place-block', { x, y, z });
-  expect(text.startsWith('Placed block'), `place-block ${itemName} at ${x}, ${y}, ${z}: ${text}`);
-  const placed = await block(x, y, z);
-  expect(placed === itemName, `place-block reported success but found ${placed} at ${x}, ${y}, ${z}`);
-}
-
-async function block(x, y, z) {
-  return (await call('get-block-info', { x, y, z })).match(/Found (\w+)/)?.[1];
-}
-
-async function distanceTo(type) {
-  const text = await call('list-entities', { type, maxDistance: 32 });
-  return Number(text.match(/([\d.]+) blocks away/)?.[1] ?? Infinity);
-}
+const session = createArena({
+  port,
+  botName: BOT_NAME,
+  helperName: HELPER_NAME,
+  clientName: 'minecraft-world-test',
+  serverEnv: { OPENROUTER_API_KEY: process.env.OPENROUTER_API_KEY }
+});
+const {
+  client, covered, results, call, expect, expectIncludes, waitFor, cmd, position, inventoryCount, waitForCount, block,
+  placeAndVerify, distanceTo, step
+} = session;
 
 async function startTask(behavior, params) {
   const started = await call('start-task', { behavior, params });
@@ -153,122 +46,13 @@ async function waitForTaskEnd(id, description, timeoutMs = 60000) {
 }
 
 let cx, y0, cz;
-let arenaReady = false;
-
-// If an earlier step left the bot off the arena, say so and put it back so later steps stay independent.
-async function ensureOnArena() {
-  if (!arenaReady) return;
-  const [x, y, z] = await position();
-  // Standing a little higher is fine (for example on blocks the pathfinder placed); falling is not.
-  if (y >= y0 && Math.abs(x - cx) < ARENA_RADIUS && Math.abs(z - cz) < ARENA_RADIUS) return;
-  console.log(`  ! bot left the arena and was at (${x}, ${y}, ${z}); teleporting it back`);
-  await printDiagnostics();
-  await cmd(`/tp @s ${cx} ${y0} ${cz}`);
-  await sleep(1000);
-}
-
-async function step(name, fn) {
-  await ensureOnArena();
-  process.stdout.write(`- ${name} ... `);
-  try {
-    await fn();
-    results.push({ name, ok: true });
-    console.log('ok');
-    return true;
-  } catch (error) {
-    results.push({ name, ok: false, error: error.message });
-    console.log(`FAILED\n    ${error.message.split('\n').join('\n    ')}`);
-    await printDiagnostics();
-    return false;
-  }
-}
-
-class SetupFailed extends Error {}
-
-async function printDiagnostics() {
-  try {
-    const where = responseText(await client.callTool({ name: 'get-position', arguments: {} }));
-    const events = responseText(await client.callTool({ name: 'get-events', arguments: { limit: 8 } }));
-    console.log(`    diagnostics: ${where}\n    ${events.split('\n').filter(Boolean).join('\n    ')}`);
-  } catch (error) {
-    console.log(`    diagnostics unavailable: ${error.message}`);
-  }
-}
-
-function startHelper() {
-  return new Promise((resolve, reject) => {
-    const bot = mineflayer.createBot({ host: '127.0.0.1', port, username: HELPER_NAME });
-    bot.once('spawn', () => resolve(bot));
-    bot.once('error', reject);
-    bot.once('kicked', reason => reject(new Error(`Helper kicked: ${JSON.stringify(reason)}`)));
-  });
-}
-
+let helper;
 let eventCursor = 0;
 
 try {
-  await client.connect(transport);
-  const { tools } = await client.listTools();
-  console.log(`MCP tools: ${tools.length}`);
-
-  await waitFor(async () => {
-    const result = await client.callTool({ name: 'get-position', arguments: {} });
-    return !result.isError && /Current position/.test(responseText(result));
-  }, 'bot to spawn', 30000);
-  await sleep(2000);
-
-  const setupOk = await step('setup: operator check and arena', async () => {
-    // The bot may log in mid-air (for example where a previous arena was removed); creative mode
-    // keeps it from dying of fall damage until it is teleported into the new arena.
-    await cmd('/gamemode creative @s');
-    await cmd('/clear @s');
-    await cmd('/give @s dirt 1');
-    try {
-      await waitFor(async () => (await inventoryCount('dirt')) === 1, 'the /give command', 5000);
-    } catch {
-      throw new Error('The bot could not run commands. Enable cheats for the LAN world');
-    }
-
-    const [x, y, z] = await position();
-    [cx, y0, cz] = [x, ARENA_Y, z];
-    const r = ARENA_RADIUS;
-    await cmd(`/fill ${cx - r} ${y0 - 1} ${cz - r} ${cx + r} ${y0 - 1} ${cz + r} stone`);
-    await cmd(`/fill ${cx - r} ${y0} ${cz - r} ${cx + r} ${y0 + 6} ${cz + r} air`);
-    // A 2-block wall around the edge keeps the bots from sliding or being knocked off the platform.
-    await cmd(`/fill ${cx - r} ${y0} ${cz - r} ${cx + r} ${y0 + 1} ${cz - r} stone`);
-    await cmd(`/fill ${cx - r} ${y0} ${cz + r} ${cx + r} ${y0 + 1} ${cz + r} stone`);
-    await cmd(`/fill ${cx - r} ${y0} ${cz - r} ${cx - r} ${y0 + 1} ${cz + r} stone`);
-    await cmd(`/fill ${cx + r} ${y0} ${cz - r} ${cx + r} ${y0 + 1} ${cz + r} stone`);
-    await cmd('/gamemode survival @s');
-    await cmd('/time set day');
-    await cmd('/weather clear');
-    await cmd(`/tp @s ${cx} ${y0} ${cz}`);
-    await cmd(`/kill @e[type=!player,distance=..48]`);
-    await cmd('/clear @s');
-    await sleep(1500);
-    expect((await block(cx, y0 - 1, cz)) === 'stone', 'arena floor was not built');
-
-    // The helper may log in mid-air where a previous arena was removed, so make it fall-proof and
-    // confirm it actually arrived before relying on it.
-    helper = await startHelper();
-    await cmd(`/gamemode creative ${HELPER_NAME}`);
-    const helperSpot = new Vec3(cx + 0.5, y0, cz - 6.5);
-    let arrived = false;
-    for (let attempt = 0; attempt < 3 && !arrived; attempt++) {
-      await cmd(`/tp ${HELPER_NAME} ${cx} ${y0} ${cz - 7}`);
-      try {
-        await waitFor(() => helper.entity?.position.distanceTo(helperSpot) < 2, 'the helper to arrive', 4000);
-        arrived = true;
-      } catch {
-        // retry the teleport
-      }
-    }
-    expect(arrived, `${HELPER_NAME} could not be moved into the arena`);
-    await sleep(1000);
-    arenaReady = true;
-  });
-
-  if (!setupOk) throw new SetupFailed('Setup failed, skipping the remaining steps');
+  const tools = await session.connect();
+  await session.setup();
+  ({ cx, y0, cz, helper } = session.arena);
 
   await step('read-only basics', async () => {
     expectIncludes(await call('detect-gamemode'), 'survival', 'detect-gamemode');
@@ -689,16 +473,7 @@ try {
     await waitFor(async () => (await call('get-events', { since: eventCursor, types: ['spawn'] })).includes('Bot spawned'), 'respawn event');
   });
 
-  arenaReady = false;
-  await step('cleanup: remove the arena', async () => {
-    const r = ARENA_RADIUS;
-    // Leave both bots on solid ground below the arena, so they do not log in mid-air next time.
-    await cmd(`/spreadplayers ${cx} ${cz} 0 8 under ${y0 - 20} false ${BOT_NAME}`);
-    await cmd(`/spreadplayers ${cx} ${cz} 0 8 under ${y0 - 20} false ${HELPER_NAME}`);
-    await cmd(`/fill ${cx - r} ${y0 - 1} ${cz - r} ${cx + r} ${y0 + 6} ${cz + r} air`);
-    await cmd(`/kill @e[type=!player,x=${cx},y=${y0},z=${cz},distance=..24]`);
-    await cmd('/time set day');
-  });
+  await session.cleanup();
 
   const notCovered = tools.map(tool => tool.name).filter(name => !covered.has(name));
   results.push({ name: 'coverage', ok: notCovered.length === 0, error: `not exercised: ${notCovered.join(', ')}` });
@@ -718,7 +493,5 @@ try {
   }
   process.exitCode = 1;
 } finally {
-  helper?.quit();
-  await client.close();
-  fs.rmSync(waypointDir, { recursive: true, force: true });
+  await session.close();
 }

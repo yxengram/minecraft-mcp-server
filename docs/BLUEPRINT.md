@@ -2,7 +2,7 @@
 
 > 本文只覆盖新增的 **Autopilot（自主行为）子系统**：动作仲裁、后台任务与行为、反射、策略、决策模型接入及情景测试。现有的 54 个 MCP 工具已经实现并通过测试，不属于本蓝图的占位范围。
 >
-> **当前状态：说明性骨架，尚未实现。** `blueprint/` 目录下按最终路径镜像存放的文件只有设计说明，不能运行、导入或构建。
+> **当前状态：M1～M6 全部实现并通过实机验收（2026-10-16～17）。** 设计阶段的 `blueprint/` 占位目录已在 M6 删除；本文继续作为各文件契约与设计依据的主记录。
 
 ## A. 文档状态
 
@@ -10,9 +10,9 @@
 |---|---|
 | 设计版本 | v0.3（2026-10-16）：按用户对未决问题的答复修订，变更见 docs/PLAN.md |
 | 目标版本 | Autopilot v1：阶段一到四（任务与行为、反射与策略、决策模型、情景测试） |
-| 当前阶段 | M1～M5 已实现并通过实机验收（M1～M3 2026-10-16，M4～M5 2026-10-17）；M6（情景测试与最终文档）仍为说明性骨架 |
+| 当前阶段 | M1～M6 全部实现并通过实机验收（M1～M3 2026-10-16，M4～M6 2026-10-17） |
 | 状态标记 | **已确认**：用户已同意，或已用一手资料/实机核实。**暂定**：设计者提出的合理默认值，可在实现时调整，需记录。**待验证**：依赖实测结果，验证前不能当作事实 |
-| 与现有代码的关系 | 现有代码保持可构建、可测试。新增文件实现前只存在于 `blueprint/` 镜像目录；对现有文件的改动在「F2. 现有文件的计划改动」中描述，不创建占位副本 |
+| 与现有代码的关系 | 新增文件的契约在 F 节，对现有文件的改动在「F2. 现有文件的计划改动」；设计阶段的占位副本（`blueprint/`）已全部替换为代码并在 M6 删除 |
 
 ### 用户要求与设计者建议的区分
 
@@ -230,21 +230,16 @@ src/main.ts（现有，改动）--创建并注册--> src/autopilot/autopilot.ts�
 
 ## E. 目录树与文件清单
 
-实现前，下表中标为「新增」的文件只以说明性占位的形式存在于 `blueprint/` 镜像目录（例如最终路径 `src/autopilot/task-manager.ts` 的占位位于 `blueprint/src/autopilot/task-manager.ts`）。实现某个里程碑时，在最终路径创建真实代码，并删除对应的镜像占位。
+下表中标为「新增」的文件都已实现。设计阶段它们先以说明性占位存放在 `blueprint/` 镜像目录，各里程碑实现时替换，M6 删除了整个目录。
 
 ```text
 （项目根目录）
 ├── AGENTS.md                         新增：后续代理的协作规则
-├── README.md                         现有，改动：增加 Autopilot 设计入口
+├── README.md                         现有，改动：Autopilot 使用说明（M6）
 ├── package.json                      现有，改动：ava 测试范围限定为 tests/（规划阶段已完成）、M6 增加 test:scenarios 脚本
 ├── docs/
 │   ├── BLUEPRINT.md                  新增：本文件
 │   └── PLAN.md                       新增：里程碑、验收、风险、进展
-├── blueprint/                        新增：说明性骨架镜像目录（实现完成后删除）
-│   ├── README.md
-│   ├── src/ …                        镜像下列新增 src 文件
-│   ├── tests/ …                      镜像下列新增 tests 文件
-│   └── scripts/ …                    镜像 test-scenarios.mjs 与 lib/live-arena.mjs
 ├── src/
 │   ├── autopilot/
 │   │   ├── autopilot.ts              新增：组装与生命周期
@@ -312,12 +307,12 @@ src/main.ts（现有，改动）--创建并注册--> src/autopilot/autopilot.ts�
 | D-001 | `docs/BLUEPRINT.md` | 设计意图主记录（本文件） |
 | D-002 | `docs/PLAN.md` | 里程碑、验收、风险与进展 |
 | D-003 | `AGENTS.md` | 后续代理的阅读顺序与修改边界 |
-| D-004 | `blueprint/README.md` | 说明镜像目录的用途与删除时机 |
+| D-004 | `blueprint/README.md`（已在 M6 随目录删除） | 设计阶段说明镜像目录的用途与删除时机 |
 | D-005 | `README.md`（现有） | 增加一小节，指向本蓝图并说明 Autopilot 尚未实现 |
 
 ## F. 文件契约（新增文件）
 
-每个新增的代码、测试和脚本文件一个条目。状态为 placeholder 的文件在 `blueprint/` 下有占位副本，两者必须保持一致；已实现的文件不再有占位副本，契约继续保留在本节。
+每个新增的代码、测试和脚本文件一个条目。所有条目都已实现；状态 verified 表示对应的单元测试与实机验收已实际完成（证据见 PLAN 的进展记录）。
 
 
 ### F1-a 组装、仲裁与任务
@@ -813,7 +808,7 @@ src/main.ts（现有，改动）--创建并注册--> src/autopilot/autopilot.ts�
 
 ### F-032 · `scripts/test-scenarios.mjs`
 
-- **模块**：M-VER 验证　**里程碑**：M6　**状态**：placeholder　**设计**：暂定：情景清单与成功标准待实现时根据实测调整
+- **模块**：M-VER 验证　**里程碑**：M6　**状态**：verified　**设计**：暂定：情景清单与成功标准待实现时根据实测调整
 - **职责**：在测试场地运行情景测试并比较配置：情景包括 zombie-wave（守卫任务应对有 AI 的僵尸）、creeper-ambush（4 格外生成已点燃的苦力怕）、hunger（饥饿值降低后自动进食）、fire（被点燃后离开火源）、chat-triage（辅助玩家说“<bot>, can you help me?” → 出现 chat_request；说“<bot>, follow me” → 默认不执行）。配置包括：仅 LLM 工具（反射关闭）、反射开启、反射加决策模型。输出每个情景每种配置的成功与否、存活情况和用时表格。
 - **不负责**：不代替 tests/ 下的单元测试；不在没有 --allow-world-changes 时修改世界；没有 API key 时跳过需要决策模型的配置并说明。
 - **输入**：来源：开发者命令行：npm run test:scenarios -- <LAN_PORT> --allow-world-changes [--only <情景名>]。 内容：LAN 端口、是否允许修改世界、可选的情景筛选；环境变量 OPENROUTER_API_KEY（只透传给 MCP 服务器进程）。 限制：需要开启作弊的测试世界；会修改世界、召唤生物、杀死 bot。
@@ -824,10 +819,11 @@ src/main.ts（现有，改动）--创建并注册--> src/autopilot/autopilot.ts�
 - **关键约束**：沿用 test-live-world 已验证的稳健做法：场地固定高度并带围墙、开局创造模式防摔、结束前送回地面、setup 失败立即中止、任何失败都打印诊断。
 - **失败处理**：setup 失败 → 中止并以退出码 1 结束；单个情景失败 → 记录诊断并继续下一个。
 - **验收**：正常：在开启作弊的测试世界中运行 → 输出完整结果表，反射开启配置下所有必选情景成功。 边界或失败：没有 --allow-world-changes → 拒绝运行；没有 key → 跳过决策配置并在表中标注 skipped；bot 中途离开场地 → 诊断并送回。 位置：人工运行并核对输出（PLAN M6 验收项）（计划，未执行）
+- **实现说明（M6）**：配置为 llm-only（反射全部关闭）、reflexes（默认策略、无 key）、reflexes+decisions（默认策略加 key，无 key 时 skipped）；每种配置启动一个独立的服务器进程。情景细节：zombie-wave 让 bot 穿铁甲、拿铁剑并以守卫任务对付 3 只有 AI 的僵尸；fire 在 3 格外放一格水（离开火源后只有水能在 6 秒内熄灭，见 F-013 实现说明）；每个情景前重置场地（清除生物、补地板、回满血与饥饿、清空背包、取消任务）。支持 `--only <情景>` 与 `--rounds <n>`；只有 reflexes 配置失败时退出码为 1，其他配置用于比较。结果见 PLAN M6 记录。
 
 ### F-033 · `scripts/lib/live-arena.mjs`
 
-- **模块**：M-VER 验证　**里程碑**：M6　**状态**：placeholder　**设计**：已确定：从现有 scripts/test-live-world.mjs 中抽取已验证的辅助逻辑
+- **模块**：M-VER 验证　**里程碑**：M6　**状态**：verified　**设计**：已确定：从现有 scripts/test-live-world.mjs 中抽取已验证的辅助逻辑
 - **职责**：为实机测试脚本提供共享辅助：启动 MCP 客户端、等待 bot 生成、执行指令、搭建与拆除带围墙的固定高度场地、启动辅助玩家、场地检查与失败诊断。scripts/test-live-world.mjs 与 scripts/test-scenarios.mjs 共用。
 - **不负责**：不包含具体测试步骤或情景。
 - **输入**：来源：scripts/test-live-world.mjs、scripts/test-scenarios.mjs（导入）。 内容：LAN 端口、bot 与辅助玩家的名字、场地高度与半径、MCP 服务器路径。 限制：只在开发者显式运行实机测试时使用。
@@ -838,6 +834,7 @@ src/main.ts（现有，改动）--创建并注册--> src/autopilot/autopilot.ts�
 - **关键约束**：保留现有防护：固定高度 y=240、围墙、创造模式开局、结束前 spreadplayers 送回地面、setup 失败抛出可识别错误。
 - **失败处理**：无法执行指令 → 抛出“需要开启作弊”的明确错误。
 - **验收**：正常：重构后 test-live-world 连续两轮全部通过。 边界或失败：bot 登录时在半空 → 不会摔死；场地已存在 → 被清空后重建。 位置：scripts/test-live-world.mjs 实机运行（人工）（计划，未执行）
+- **实现说明（M6）**：导出 parseLiveArgs、createArena（MCP 客户端、call/cmd/waitFor/expect 等辅助、step 与诊断、setup/cleanup/close）、ARENA_Y、ARENA_RADIUS、SetupFailed、sleep、responseText；服务器所需的环境变量（如 OPENROUTER_API_KEY）经 serverEnv 显式传入（stdio 传输只继承白名单变量）。test-live-world 已改为使用它，重构后全量实机测试通过。
 
 ## F2. 现有文件的计划改动
 
@@ -852,9 +849,9 @@ src/main.ts（现有，改动）--创建并注册--> src/autopilot/autopilot.ts�
 | E-005 | `src/bot-connection.ts` | M1（onBotReady、onBotEnd）、M3（onDamage）、M4（onWhisper），均已实现 | 增加回调：onBotReady(bot)、onBotEnd()、onDamage({attackerId, type, time})（结构化受伤信息，复用现有伤害事件解析） | 现有事件、系统消息、声音、伤害文字描述 | 现有 `tests/perception*.test.ts`；`tests/autopilot.test.ts` |
 | E-006 | `src/config.ts` | M4（已实现） | 新增命令行参数 `--decision-model <id>`。聊天命令授权不提供启动参数（用户决定，只能由 LLM 设置）。API key 不经过此文件 | 现有参数 | 现有 `tests/config.test.ts` 补充新参数场景 |
 | E-007 | `src/main.ts` | M1（已实现；M2 起只创建一个 WaypointStore 并同时交给路标工具与 Autopilot；M3 起转接 onDamage 并注册 policy-tools，工具总数 60；M4 扩展） | 创建 Autopilot，连接 BotConnection 回调，把服务访问函数传给工具注册函数；注册 task-tools、policy-tools | 现有工具注册与启动流程 | 实机：`npm run test:live` 显示工具总数从 54 增加到 61 |
-| E-008 | `package.json` | 规划阶段（已完成）、M6 | 规划阶段：ava `files` 限定为 `tests/**/*.test.ts`，防止 `blueprint/` 中的占位文件被当作测试运行。M6：增加 `test:scenarios` 脚本 | 其他脚本与依赖 | 规划阶段：`npm test` 仍为 273 个测试通过（已执行） |
-| E-009 | `scripts/test-live-world.mjs` | M1～M4、M6 | 覆盖 7 个新工具（start-task、list-tasks、resume-task、cancel-task、get-policy、set-policy、list-decision-models），以及“任务中调用移动工具 → 中断报告 → resume-task”流程；M6 改为使用 `scripts/lib/live-arena.mjs` | 已有的全部检查步骤与防护 | 实机连续两轮全部通过 |
-| E-010 | `README.md` | 规划阶段（已完成）、M6 | 规划阶段：增加一小节说明 Autopilot 处于设计阶段并链接本蓝图。M6：替换为实际使用说明（任务、策略、决策模型的隐私与费用说明） | 现有内容 | 人工阅读 |
+| E-008 | `package.json` | 规划阶段、M6（均已完成） | 规划阶段：ava `files` 限定为 `tests/**/*.test.ts`，防止 `blueprint/` 中的占位文件被当作测试运行。M6：增加 `test:scenarios` 脚本 | 其他脚本与依赖 | 规划阶段：`npm test` 仍为 273 个测试通过（已执行） |
+| E-009 | `scripts/test-live-world.mjs` | M1～M4、M6（均已完成） | 覆盖 7 个新工具（start-task、list-tasks、resume-task、cancel-task、get-policy、set-policy、list-decision-models），以及“任务中调用移动工具 → 中断报告 → resume-task”流程；M6 改为使用 `scripts/lib/live-arena.mjs` | 已有的全部检查步骤与防护 | 实机连续两轮全部通过 |
+| E-010 | `README.md` | 规划阶段、M6（均已完成） | 规划阶段：增加一小节说明 Autopilot 处于设计阶段并链接本蓝图。M6：替换为实际使用说明（任务、策略、决策模型的隐私与费用说明） | 现有内容 | 人工阅读 |
 
 ## G. 跨模块约定
 
