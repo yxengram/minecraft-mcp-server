@@ -46,7 +46,7 @@ async function main() {
   const messageStore = new MessageStore();
   const eventStore = new EventStore();
   const waypointStore = new WaypointStore(config.waypointFile ?? defaultWaypointFile(), config.host);
-  const autopilot = new Autopilot({ events: eventStore, waypoints: waypointStore, log });
+  const autopilot = new Autopilot({ events: eventStore, waypoints: waypointStore, decisionModel: config.decisionModel, log });
 
   const connection = new BotConnection(
     config,
@@ -55,6 +55,7 @@ async function main() {
       onChatMessage: (username, message) => {
         messageStore.addMessage(username, message);
         eventStore.addEvent('chat', `${username}: ${message}`);
+        autopilot.handleChat(username, message, false);
       },
       onEvent: (type, message) => eventStore.addEvent(type, message),
       onSystemMessage: (kind, text) => {
@@ -64,7 +65,8 @@ async function main() {
       },
       onBotReady: bot => autopilot.bind(bot),
       onBotEnd: () => autopilot.unbind('disconnected'),
-      onDamage: info => autopilot.noteDamage(info)
+      onDamage: info => autopilot.noteDamage(info),
+      onWhisper: (username, message) => autopilot.handleChat(username, message, true)
     }
   );
 

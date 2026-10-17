@@ -11,7 +11,7 @@
 // No timers or bots are involved, so the tests need no fake clock. Each test uses its own PolicyStore.
 import test, { ExecutionContext } from 'ava';
 import {
-  DEFAULT_POLICY, Policy, PolicySource, PolicyStore, UpdateResult, describePolicy, policySchema
+  DEFAULT_DECISION_MODEL, DEFAULT_POLICY, Policy, PolicySource, PolicyStore, UpdateResult, describePolicy, policySchema
 } from '../src/autopilot/policy.js';
 
 const EXPECTED_DEFAULTS: Policy = {
@@ -22,7 +22,10 @@ const EXPECTED_DEFAULTS: Policy = {
     selfDefense: { enabled: true, stance: 'auto' },
     autoEat: { enabled: true, food: 14 }
   },
-  combat: { attackPlayers: false, avoidNeutral: true, retreatHealth: 6 }
+  combat: { attackPlayers: false, avoidNeutral: true, retreatHealth: 6 },
+  // M4 groups (F-014): nobody is authorized by default; thresholds 0.85 / 0.5 until M5 probes them.
+  chat: { triage: true, commandsFrom: [], replyInChat: true },
+  decisions: { enabled: true, model: DEFAULT_DECISION_MODEL, actThreshold: 0.85, cautiousThreshold: 0.5, maxCallsPerMinute: 30 }
 };
 
 type Accepted = Extract<UpdateResult, { ok: true }>;
@@ -616,4 +619,59 @@ test('a field given as undefined next to a real value is ignored or rejected; th
     t.deepEqual(store.get(), EXPECTED_DEFAULTS);
   }
   t.true(policySchema.safeParse(store.get()).success, `the stored policy must stay valid: ${JSON.stringify(store.get())}`);
+});
+
+// ---- M4: chat and decisions groups (F-014) ----------------------------------------------------------------------
+
+test('M4: nobody may send chat commands by default, and only the LLM can authorize someone', t => {
+  const store = new PolicyStore();
+  t.deepEqual(store.get().chat.commandsFrom, []);
+
+  const startup = store.update({ chat: { commandsFrom: ['Steve'] } }, 'startup');
+  t.false(startup.ok, 'startup settings cannot authorize players');
+  t.deepEqual(store.get().chat.commandsFrom, []);
+
+  const llm = accepted(t, store.update({ chat: { commandsFrom: ['Steve', 'Alex_2'] } }, 'llm'), 'authorize');
+  t.deepEqual(store.get().chat.commandsFrom, ['Steve', 'Alex_2']);
+  t.deepEqual(llm.changed, ['chat.commandsFrom']);
+  t.is(llm.warnings.length, 1, 'every change of the list returns a notice');
+  t.regex(llm.warnings[0], /notice: chat commands are now accepted from Steve, Alex_2/);
+
+  const revoked = accepted(t, store.update({ chat: { commandsFrom: [] } }, 'llm'), 'revoke');
+  t.regex(revoked.warnings[0], /accepted from nobody \(removed Steve, Alex_2\)/);
+});
+
+test('M4: commandsFrom only takes valid Minecraft usernames', t => {
+  const store = new PolicyStore();
+  for (const name of ['ab', 'a'.repeat(17), 'Steve!', 'two words', '']) {
+    t.false(store.update({ chat: { commandsFrom: [name] } }, 'llm').ok, `"${name}" is rejected`);
+  }
+  t.deepEqual(store.get().chat.commandsFrom, []);
+});
+
+test('M4: the cautious threshold cannot be above the act threshold, and probabilities stay within 0-1', t => {
+  const store = new PolicyStore();
+  t.false(store.update({ decisions: { cautiousThreshold: 0.9 } }, 'llm').ok, 'cautious 0.9 above act 0.85');
+  t.false(store.update({ decisions: { actThreshold: 1.2 } }, 'llm').ok);
+  t.false(store.update({ decisions: { maxCallsPerMinute: 0 } }, 'llm').ok);
+  t.true(store.update({ decisions: { actThreshold: 0.95, cautiousThreshold: 0.9 } }, 'llm').ok);
+});
+
+test('M4: reset keeps the startup decision model and clears the authorized players', t => {
+  const store = new PolicyStore({ decisionModel: 'vendor/model-2026-09-01' });
+  t.is(store.get().decisions.model, 'vendor/model-2026-09-01');
+  t.true(store.update({ chat: { commandsFrom: ['Steve'] }, decisions: { model: 'other/model' } }, 'llm').ok);
+
+  store.reset();
+  t.is(store.get().decisions.model, 'vendor/model-2026-09-01');
+  t.deepEqual(store.get().chat.commandsFrom, []);
+  t.is(new PolicyStore().get().decisions.model, DEFAULT_DECISION_MODEL);
+});
+
+test('M4: describePolicy shows the chat and decision settings', t => {
+  const store = new PolicyStore();
+  t.true(store.update({ chat: { commandsFrom: ['Steve'] } }, 'llm').ok);
+  const text = describePolicy(store.get());
+  t.regex(text, /commandsFrom: Steve/);
+  t.regex(text, /actThreshold: 0\.85, cautiousThreshold: 0\.5/);
 });

@@ -162,7 +162,9 @@ test('set-policy changes several fields in one call and leaves every other field
       selfDefense: { enabled: true, stance: 'flee' },
       lowHealthRetreat: { ...DEFAULT_POLICY.reflexes.lowHealthRetreat, health: 8 }
     },
-    combat: { ...DEFAULT_POLICY.combat, retreatHealth: 9 }
+    combat: { ...DEFAULT_POLICY.combat, retreatHealth: 9 },
+    chat: DEFAULT_POLICY.chat,
+    decisions: DEFAULT_POLICY.decisions
   });
   const { text } = await call('get-policy');
   t.regex(lineOf(text, 'selfDefense'), STANCE('flee'));
@@ -485,7 +487,8 @@ test('fix 12: set-policy after the bot left the game is refused and the last pol
 // ---------------------------------------------------------------------------------------------------------------
 // Review fix 12, part 2: through a REAL McpServer (SDK) and client, set-policy rejects unknown top-level groups
 // instead of the SDK silently stripping them (F-014/F-018: unknown fields rejected, the policy unchanged on error).
-// If the SDK stripped `chat`, `{ combat: { retreatHealth: 8 }, chat: ... }` would succeed and apply retreatHealth 8.
+// If the SDK stripped `party`, `{ combat: { retreatHealth: 8 }, party: ... }` would succeed and apply retreatHealth 8.
+// (M3 used `chat` and `decisions` as the unknown groups; they became real groups in M4.)
 
 type RealReply = { text: string; isError: boolean };
 
@@ -523,7 +526,7 @@ async function realServer(t: import('ava').ExecutionContext, { bind = true }: { 
   return { autopilot, client, call, policyEvents };
 }
 
-test('fix 12 (real MCP): both policy tools are listed and set-policy takes the reflexes and combat groups', async (t) => {
+test('fix 12 (real MCP): the policy tools are listed and set-policy takes the four policy groups', async (t) => {
   const { client } = await realServer(t);
 
   const { tools } = await client.listTools();
@@ -532,18 +535,18 @@ test('fix 12 (real MCP): both policy tools are listed and set-policy takes the r
   const setPolicy = tools.find(tool => tool.name === 'set-policy');
   t.truthy(setPolicy);
   const properties = Object.keys((setPolicy?.inputSchema.properties ?? {}) as Record<string, unknown>).sort();
-  t.deepEqual(properties, ['combat', 'reflexes']);
+  t.deepEqual(properties, ['chat', 'combat', 'decisions', 'reflexes']);
 });
 
-test('fix 12 (real MCP): an unknown group (chat) next to a valid combat change is an error and nothing is applied', async (t) => {
+test('fix 12 (real MCP): an unknown group (party) next to a valid combat change is an error and nothing is applied', async (t) => {
   const { autopilot, call, policyEvents } = await realServer(t);
   const before = autopilot.policy.get();
   const eventsBefore = policyEvents();
 
-  const result = await call('set-policy', { combat: { retreatHealth: 8 }, chat: { commandsFrom: ['Steve'] } });
+  const result = await call('set-policy', { combat: { retreatHealth: 8 }, party: { commandsFrom: ['Steve'] } });
 
   t.true(result.isError, `expected an error, got: ${result.text}`);
-  t.true(result.text.includes('chat'), `the error names the unknown group: ${result.text}`);
+  t.true(result.text.includes('party'), `the error names the unknown group: ${result.text}`);
   t.is(autopilot.policy.get().combat.retreatHealth, DEFAULT_POLICY.combat.retreatHealth, 'the valid combat part is not applied');
   t.is(autopilot.policy.get(), before);
   t.deepEqual(autopilot.policy.get(), DEFAULT_POLICY);
@@ -573,11 +576,11 @@ test('fix 12 (real MCP): an unknown group next to a valid reflex change, and a m
   const before = autopilot.policy.get();
   const eventsBefore = policyEvents();
 
-  const group = await call('set-policy', { reflexes: { autoEat: { enabled: false } }, decisions: { enabled: true } });
+  const group = await call('set-policy', { reflexes: { autoEat: { enabled: false } }, decision: { enabled: true } });
   const field = await call('set-policy', { combat: { retreatHealt: 8 } });
 
   t.true(group.isError, `unknown group: ${group.text}`);
-  t.true(group.text.includes('decisions'), group.text);
+  t.true(group.text.includes('decision'), group.text);
   t.true(field.isError, `misspelled field: ${field.text}`);
   t.true(field.text.includes('retreatHealt'), field.text);
   t.is(autopilot.policy.get(), before);

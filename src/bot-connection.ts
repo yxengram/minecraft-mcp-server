@@ -27,6 +27,8 @@ interface ConnectionCallbacks {
   onBotReady?: (bot: mineflayer.Bot) => void;
   /** The bot left the game. */
   onBotEnd?: (reason: string) => void;
+  /** A player whispered to the bot (BLUEPRINT E-005). */
+  onWhisper?: (username: string, message: string) => void;
   /** The bot took damage; attackerId is the entity that caused it, if any (BLUEPRINT E-005). */
   onDamage?: (info: { attackerId?: number; type: string; time: number }) => void;
 }
@@ -124,6 +126,7 @@ export class BotConnection {
     bot.on('whisper', (username, message) => {
       if (username === bot.username) return;
       this.callbacks.onEvent?.('whisper', `${username}: ${message}`);
+      this.callbacks.onWhisper?.(username, message);
     });
 
     bot.on('spawn', () => {

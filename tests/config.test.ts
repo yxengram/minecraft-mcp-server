@@ -77,3 +77,15 @@ test('parseConfig handles numeric port as number type', (t) => {
   
   process.argv = originalArgv;
 });
+
+test('parseConfig parses --decision-model and leaves it unset by default', (t) => {
+  const originalArgv = process.argv;
+  process.argv = ['node', 'script.js', '--decision-model', 'vendor/model-2026-09-01'];
+  const config = parseConfig();
+  process.argv = ['node', 'script.js'];
+  const defaults = parseConfig();
+  process.argv = originalArgv;
+
+  t.is(config.decisionModel, 'vendor/model-2026-09-01');
+  t.is(defaults.decisionModel, undefined);
+});

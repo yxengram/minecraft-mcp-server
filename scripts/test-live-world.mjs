@@ -9,7 +9,7 @@
 // in-process bot (MCPHelper) acts as another player for chat, whisper and follow tests.
 
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
-import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
+import { StdioClientTransport, getDefaultEnvironment } from '@modelcontextprotocol/sdk/client/stdio.js';
 import mineflayer from 'mineflayer';
 import { Vec3 } from 'vec3';
 import { fileURLToPath } from 'node:url';
@@ -47,8 +47,15 @@ const transport = new StdioClientTransport({
     '--username', BOT_NAME,
     '--waypoint-file', path.join(waypointDir, 'waypoints.json')
   ],
-  stderr: 'ignore'
+  stderr: 'ignore',
+  // The transport only passes a whitelist of environment variables, so hand the decision key over explicitly
+  // (and only when it is set, so a run without a key really tests the no-key fallback).
+  env: {
+    ...getDefaultEnvironment(),
+    ...(process.env.OPENROUTER_API_KEY ? { OPENROUTER_API_KEY: process.env.OPENROUTER_API_KEY } : {})
+  }
 });
+const hasDecisionKey = Boolean(process.env.OPENROUTER_API_KEY);
 
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 const covered = new Set();
@@ -271,6 +278,17 @@ try {
     expectIncludes(await call('get-block-info', { x: cx, y: y0 - 1, z: cz }), 'stone', 'get-block-info');
     expectIncludes(await call('find-blocks', { blockType: 'stone', maxDistance: 4, count: 3 }), 'Found 3 stone', 'find-blocks');
     expectIncludes(await call('list-inventory'), 'empty', 'list-inventory');
+  });
+
+  await step('decisions: list-decision-models', async () => {
+    const text = await call('list-decision-models');
+    if (hasDecisionKey) {
+      expect(/\d+ decision model\(s\); in use: /.test(text), `list-decision-models with a key:\n${text}`);
+      expect(/^- \S+/m.test(text), `list-decision-models lists no model:\n${text}`);
+    } else {
+      expectIncludes(text, 'Not configured', 'list-decision-models without a key');
+    }
+    expectIncludes(await call('get-policy'), hasDecisionKey ? 'Decision model: enabled' : 'Decision model: disabled', 'get-policy decision status');
   });
 
   await step('policy: get-policy and set-policy', async () => {
