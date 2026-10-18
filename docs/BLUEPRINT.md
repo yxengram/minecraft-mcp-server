@@ -1007,7 +1007,7 @@ src/main.ts（现有，改动）--创建并注册--> src/autopilot/autopilot.ts�
 
 ### F-042 · `src/autopilot/instinct/motor.ts`
 
-- **模块**：M-INS 本能　**里程碑**：M9　**状态**：implemented-unverified（单元测试与全量实机测试通过；情景验收见 PLAN M9）　**设计**：已确定：从 reflexes.ts 移来的、已实机验证的运动代码
+- **模块**：M-INS 本能　**里程碑**：M9　**状态**：verified（M9，2026-10-19）　**设计**：已确定：从 reflexes.ts 移来的、已实机验证的运动代码
 - **职责**：宏共用的运动代码：
   - runAway：第一刻就用按键冲刺离开一组位置，检查前方两格（含对角线两侧）是否安全：不进岩浆、火、仙人掌、蜘蛛网，不跳上 1.5 格高的栅栏或墙，落差不超过 3。没有安全方向或卡住 1 秒时，改由寻路器接手 2 秒。
   - bestFood：挑最好的安全食物，不吃腐肉、蜘蛛眼、毒马铃薯、河豚、生鸡肉、紫颂果、金苹果、附魔金苹果、金胡萝卜、迷之炖菜。
@@ -1031,7 +1031,7 @@ src/main.ts（现有，改动）--创建并注册--> src/autopilot/autopilot.ts�
   - **危险期在本能动作执行期间不结束**：即使信号暂时消失（例如本能的战斗动作让 attacked 不再算信号），也要等动作结束、信号仍然没有时才结束。这样 earlier_dangers 记下的是动作的真实结果。
 - **F-038 菜单**：
   - **新动作选项**：
-    - run_from_creeper：冲刺到离苦力怕 8 格以外。
+    - run_from_creeper：冲刺到离苦力怕 16 格以外（8 格已出爆炸范围，但苦力怕会继续跟上来；16 格外它会失去目标。实测见 PLAN M9）。
     - flee：跑到 16 格内没有攻击者和敌对生物为止。
     - fight：用最好的武器打攻击者，或最近的合法敌对生物；血量 ≤ combat.retreatHealth 时脱离。
     - hold：原地防守；目标不合法时失败，而不是报告成功。
@@ -1042,7 +1042,7 @@ src/main.ts（现有，改动）--创建并注册--> src/autopilot/autopilot.ts�
     - 被驯服的动物永远不打；avoidNeutral 开启时也不打中立生物。
     - 这几种情况下菜单只有 flee 与固定选项。
 - **F-039 宏**：
-  - 新增 run_from_creeper（最长 4 秒）、flee（最长 10 秒）、fight（最长 20 秒，调用 combat.engage）、hold（最长 20 秒）、eat（最长 5 秒）。
+  - 新增 run_from_creeper（最长 8 秒）、flee（最长 10 秒）、fight（最长 20 秒，调用 combat.engage）、hold（最长 20 秒）、eat（最长 5 秒）。
   - 宏的上下文增加实体 id 与当前策略。
 - **F-040 本能引擎**：
   - **更紧急的新信号可以顶替在途请求**：信号原因为 new，且新信号比在途请求中的所有信号都更紧急时，立即再发一个请求，只有最新一个请求的答复能执行。被顶替的答复只记录（事件里写 superseded），不执行。这样一次“被攻击”的请求不会挡住刚点燃的苦力怕。紧急程度的顺序（attention.ts 的 CUE_URGENCY，只用于决定何时询问，不决定做什么）：creeper_swelling、in_lava、trapped_underwater、low_air、low_health、on_fire、attacked、creeper_near、hungry。不够紧急的新信号，以及 reask 与 action_ended，都等在途请求结束。实机发现（M9）：不加这个限制时，“着火”顶替了正在途中的苦力怕请求，答复被丢弃，苦力怕在新答复到达前就爆炸了。

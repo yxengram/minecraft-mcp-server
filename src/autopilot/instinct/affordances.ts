@@ -94,7 +94,7 @@ function creeperOptions(bot: mineflayer.Bot, cues: Cue[]): MenuOption[] {
   const cue = cues.find(entry => entry.kind === 'creeper_swelling') ?? cues.find(entry => entry.kind === 'creeper_near');
   const creeper = entity(bot, cue?.entityId);
   if (!creeper) return [];
-  return [{ id: 'run_from_creeper', macro: 'run_from_creeper', entityId: creeper.id, text: `sprint away from ${label(creeper)} until it is 8 blocks away` }];
+  return [{ id: 'run_from_creeper', macro: 'run_from_creeper', entityId: creeper.id, text: `sprint away from ${label(creeper)} until it is 16 blocks away (out of its blast range and too far for it to follow)` }];
 }
 
 /** Fight and hold against the attacker, or the nearest hostile, when that is allowed; always the option to run. */

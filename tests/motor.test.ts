@@ -297,7 +297,7 @@ const walledIn: WorldOptions['terrain'] = (x, y, z) => ((y === 64 || y === 65) &
 
 // ---- F-042 runAway, through run_from_creeper -------------------------------------------------------------------
 
-test.serial('run_from_creeper: an ignited creeper 4 blocks away → sprinting away from the first tick, 8+ blocks away before the fuse ends', async (t) => {
+test.serial('run_from_creeper: an ignited creeper 4 blocks away → sprinting away from the first tick, 8+ blocks away before the fuse ends, and on to 16', async (t) => {
   const clock = useClock(t);
   const creeper = ignitedCreeper(4);
   const world = createWorld({ entities: [creeper] });
@@ -310,6 +310,9 @@ test.serial('run_from_creeper: an ignited creeper 4 blocks away → sprinting aw
 
   await clock.tickAsync(CREEPER_FUSE_MS);
   t.true(distanceTo(world, creeper) >= 8, `8+ blocks away when the creeper explodes (${distanceTo(world, creeper).toFixed(2)})`);
+  t.false(settled.done, 'keeps running: a creeper that does not explode follows the bot');
+  await clock.tickAsync(2500);
+  t.true(distanceTo(world, creeper) >= 16, `16+ blocks away, where it loses track (${distanceTo(world, creeper).toFixed(2)})`);
   t.true(settled.done, 'done once far enough');
   t.is(settled.error, undefined);
   t.regex(settled.value ?? '', new RegExp(`^moved \\d+\\.\\d blocks away from creeper \\(id ${creeper.id}\\)$`));

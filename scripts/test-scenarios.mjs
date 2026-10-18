@@ -10,7 +10,8 @@
 //   no-key    default policy without a decision model: the instinct is offline, so dangers are only reported to the
 //             LLM and the bot does not act on them (by design)
 //   instinct  default policy with the decision model (needs OPENROUTER_API_KEY; skipped without it)
-// The instinct configuration must pass every scenario; the others are for comparison.
+// The instinct configuration must pass every scenario except the stress tests (STRESS_TESTS); the other
+// configurations are for comparison.
 import { createArena, parseLiveArgs, SetupFailed, sleep, ARENA_RADIUS } from './lib/live-arena.mjs';
 
 const { port, only, args } = parseLiveArgs('The scenario test');
@@ -20,6 +21,10 @@ const HELPER_NAME = 'MCPHelper';
 const key = process.env.OPENROUTER_API_KEY;
 
 const AUTOPILOT_OFF = { instinct: { enabled: false } };
+// Reported but never required to pass (user decision, 2026-10-18): a creeper lit 4 blocks away leaves the decision
+// model about 0.7 s, and its answers sometimes take 1.0-1.3 s (PLAN M9, Q11).
+const STRESS_TESTS = new Set(['creeper-ambush']);
+
 const CONFIGS = [
   { name: 'llm-only', policy: AUTOPILOT_OFF, withKey: false },
   { name: 'no-key', policy: null, withKey: false },
@@ -29,9 +34,14 @@ const CONFIGS = [
 // ---- scenarios: each returns { ok, detail } and must leave the arena reusable ---------------------------------------
 
 const SCENARIOS = {
-  /** A guard task against three zombies with AI; success: all dead within 60 s and the bot alive. */
+  /**
+   * A guard task against three zombies with AI, at night as zombie waves are in the game; success: all dead within 60 s
+   * and the bot alive. (In daylight the fire-resistant zombies burn without dying and set the bot on fire with every
+   * hit, which no real wave does; M9.)
+   */
   async 'zombie-wave'(s) {
     const { cmd, call, arena } = s;
+    await cmd('/time set midnight');
     for (const item of ['iron_sword', 'iron_helmet', 'iron_chestplate', 'iron_leggings', 'iron_boots']) await cmd(`/give @s ${item}`);
     for (const [item, slot] of [['iron_helmet', 'head'], ['iron_chestplate', 'torso'], ['iron_leggings', 'legs'], ['iron_boots', 'feet']]) {
       await call('equip-item', { itemName: item, destination: slot }).catch(() => {});
@@ -49,11 +59,40 @@ const SCENARIOS = {
       await sleep(1000);
     }
     if (id) await call('cancel-task', { id }).catch(() => {});
+    await cmd('/time set day');
     const died = await s.died(since);
     return { ok: alive === 0 && !died, detail: `${3 - alive}/3 killed in ${((Date.now() - t0) / 1000).toFixed(0)}s${died ? ', bot died' : ''}, health ${await s.health()}` };
   },
 
-  /** An ignited creeper 4 blocks away; success: the bot is at least 7 blocks away when it explodes, and alive. */
+  /**
+   * An unlit creeper about 9 blocks away walks up to the bot, as creepers do in the game. The arena wall on the far side
+   * is opened onto an 80-block walled runway (2-high walls, so the bot cannot fall off the sky platform), because in the
+   * open the bot can get away, and inside a 20-block walled arena it is only cornered. Success: within 25 s the bot is alive, and if the creeper exploded the bot was at least 7 blocks
+   * away (M9).
+   */
+  async 'creeper-approach'(s) {
+    const { call, cmd } = s;
+    const { cx, y0, cz } = s.arena;
+    const r = ARENA_RADIUS;
+    const far = cx - r - 80;
+    await cmd(`/fill ${far} ${y0 - 1} ${cz - 5} ${cx - r} ${y0 - 1} ${cz + 5} stone`);
+    await cmd(`/fill ${far} ${y0} ${cz - 5} ${cx - r - 1} ${y0 + 1} ${cz - 5} stone`);
+    await cmd(`/fill ${far} ${y0} ${cz + 5} ${cx - r - 1} ${y0 + 1} ${cz + 5} stone`);
+    await cmd(`/fill ${far} ${y0} ${cz - 4} ${far} ${y0 + 1} ${cz + 4} stone`);
+    await cmd(`/fill ${cx - r} ${y0} ${cz - 4} ${cx - r} ${y0 + 1} ${cz + 4} air`);
+    await cmd(`/tp @s ${cx} ${y0} ${cz}`);
+    await sleep(500);
+    try {
+      return await creeperApproach(s);
+    } finally {
+      await cmd(`/kill @e[type=creeper,distance=..120]`);
+      await cmd(`/tp @s ${cx} ${y0} ${cz}`);
+      await cmd(`/fill ${far} ${y0 - 1} ${cz - 5} ${cx - r - 1} ${y0 + 1} ${cz + 5} air`);
+      await cmd(`/fill ${cx - r} ${y0} ${cz - 4} ${cx - r} ${y0 + 1} ${cz + 4} stone`);
+    }
+  },
+
+  /** Stress test (not required): an ignited creeper 4 blocks away; success: at least 7 blocks away when it explodes, alive. */
   async 'creeper-ambush'(s) {
     const { call } = s;
     const [px, , pz] = await s.position();
@@ -192,6 +231,36 @@ async function drowning(s, { pocket }) {
   return result;
 }
 
+
+/** The chase itself: a creeper 9 blocks east of the bot, watched for 25 s. */
+async function creeperApproach(s) {
+  const { call } = s;
+  const [px, , pz] = await s.position();
+  const since = await s.cursor();
+  await call('send-chat', { message: `/summon creeper ${px + 9} ${s.arena.y0} ${pz} {PersistenceRequired:1b}` });
+  let distance = null;
+  const t0 = Date.now();
+  while (Date.now() - t0 < 25000) {
+    const explosion = (await s.eventsSince(since, ['explosion']))[0];
+    if (explosion) {
+      const at = explosion.match(/Explosion at \((-?\d+), (-?\d+), (-?\d+)\)/);
+      const [bx, , bz] = await s.position();
+      if (at) distance = Math.hypot(bx - Number(at[1]), bz - Number(at[3]));
+      break;
+    }
+    if (await s.died(since)) break;
+    await sleep(250);
+  }
+  await sleep(500);
+  const died = await s.died(since);
+  const ran = (await s.eventsSince(since, ['instinct'])).filter(line => /→ started run_from_creeper/.test(line)).length;
+  const exploded = distance !== null;
+  return {
+    ok: !died && (!exploded || distance >= 7),
+    detail: `${exploded ? `exploded ${distance.toFixed(1)} blocks away` : 'never exploded in 25 s'}; run_from_creeper started ${ran} time(s)${died ? ', bot died' : ''}, health ${await s.health()}`
+  };
+}
+
 // ---- running ---------------------------------------------------------------------------------------------------
 
 function extend(session) {
@@ -260,7 +329,7 @@ for (let round = 1; round <= rounds; round++) {
           outcome = await SCENARIOS[name](s);
           if (!outcome.ok) throw new Error(outcome.detail);
         });
-        table.push({ round, config: config.name, scenario: name, result: outcome.ok ? 'pass' : 'FAIL', detail: outcome.detail, required: config.required });
+        table.push({ round, config: config.name, scenario: name, result: outcome.ok ? 'pass' : 'FAIL', detail: outcome.detail, required: config.required && !STRESS_TESTS.has(name) });
       }
       await s.reset();
       await session.cleanup();
@@ -269,7 +338,7 @@ for (let round = 1; round <= rounds; round++) {
       console.error(error instanceof SetupFailed ? error.message : error);
       for (const name of scenarioNames) {
         if (!table.some(row => row.round === round && row.config === config.name && row.scenario === name)) {
-          table.push({ round, config: config.name, scenario: name, result: 'FAIL', detail: 'setup failed', required: config.required });
+          table.push({ round, config: config.name, scenario: name, result: 'FAIL', detail: 'setup failed', required: config.required && !STRESS_TESTS.has(name) });
         }
       }
     } finally {
@@ -281,9 +350,9 @@ for (let round = 1; round <= rounds; round++) {
 }
 
 console.log('\n| round | scenario | configuration | result | details |\n|---|---|---|---|---|');
-for (const row of table) console.log(`| ${row.round} | ${row.scenario} | ${row.config} | ${row.result} | ${row.detail} |`);
+for (const row of table) console.log(`| ${row.round} | ${row.scenario}${STRESS_TESTS.has(row.scenario) ? ' (stress)' : ''} | ${row.config} | ${row.result} | ${row.detail} |`);
 const requiredFailures = table.filter(row => row.required && row.result !== 'pass');
 console.log(requiredFailures.length === 0 && !setupFailed
-  ? '\nScenario test passed: every scenario passed in the instinct configuration'
+  ? '\nScenario test passed: every required scenario passed in the instinct configuration'
   : `\nScenario test failed: ${requiredFailures.map(row => `${row.scenario} (round ${row.round})`).join(', ') || 'setup'}`);
 process.exitCode = requiredFailures.length === 0 && !setupFailed ? 0 : 1;

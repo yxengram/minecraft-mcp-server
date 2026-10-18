@@ -226,7 +226,11 @@ const stepOffFire: MacroDefinition = {
   }
 };
 
+// Out of blast range at 8 blocks; but a creeper keeps walking after the bot, so the run goes on until it is 16 blocks
+// away, where it loses track of the bot. Stopping at 8 put the bot on a leash: the creeper was back at 6 blocks before
+// the next decision came (M9, live).
 export const CREEPER_SAFE_DISTANCE = 8;
+export const CREEPER_LOSE_DISTANCE = 16;
 const FLEE_DISTANCE = 16;
 
 function target(bot: mineflayer.Bot, id: number | undefined): BotEntity {
@@ -237,7 +241,7 @@ function target(bot: mineflayer.Bot, id: number | undefined): BotEntity {
 
 const runFromCreeper: MacroDefinition = {
   name: 'run_from_creeper',
-  maxDurationMs: 4000,
+  maxDurationMs: 8000,
   async run({ bot, signal, entityId }) {
     const creeper = target(bot, entityId);
     let live: BotEntity | null = creeper;
@@ -245,7 +249,7 @@ const runFromCreeper: MacroDefinition = {
     await runAway(bot, signal, () => {
       live = refreshEntity(bot, creeper);
       return live ? [live.position] : [];
-    }, () => distance() >= CREEPER_SAFE_DISTANCE);
+    }, () => distance() >= CREEPER_LOSE_DISTANCE);
     return live ? `moved ${distance().toFixed(1)} blocks away from ${label(creeper)}` : 'the creeper is gone';
   }
 };
