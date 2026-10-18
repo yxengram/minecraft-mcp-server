@@ -54,7 +54,7 @@ export function registerTaskTools(factory: ToolFactory, getAutopilot: () => Auto
 
   factory.registerTool(
     "resume-task",
-    "Resume a task that one of your own commands paused. Tasks paused by reflexes resume on their own",
+    "Resume a task that one of your own commands paused. Tasks paused by the instinct resume on their own, unless it left the decision to you",
     {
       id: z.string().optional().describe("Task id such as t3 (default: the current task)")
     },

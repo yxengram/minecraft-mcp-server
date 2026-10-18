@@ -1,16 +1,16 @@
 // Verifies docs/BLUEPRINT.md F-022 against the F-014 contract (src/autopilot/policy.ts) and the policy part of
 // invariant I2 (G6). Expected values come from the contracts, not from what the implementation happens to output:
-// - F-014: groups reflexes and combat (chat and decisions arrive in M4); combat.attackPlayers defaults to false and
+// - F-014: groups instinct, combat, chat and decisions; combat.attackPlayers defaults to false and
 //   combat.avoidNeutral to true; unknown fields rejected; health and food 0-20; distances 1-32; the source is llm or
 //   startup only; on any validation error all errors are returned and the policy is unchanged; every time
 //   attackPlayers is switched on a warning is returned; after an update every reader sees the new values at once.
-// - F-013: low-health-retreat health 6 within 16 blocks, auto-eat food 14; the reflexes work without the LLM, so all
-//   are enabled by default. (hazard-escape and reflexes.hazardEscape were removed in M8, E-011.)
 // - E-011 (M8): the instinct group: enabled true, intent '' (at most 300 characters, only the LLM may set it), lowAir
-//   6 (0-20), reaskMs 1500 (whole ms, 500-10000), actThreshold and urgentThreshold within 0-1 (0.4 and 0.6 after the
-//   M8 threshold probe), maxCallsPerMinute 90 (whole number, 1-600).
-// - Not in the F-014 text (from the M3 assignment and F-011): selfDefense stance defaults to 'auto' (rules until M5)
-//   and combat.retreatHealth defaults to 6 (combat's retreat health).
+//   6 (0-20), reaskMs 1500 (whole ms, 500-10000), actThreshold and urgentThreshold within 0-1, maxCallsPerMinute 90
+//   (whole number, 1-600).
+// - E-012 (M9): the reflexes group (and with it the self-defense stance) and decisions.combatThreshold are gone; the
+//   instinct group gains lowHealth 6 (0-20), hostileRadius 16 (1-32) and food 14 (0-20), the thresholds of the cues
+//   that replaced low-health-retreat and auto-eat. actThreshold is 0.3 and urgentThreshold 0.6 (M9 assignment).
+// - Not in the F-014 text (from the M3 assignment and F-011): combat.retreatHealth defaults to 6.
 // No timers or bots are involved, so the tests need no fake clock. Each test uses its own PolicyStore.
 import test, { ExecutionContext } from 'ava';
 import {
@@ -18,18 +18,15 @@ import {
 } from '../src/autopilot/policy.js';
 
 const EXPECTED_DEFAULTS: Policy = {
-  reflexes: {
-    creeperEvade: { enabled: true },
-    lowHealthRetreat: { enabled: true, health: 6, radius: 16 },
-    selfDefense: { enabled: true, stance: 'auto' },
-    autoEat: { enabled: true, food: 14 }
+  // M8 group (E-011), with the M9 cue thresholds (E-012).
+  instinct: {
+    enabled: true, intent: '', lowAir: 6, lowHealth: 6, hostileRadius: 16, food: 14, reaskMs: 1500, actThreshold: 0.3,
+    urgentThreshold: 0.6, maxCallsPerMinute: 90
   },
-  // M8 group (E-011); thresholds from the M8 probe.
-  instinct: { enabled: true, intent: '', lowAir: 6, reaskMs: 1500, actThreshold: 0.4, urgentThreshold: 0.6, maxCallsPerMinute: 90 },
   combat: { attackPlayers: false, avoidNeutral: true, retreatHealth: 6 },
   // M4 groups (F-014): nobody is authorized by default; thresholds set by the M5 probe (PLAN M5).
   chat: { triage: true, commandsFrom: [], replyInChat: true },
-  decisions: { enabled: true, model: DEFAULT_DECISION_MODEL, actThreshold: 0.95, cautiousThreshold: 0.5, combatThreshold: 0.6, maxCallsPerMinute: 30 }
+  decisions: { enabled: true, model: DEFAULT_DECISION_MODEL, actThreshold: 0.95, cautiousThreshold: 0.5, maxCallsPerMinute: 30 }
 };
 
 type Accepted = Extract<UpdateResult, { ok: true }>;
@@ -65,12 +62,12 @@ function rejected(t: ExecutionContext, result: UpdateResult, what: string): stri
 /** A store already moved off the defaults, so "unchanged" cannot pass by coincidence with the defaults. */
 function storeOffDefaults(t: ExecutionContext): { store: PolicyStore; before: Policy } {
   const store = new PolicyStore();
-  accepted(t, store.update({ reflexes: { autoEat: { food: 10 }, selfDefense: { stance: 'flee' } }, combat: { retreatHealth: 8 } }, 'llm'),
+  accepted(t, store.update({ instinct: { food: 10, lowAir: 3 }, combat: { retreatHealth: 8 } }, 'llm'),
     'the setup update');
   const before = snapshot(store.get());
   t.deepEqual(before, expected(p => {
-    p.reflexes.autoEat.food = 10;
-    p.reflexes.selfDefense.stance = 'flee';
+    p.instinct.food = 10;
+    p.instinct.lowAir = 3;
     p.combat.retreatHealth = 8;
   }), 'setup: the store should hold the setup values');
   return { store, before };
@@ -90,7 +87,7 @@ test('DEFAULT_POLICY matches the contract defaults and is not changed by store u
   t.deepEqual(DEFAULT_POLICY, EXPECTED_DEFAULTS);
   const store = new PolicyStore();
   accepted(t, store.update({
-    reflexes: { creeperEvade: { enabled: false }, lowHealthRetreat: { radius: 4 }, autoEat: { food: 3 } },
+    instinct: { enabled: false, hostileRadius: 4, food: 3 },
     combat: { attackPlayers: true, avoidNeutral: false }
   }, 'llm'), 'an update touching both groups');
   store.reset();
@@ -100,7 +97,7 @@ test('DEFAULT_POLICY matches the contract defaults and is not changed by store u
 test('stores are independent: updating one does not change another or a new one', t => {
   const a = new PolicyStore();
   const b = new PolicyStore();
-  accepted(t, a.update({ combat: { attackPlayers: true }, reflexes: { autoEat: { enabled: false } } }, 'llm'), 'update of store a');
+  accepted(t, a.update({ combat: { attackPlayers: true }, instinct: { enabled: false } }, 'llm'), 'update of store a');
   t.deepEqual(b.get(), EXPECTED_DEFAULTS);
   t.deepEqual(new PolicyStore().get(), EXPECTED_DEFAULTS);
 });
@@ -110,35 +107,35 @@ test('stores are independent: updating one does not change another or a new one'
 
 test('a partial update changes only the named field and every reader sees it at once', t => {
   const store = new PolicyStore();
-  const result = accepted(t, store.update({ reflexes: { lowHealthRetreat: { health: 4 } } }, 'llm'), 'health 4');
-  const want = expected(p => { p.reflexes.lowHealthRetreat.health = 4; });
+  const result = accepted(t, store.update({ instinct: { lowHealth: 4 } }, 'llm'), 'lowHealth 4');
+  const want = expected(p => { p.instinct.lowHealth = 4; });
   t.deepEqual(result.policy, want, 'the result carries the new policy');
-  t.deepEqual(store.get(), want, 'get() returns the new value immediately, siblings (radius, enabled) untouched');
-  t.deepEqual(result.changed, ['reflexes.lowHealthRetreat.health']);
+  t.deepEqual(store.get(), want, 'get() returns the new value immediately, siblings (hostileRadius, enabled) untouched');
+  t.deepEqual(result.changed, ['instinct.lowHealth']);
   t.deepEqual(result.warnings, []);
 });
 
-test('successive partial updates in both groups accumulate; startup is an accepted source', t => {
+test('successive partial updates in several groups accumulate; startup is an accepted source', t => {
   const store = new PolicyStore();
-  accepted(t, store.update({ reflexes: { autoEat: { enabled: false } } }, 'llm'), 'autoEat off');
+  accepted(t, store.update({ instinct: { food: 12 } }, 'llm'), 'food 12');
   accepted(t, store.update({ combat: { retreatHealth: 9 } }, 'startup'), 'retreatHealth 9 from startup');
-  accepted(t, store.update({ reflexes: { selfDefense: { stance: 'fight' } }, instinct: { lowAir: 3 } }, 'llm'),
-    'stance fight and lowAir 3');
+  accepted(t, store.update({ chat: { replyInChat: false }, instinct: { lowAir: 3 } }, 'llm'),
+    'replyInChat off and lowAir 3');
   t.deepEqual(store.get(), expected(p => {
-    p.reflexes.autoEat.enabled = false;
+    p.instinct.food = 12;
     p.combat.retreatHealth = 9;
-    p.reflexes.selfDefense.stance = 'fight';
+    p.chat.replyInChat = false;
     p.instinct.lowAir = 3;
   }));
 });
 
 test('changing the update object after the call does not change the policy', t => {
   const store = new PolicyStore();
-  const raw = { reflexes: { autoEat: { food: 12 } }, combat: { retreatHealth: 7 } };
+  const raw = { instinct: { food: 12 }, combat: { retreatHealth: 7 } };
   accepted(t, store.update(raw, 'llm'), 'food 12 and retreatHealth 7');
-  raw.reflexes.autoEat.food = 1;
+  raw.instinct.food = 1;
   raw.combat.retreatHealth = 1;
-  t.is(store.get().reflexes.autoEat.food, 12);
+  t.is(store.get().instinct.food, 12);
   t.is(store.get().combat.retreatHealth, 7);
 });
 
@@ -146,20 +143,16 @@ test('changing the update object after the call does not change the policy', t =
 // Validation: unknown fields
 
 const UNKNOWN_FIELD_CASES: { level: string; typo: string; update: Record<string, unknown> }[] = [
+  // Since M9 every group is flat (group → field): there is no third level like the old reflex names.
   {
     level: 'top-level group',
-    typo: 'reflxes',
-    update: { reflxes: { autoEat: { food: 5 } }, combat: { retreatHealth: 3 } }
+    typo: 'instinkt',
+    update: { instinkt: { food: 5 }, combat: { retreatHealth: 3 } }
   },
   {
-    level: 'reflex name',
-    typo: 'autoEet',
-    update: { reflexes: { autoEet: { food: 5 }, creeperEvade: { enabled: false } } }
-  },
-  {
-    level: 'reflex field',
+    level: 'instinct field',
     typo: 'fod',
-    update: { reflexes: { autoEat: { fod: 5, enabled: false } } }
+    update: { instinct: { fod: 5, enabled: false } }
   },
   {
     level: 'combat field',
@@ -180,12 +173,13 @@ for (const { level, typo, update } of UNKNOWN_FIELD_CASES) {
 test('unknown fields at every level in one update are all reported, and nothing changes', t => {
   const { store, before } = storeOffDefaults(t);
   const errors = rejected(t, store.update({
-    reflxes: {},
-    reflexes: { autoEet: { food: 5 }, autoEat: { fod: 5, enabled: false } },
+    instinkt: {},
+    instinct: { fod: 5, enabled: false },
+    decisions: { combatThreshold: 0.5 },
     combat: { attackPlayers: true }
-  }, 'llm'), 'an update with three typos');
+  }, 'llm'), 'an update with three unknown fields');
   t.true(errors.length >= 3, `expected one error per bad object, got ${errors.length}: ${errors.join(' | ')}`);
-  for (const typo of ['reflxes', 'autoEet', 'fod']) {
+  for (const typo of ['instinkt', 'fod', 'combatThreshold']) {
     t.true(errors.some(error => error.includes(typo)), `an error should name '${typo}': ${errors.join(' | ')}`);
   }
   t.deepEqual(store.get(), before);
@@ -196,10 +190,10 @@ test('unknown fields at every level in one update are all reported, and nothing 
 // Validation: ranges and types
 
 const OUT_OF_RANGE_CASES: { name: string; field: string; update: Record<string, unknown> }[] = [
-  { name: 'lowHealthRetreat.health -1', field: 'health', update: { reflexes: { lowHealthRetreat: { health: -1, enabled: false } } } },
-  { name: 'lowHealthRetreat.health 21', field: 'health', update: { reflexes: { lowHealthRetreat: { health: 21, enabled: false } } } },
-  { name: 'autoEat.food -1', field: 'food', update: { reflexes: { autoEat: { food: -1, enabled: false } } } },
-  { name: 'autoEat.food 21', field: 'food', update: { reflexes: { autoEat: { food: 21, enabled: false } } } },
+  { name: 'instinct.lowHealth -1', field: 'lowHealth', update: { instinct: { lowHealth: -1, enabled: false } } },
+  { name: 'instinct.lowHealth 21', field: 'lowHealth', update: { instinct: { lowHealth: 21, enabled: false } } },
+  { name: 'instinct.food -1', field: 'food', update: { instinct: { food: -1, enabled: false } } },
+  { name: 'instinct.food 21', field: 'food', update: { instinct: { food: 21, enabled: false } } },
   { name: 'instinct.lowAir 21', field: 'lowAir', update: { instinct: { lowAir: 21, enabled: false } } },
   { name: 'instinct.lowAir -1', field: 'lowAir', update: { instinct: { lowAir: -1, enabled: false } } },
   { name: 'instinct.reaskMs 499', field: 'reaskMs', update: { instinct: { reaskMs: 499, enabled: false } } },
@@ -215,10 +209,10 @@ const OUT_OF_RANGE_CASES: { name: string; field: string; update: Record<string, 
   { name: 'instinct.intent of 301 characters', field: 'intent', update: { instinct: { intent: 'x'.repeat(301), enabled: false } } },
   { name: 'combat.retreatHealth 21', field: 'retreatHealth', update: { combat: { retreatHealth: 21, avoidNeutral: false } } },
   { name: 'combat.retreatHealth -1', field: 'retreatHealth', update: { combat: { retreatHealth: -1, avoidNeutral: false } } },
-  { name: 'lowHealthRetreat.radius 0', field: 'radius', update: { reflexes: { lowHealthRetreat: { radius: 0, health: 3 } } } },
-  { name: 'lowHealthRetreat.radius 0.5', field: 'radius', update: { reflexes: { lowHealthRetreat: { radius: 0.5, health: 3 } } } },
-  { name: 'lowHealthRetreat.radius 33', field: 'radius', update: { reflexes: { lowHealthRetreat: { radius: 33, health: 3 } } } },
-  { name: 'lowHealthRetreat.radius -5', field: 'radius', update: { reflexes: { lowHealthRetreat: { radius: -5, health: 3 } } } }
+  { name: 'instinct.hostileRadius 0', field: 'hostileRadius', update: { instinct: { hostileRadius: 0, lowHealth: 3 } } },
+  { name: 'instinct.hostileRadius 0.5', field: 'hostileRadius', update: { instinct: { hostileRadius: 0.5, lowHealth: 3 } } },
+  { name: 'instinct.hostileRadius 33', field: 'hostileRadius', update: { instinct: { hostileRadius: 33, lowHealth: 3 } } },
+  { name: 'instinct.hostileRadius -5', field: 'hostileRadius', update: { instinct: { hostileRadius: -5, lowHealth: 3 } } }
 ];
 
 for (const { name, field, update } of OUT_OF_RANGE_CASES) {
@@ -232,7 +226,7 @@ for (const { name, field, update } of OUT_OF_RANGE_CASES) {
 
 test('two out-of-range values in one update are both reported', t => {
   const { store, before } = storeOffDefaults(t);
-  const errors = rejected(t, store.update({ reflexes: { autoEat: { food: 25 } }, combat: { retreatHealth: -3 } }, 'llm'),
+  const errors = rejected(t, store.update({ instinct: { food: 25 }, combat: { retreatHealth: -3 } }, 'llm'),
     'food 25 and retreatHealth -3');
   t.true(errors.length >= 2, `expected both errors, got: ${errors.join(' | ')}`);
   t.true(errors.some(error => error.includes('food')));
@@ -243,38 +237,37 @@ test('two out-of-range values in one update are both reported', t => {
 test('range boundaries are inclusive: 0 and 20 for health, food and air, 1 and 32 for the radius', t => {
   const store = new PolicyStore();
   accepted(t, store.update({
-    reflexes: { lowHealthRetreat: { health: 0, radius: 1 }, autoEat: { food: 0 } },
-    instinct: { lowAir: 0 },
+    instinct: { lowHealth: 0, hostileRadius: 1, food: 0, lowAir: 0 },
     combat: { retreatHealth: 0 }
   }, 'llm'), 'the lower bounds');
   t.deepEqual(store.get(), expected(p => {
-    p.reflexes.lowHealthRetreat.health = 0;
-    p.reflexes.lowHealthRetreat.radius = 1;
-    p.reflexes.autoEat.food = 0;
+    p.instinct.lowHealth = 0;
+    p.instinct.hostileRadius = 1;
+    p.instinct.food = 0;
     p.instinct.lowAir = 0;
     p.combat.retreatHealth = 0;
   }));
   accepted(t, store.update({
-    reflexes: { lowHealthRetreat: { health: 20, radius: 32 }, autoEat: { food: 20 } },
-    instinct: { lowAir: 20 },
+    instinct: { lowHealth: 20, hostileRadius: 32, food: 20, lowAir: 20 },
     combat: { retreatHealth: 20 }
   }, 'llm'), 'the upper bounds');
   t.deepEqual(store.get(), expected(p => {
-    p.reflexes.lowHealthRetreat.health = 20;
-    p.reflexes.lowHealthRetreat.radius = 32;
-    p.reflexes.autoEat.food = 20;
+    p.instinct.lowHealth = 20;
+    p.instinct.hostileRadius = 32;
+    p.instinct.food = 20;
     p.instinct.lowAir = 20;
     p.combat.retreatHealth = 20;
   }));
 });
 
 const WRONG_TYPE_CASES: { name: string; update: Record<string, unknown> }[] = [
-  { name: "creeperEvade.enabled 'yes'", update: { reflexes: { creeperEvade: { enabled: 'yes' } } } },
-  { name: "lowHealthRetreat.health '4'", update: { reflexes: { lowHealthRetreat: { health: '4' } } } },
-  { name: 'autoEat.food null', update: { reflexes: { autoEat: { food: null } } } },
+  { name: "instinct.enabled 'yes'", update: { instinct: { enabled: 'yes' } } },
+  { name: "instinct.lowHealth '4'", update: { instinct: { lowHealth: '4' } } },
+  { name: 'instinct.food null', update: { instinct: { food: null } } },
+  { name: "instinct.hostileRadius '8'", update: { instinct: { hostileRadius: '8' } } },
   { name: "combat.attackPlayers 'true'", update: { combat: { attackPlayers: 'true' } } },
   { name: 'combat.attackPlayers 1', update: { combat: { attackPlayers: 1 } } },
-  { name: 'reflexes.autoEat false (group given as a value)', update: { reflexes: { autoEat: false } } },
+  { name: 'instinct false (group given as a value)', update: { instinct: false } },
   { name: 'combat as an array', update: { combat: [] } }
 ];
 
@@ -287,19 +280,24 @@ for (const { name, update } of WRONG_TYPE_CASES) {
   });
 }
 
-test('an invalid self-defense stance is rejected; fight, flee and auto are accepted', t => {
-  const { store, before } = storeOffDefaults(t);
-  for (const stance of ['attack', 'Fight', 'hold', '', 1]) {
-    const errors = rejected(t, store.update({ reflexes: { selfDefense: { stance, enabled: false } } }, 'llm'),
-      `stance ${JSON.stringify(stance)}`);
-    t.true(errors.some(error => error.includes('stance')), `an error should name 'stance': ${errors.join(' | ')}`);
-    t.deepEqual(store.get(), before, `stance ${JSON.stringify(stance)} must leave the policy unchanged`);
-  }
-  for (const stance of ['fight', 'auto', 'flee'] as const) {
-    accepted(t, store.update({ reflexes: { selfDefense: { stance } } }, 'llm'), `stance ${stance}`);
-    t.is(store.get().reflexes.selfDefense.stance, stance);
-  }
-});
+// E-012 (M9): the reflexes group, with its self-defense stance, and decisions.combatThreshold no longer exist.
+const REMOVED_FIELDS: { name: string; field: string; update: Record<string, unknown> }[] = [
+  { name: 'reflexes (the whole group)', field: 'reflexes', update: { reflexes: { autoEat: { enabled: false } } } },
+  { name: 'reflexes.selfDefense.stance', field: 'reflexes', update: { reflexes: { selfDefense: { stance: 'flee' } }, combat: { retreatHealth: 3 } } },
+  { name: 'reflexes given as an empty group', field: 'reflexes', update: { reflexes: {} } },
+  { name: 'decisions.combatThreshold', field: 'combatThreshold', update: { decisions: { combatThreshold: 0.6, enabled: false } } }
+];
+
+for (const { name, field, update } of REMOVED_FIELDS) {
+  test(`M9: ${name} no longer exists and is rejected as an unknown field; nothing changes`, t => {
+    const { store, before } = storeOffDefaults(t);
+    const errors = rejected(t, store.update(update, 'llm'), name);
+    t.true(errors.some(error => error.includes(field)), `an error should name '${field}': ${errors.join(' | ')}`);
+    t.deepEqual(store.get(), before, 'the valid part of the update is not applied either');
+    t.false('reflexes' in store.get(), 'the policy has no reflexes group');
+    t.false('combatThreshold' in store.get().decisions, 'decisions has no combatThreshold');
+  });
+}
 
 // ---------------------------------------------------------------------------------------------------------------
 // Invariant I2: only the LLM (set-policy) and startup configuration may change the policy
@@ -309,7 +307,7 @@ for (const source of ['chat', 'whisper', 'LLM', 'Startup', '', 'player']) {
     const { store, before } = storeOffDefaults(t);
     rejected(t, store.update({
       combat: { attackPlayers: true, avoidNeutral: false },
-      reflexes: { creeperEvade: { enabled: false } }
+      instinct: { enabled: false }
     }, source as unknown as PolicySource), `the '${source}' update`);
     t.deepEqual(store.get(), before);
     t.false(store.get().combat.attackPlayers, 'chat must never be able to switch attackPlayers on');
@@ -318,7 +316,7 @@ for (const source of ['chat', 'whisper', 'LLM', 'Startup', '', 'player']) {
 
 test('I2: a missing source is rejected', t => {
   const { store, before } = storeOffDefaults(t);
-  rejected(t, store.update({ reflexes: { autoEat: { enabled: false } } }, undefined as unknown as PolicySource), 'an update without a source');
+  rejected(t, store.update({ instinct: { enabled: false } }, undefined as unknown as PolicySource), 'an update without a source');
   t.deepEqual(store.get(), before);
 });
 
@@ -385,7 +383,7 @@ test('switching attackPlayers on and avoidNeutral off together returns both warn
 test('ordinary changes return no warnings', t => {
   const store = new PolicyStore();
   const result = accepted(t, store.update({
-    reflexes: { creeperEvade: { enabled: false }, autoEat: { food: 18 }, selfDefense: { stance: 'flee' } },
+    instinct: { enabled: false, food: 18, hostileRadius: 8 },
     combat: { retreatHealth: 10 }
   }, 'llm'), 'non-risky changes');
   t.deepEqual(result.warnings, []);
@@ -393,7 +391,7 @@ test('ordinary changes return no warnings', t => {
 
 test('a rejected update that would switch attackPlayers on neither applies it nor warns', t => {
   const store = new PolicyStore();
-  const result = store.update({ combat: { attackPlayers: true }, reflexes: { autoEat: { food: 21 } } }, 'llm');
+  const result = store.update({ combat: { attackPlayers: true }, instinct: { food: 21 } }, 'llm');
   rejected(t, result, 'attackPlayers on with food 21');
   t.false('warnings' in result, 'a rejected update carries errors, not warnings');
   t.false(store.get().combat.attackPlayers);
@@ -423,8 +421,8 @@ for (const [name, raw] of [["'attackPlayers=true'", 'attackPlayers=true'], ['42'
 
 // F-014 does not say whether a group with no fields is an error; either way it must change nothing and warn about
 // nothing. (Since every update must set at least one field, these are now reported as errors.)
-for (const [name, raw] of [['{ combat: {} }', { combat: {} }], ['{ reflexes: {} }', { reflexes: {} }],
-  ['{ reflexes: { autoEat: {} } }', { reflexes: { autoEat: {} } }]] as const) {
+for (const [name, raw] of [['{ combat: {} }', { combat: {} }], ['{ instinct: {} }', { instinct: {} }],
+  ['{ chat: {}, decisions: {} }', { chat: {}, decisions: {} }]] as const) {
   test(`an update naming a group but no field (${name}) changes nothing`, t => {
     const { store, before } = storeOffDefaults(t);
     const result = store.update(raw, 'llm');
@@ -439,7 +437,7 @@ for (const [name, raw] of [['{ combat: {} }', { combat: {} }], ['{ reflexes: {} 
 test('an update with the current values reports no change', t => {
   const { store, before } = storeOffDefaults(t);
   const result = accepted(t, store.update({
-    reflexes: { autoEat: { food: 10, enabled: true }, selfDefense: { stance: 'flee' } },
+    instinct: { food: 10, enabled: true, lowAir: 3 },
     combat: { retreatHealth: 8, attackPlayers: false, avoidNeutral: true }
   }, 'llm'), 'the same values again');
   t.deepEqual(result.changed, []);
@@ -451,10 +449,10 @@ test('an update with the current values reports no change', t => {
 test('only the fields that actually differ are reported as changed', t => {
   const { store } = storeOffDefaults(t);
   const result = accepted(t, store.update({
-    reflexes: { autoEat: { food: 10, enabled: false } },
+    instinct: { food: 10, enabled: false },
     combat: { retreatHealth: 8, avoidNeutral: true }
   }, 'llm'), 'one new value among current ones');
-  t.deepEqual(result.changed, ['reflexes.autoEat.enabled']);
+  t.deepEqual(result.changed, ['instinct.enabled']);
 });
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -463,14 +461,13 @@ test('only the fields that actually differ are reported as changed', t => {
 test('reset() returns the defaults and get() shows them', t => {
   const store = new PolicyStore();
   accepted(t, store.update({
-    reflexes: {
-      creeperEvade: { enabled: false },
-      lowHealthRetreat: { enabled: false, health: 12, radius: 30 },
-      selfDefense: { enabled: false, stance: 'fight' },
-      autoEat: { enabled: false, food: 2 }
+    instinct: {
+      enabled: false, intent: 'diving on purpose', lowAir: 2, lowHealth: 12, hostileRadius: 30, food: 2, reaskMs: 9000,
+      actThreshold: 0.9, urgentThreshold: 0.1, maxCallsPerMinute: 5
     },
-    instinct: { enabled: false, intent: 'diving on purpose', lowAir: 2, reaskMs: 9000, actThreshold: 0.9, urgentThreshold: 0.1, maxCallsPerMinute: 5 },
-    combat: { attackPlayers: true, avoidNeutral: false, retreatHealth: 15 }
+    combat: { attackPlayers: true, avoidNeutral: false, retreatHealth: 15 },
+    chat: { triage: false, commandsFrom: ['Steve'], replyInChat: false },
+    decisions: { enabled: false, model: 'other/model', actThreshold: 0.9, cautiousThreshold: 0.2, maxCallsPerMinute: 3 }
   }, 'llm'), 'every field changed');
   const reset = store.reset();
   t.deepEqual(reset, EXPECTED_DEFAULTS);
@@ -493,12 +490,10 @@ test('after reset, switching attackPlayers on warns again', t => {
 
 function assertDeepFrozen(t: ExecutionContext, policy: Policy, label: string): void {
   t.true(Object.isFrozen(policy), `${label}: the policy object is frozen`);
-  t.true(Object.isFrozen(policy.reflexes), `${label}: reflexes is frozen`);
-  t.true(Object.isFrozen(policy.combat), `${label}: combat is frozen`);
-  t.true(Object.isFrozen(policy.instinct), `${label}: instinct is frozen`);
-  for (const [name, settings] of Object.entries(policy.reflexes)) {
-    t.true(Object.isFrozen(settings), `${label}: reflexes.${name} is frozen`);
+  for (const group of ['instinct', 'combat', 'chat', 'decisions'] as const) {
+    t.true(Object.isFrozen(policy[group]), `${label}: ${group} is frozen`);
   }
+  t.true(Object.isFrozen(policy.chat.commandsFrom), `${label}: chat.commandsFrom is frozen`);
 }
 
 test('get() returns a deeply frozen policy that cannot be changed by writing to it', t => {
@@ -506,11 +501,11 @@ test('get() returns a deeply frozen policy that cannot be changed by writing to 
   const policy = store.get();
   assertDeepFrozen(t, policy, 'initial');
   t.throws(() => { (policy.combat as { attackPlayers: boolean }).attackPlayers = true; }, { instanceOf: TypeError });
-  t.throws(() => { (policy.reflexes.autoEat as { food: number }).food = 1; }, { instanceOf: TypeError });
+  t.throws(() => { (policy.instinct as { food: number }).food = 1; }, { instanceOf: TypeError });
   t.throws(() => { (policy as { combat: unknown }).combat = { attackPlayers: true }; }, { instanceOf: TypeError });
   t.deepEqual(store.get(), EXPECTED_DEFAULTS, 'the failed writes left the policy unchanged');
 
-  const result = accepted(t, store.update({ reflexes: { autoEat: { food: 9 } } }, 'llm'), 'food 9');
+  const result = accepted(t, store.update({ instinct: { food: 9 } }, 'llm'), 'food 9');
   assertDeepFrozen(t, result.policy, 'update result');
   assertDeepFrozen(t, store.get(), 'after update');
 });
@@ -518,14 +513,14 @@ test('get() returns a deeply frozen policy that cannot be changed by writing to 
 test('an earlier get() result is not mutated by a later update or reset', t => {
   const store = new PolicyStore();
   const first = store.get();
-  accepted(t, store.update({ combat: { attackPlayers: true, retreatHealth: 3 }, reflexes: { autoEat: { enabled: false } } }, 'llm'),
+  accepted(t, store.update({ combat: { attackPlayers: true, retreatHealth: 3 }, instinct: { enabled: false } }, 'llm'),
     'a later update');
   t.deepEqual(first, EXPECTED_DEFAULTS, 'the earlier reader still sees one consistent (old) version');
   const second = store.get();
   t.not(second, first);
   t.true(second.combat.attackPlayers);
   t.is(second.combat.retreatHealth, 3);
-  t.false(second.reflexes.autoEat.enabled);
+  t.false(second.instinct.enabled);
 
   store.reset();
   t.true(second.combat.attackPlayers, 'reset must not rewrite a policy object a reader already holds');
@@ -535,18 +530,18 @@ test('an earlier get() result is not mutated by a later update or reset', t => {
 // ---------------------------------------------------------------------------------------------------------------
 // Readable summary
 
-test('describePolicy names every reflex and combat setting and reflects updated values', t => {
+test('describePolicy names the instinct and combat settings, no reflexes, and reflects updated values', t => {
   const store = new PolicyStore();
   const defaults = describePolicy(store.get());
-  for (const name of ['creeperEvade', 'lowHealthRetreat', 'selfDefense', 'autoEat',
-    'attackPlayers', 'avoidNeutral', 'retreatHealth', 'Instinct', 'lowAir', 'urgentThreshold', 'intent']) {
+  for (const name of ['attackPlayers', 'avoidNeutral', 'retreatHealth', 'Instinct', 'urgentThreshold', 'intent']) {
     t.true(defaults.includes(name), `the summary should mention ${name}`);
   }
-  accepted(t, store.update({ reflexes: { selfDefense: { stance: 'flee' }, autoEat: { food: 11 } } }, 'llm'), 'flee and food 11');
+  t.false(/reflex|selfDefense|stance|combatThreshold/i.test(defaults), `nothing about the removed reflexes: ${defaults}`);
+  accepted(t, store.update({ instinct: { food: 11, lowHealth: 9, hostileRadius: 23 } }, 'llm'), 'food 11, lowHealth 9, hostileRadius 23');
   const updated = describePolicy(store.get());
   t.not(updated, defaults);
-  t.true(updated.includes('flee'));
-  t.true(updated.includes('11'));
+  const instinctPart = updated.slice(updated.indexOf('Instinct'), updated.indexOf('Combat'));
+  for (const value of ['11', '9', '23']) t.true(new RegExp(`\\b${value}\\b`).test(instinctPart), `the instinct section shows ${value}: ${instinctPart}`);
 });
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -555,10 +550,9 @@ test('describePolicy names every reflex and combat setting and reflects updated 
 // was). These are stricter than the either-way test above, which stays as it is.
 
 const NO_VALUE_UPDATES: [string, unknown][] = [
-  ['{ reflexes: {} }', { reflexes: {} }],
-  ['{ reflexes: { autoEat: {} } }', { reflexes: { autoEat: {} } }],
+  ['{ instinct: {} }', { instinct: {} }],
   ['{ combat: {} }', { combat: {} }],
-  ['{ reflexes: { autoEat: {}, creeperEvade: {} }, combat: {} }', { reflexes: { autoEat: {}, creeperEvade: {} }, combat: {} }],
+  ['{ instinct: {}, combat: {}, chat: {}, decisions: {} }', { instinct: {}, combat: {}, chat: {}, decisions: {} }],
   // A field given as undefined (possible from code, never over JSON) is not a value either.
   ['{ combat: { attackPlayers: undefined } }', { combat: { attackPlayers: undefined } }]
 ];
@@ -579,10 +573,10 @@ for (const [name, raw] of NO_VALUE_UPDATES) {
 
 test('fix 10: after an update with no value is rejected, a real update still applies normally', t => {
   const { store, before } = storeOffDefaults(t);
-  rejected(t, store.update({ reflexes: { autoEat: {} } }, 'llm'), '{ reflexes: { autoEat: {} } }');
-  const result = accepted(t, store.update({ reflexes: { autoEat: { food: 12 } } }, 'llm'), 'food 12');
-  t.deepEqual(result.changed, ['reflexes.autoEat.food']);
-  t.deepEqual(store.get(), { ...before, reflexes: { ...before.reflexes, autoEat: { ...before.reflexes.autoEat, food: 12 } } });
+  rejected(t, store.update({ instinct: {} }, 'llm'), '{ instinct: {} }');
+  const result = accepted(t, store.update({ instinct: { food: 12 } }, 'llm'), 'food 12');
+  t.deepEqual(result.changed, ['instinct.food']);
+  t.deepEqual(store.get(), { ...before, instinct: { ...before.instinct, food: 12 } });
 });
 
 test('fix 10: setting attackPlayers to true three times in a row warns three times; only the first is a change', t => {
@@ -691,15 +685,29 @@ test('M4: describePolicy shows the chat and decision settings', t => {
   t.true(store.update({ chat: { commandsFrom: ['Steve'] } }, 'llm').ok);
   const text = describePolicy(store.get());
   t.regex(text, /commandsFrom: Steve/);
-  t.regex(text, /actThreshold: 0\.95, cautiousThreshold: 0\.5, combatThreshold: 0\.6/);
+  t.regex(text, /actThreshold: 0\.95, cautiousThreshold: 0\.5\b/);
+  t.notRegex(text, /combatThreshold/, 'the combat judgment threshold is gone (M9)');
 });
 
 // ---- M8: the instinct group (E-011, F-014) ------------------------------------------------------------------------
 
-test('M8: the instinct defaults: on, no intent, lowAir 6, re-ask every 1500 ms, thresholds 0.4 and 0.6, 90 calls a minute', t => {
+test('M8/M9: the instinct defaults: on, no intent, lowAir 6, lowHealth 6, hostileRadius 16, food 14, re-ask every 1500 ms, thresholds 0.3 and 0.6, 90 calls a minute', t => {
   t.deepEqual(new PolicyStore().get().instinct, {
-    enabled: true, intent: '', lowAir: 6, reaskMs: 1500, actThreshold: 0.4, urgentThreshold: 0.6, maxCallsPerMinute: 90
+    enabled: true, intent: '', lowAir: 6, lowHealth: 6, hostileRadius: 16, food: 14, reaskMs: 1500, actThreshold: 0.3,
+    urgentThreshold: 0.6, maxCallsPerMinute: 90
   });
+});
+
+test('M9: lowHealth, hostileRadius and food are updated one at a time without touching each other', t => {
+  const { store, before } = storeOffDefaults(t);
+  const health = accepted(t, store.update({ instinct: { lowHealth: 9 } }, 'llm'), 'lowHealth 9');
+  t.deepEqual(health.changed, ['instinct.lowHealth']);
+  const radius = accepted(t, store.update({ instinct: { hostileRadius: 24 } }, 'startup'), 'hostileRadius 24 from startup');
+  t.deepEqual(radius.changed, ['instinct.hostileRadius']);
+  const food = accepted(t, store.update({ instinct: { food: 17 } }, 'llm'), 'food 17');
+  t.deepEqual(food.changed, ['instinct.food']);
+  t.deepEqual(store.get(), { ...before, instinct: { ...before.instinct, lowHealth: 9, hostileRadius: 24, food: 17 } });
+  t.deepEqual([health, radius, food].flatMap(result => result.warnings), [], 'no warnings for these');
 });
 
 test('M8: a partial instinct update changes only the given field', t => {
@@ -708,7 +716,7 @@ test('M8: a partial instinct update changes only the given field', t => {
   t.deepEqual(result.changed, ['instinct.reaskMs']);
   t.deepEqual(store.get(), { ...before, instinct: { ...before.instinct, reaskMs: 3000 } });
   accepted(t, store.update({ instinct: { enabled: false } }, 'llm'), 'instinct off');
-  t.deepEqual(store.get().instinct, { ...EXPECTED_DEFAULTS.instinct, reaskMs: 3000, enabled: false });
+  t.deepEqual(store.get().instinct, { ...before.instinct, reaskMs: 3000, enabled: false });
 });
 
 test('M8: instinct bounds are inclusive: reaskMs 500 and 10000, maxCallsPerMinute 1 and 600, thresholds 0 and 1, intent 300 characters', t => {
@@ -743,38 +751,40 @@ test('M8: an unknown field under instinct is rejected and nothing changes', t =>
   t.deepEqual(store.get(), before);
 });
 
-test('M8: reflexes.hazardEscape no longer exists and is rejected as an unknown field', t => {
+test('M8: reflexes.hazardEscape no longer exists and is rejected (since M9 with the whole reflexes group)', t => {
   const { store, before } = storeOffDefaults(t);
   const errors = rejected(t, store.update({ reflexes: { hazardEscape: { enabled: false } } }, 'llm'), 'reflexes.hazardEscape');
-  t.true(errors.some(error => error.includes('hazardEscape')), errors.join(' | '));
+  t.true(errors.some(error => error.includes('reflexes')), errors.join(' | '));
   t.deepEqual(store.get(), before);
 });
 
 test('M8: reset restores the instinct defaults, including an empty intent', t => {
   const store = new PolicyStore();
-  accepted(t, store.update({ instinct: { enabled: false, intent: 'testing in lava', lowAir: 12, actThreshold: 0.9 } }, 'llm'), 'instinct changes');
+  accepted(t, store.update({ instinct: { enabled: false, intent: 'testing in lava', lowAir: 12, lowHealth: 2, hostileRadius: 5, food: 3, actThreshold: 0.9 } }, 'llm'), 'instinct changes');
   store.reset();
   t.deepEqual(store.get().instinct, EXPECTED_DEFAULTS.instinct);
 });
 
-test('M8: the empty-update error names every group, the instinct included', t => {
+test('M9: the empty-update error names every group, and reflexes is not one of them any more', t => {
   const errors = rejected(t, new PolicyStore().update({ instinct: {} }, 'llm'), '{ instinct: {} }');
-  t.deepEqual(errors, ['no policy fields given; groups are reflexes, instinct, combat, chat and decisions (see get-policy)']);
+  t.deepEqual(errors, ['no policy fields given; groups are instinct, combat, chat and decisions (see get-policy)']);
 });
 
-test('M8: describePolicy shows the instinct settings and the intent', t => {
+test('M8/M9: describePolicy shows the instinct settings and the intent', t => {
   const store = new PolicyStore();
   const defaults = describePolicy(store.get());
-  // The wording is tentative (F-018); only the facts are checked.
+  // The wording is tentative (F-018); only the facts are checked: the instinct section, before the Combat section.
+  const instinctPart = (text: string) => text.slice(text.indexOf('Instinct'), text.indexOf('Combat'));
   const lineWith = (text: string, word: string) => text.split('\n').find(line => line.includes(word)) ?? '';
   t.regex(defaults, /Instinct/);
-  t.regex(lineWith(defaults, 'lowAir'), /\bon\b/);
-  t.regex(lineWith(defaults, 'lowAir'), /lowAir\D*6\b/);
-  t.regex(lineWith(defaults, 'actThreshold'), /actThreshold\D*0\.4\b/);
+  t.regex(instinctPart(defaults), /enabled: on\b/);
+  t.regex(lineWith(defaults, 'actThreshold'), /actThreshold\D*0\.3\b/);
   t.regex(lineWith(defaults, 'urgentThreshold'), /urgentThreshold\D*0\.6\b/);
+  for (const value of ['6', '16', '14']) t.true(new RegExp(`\\b${value}\\b`).test(instinctPart(defaults)), `the cue thresholds include ${value}`);
   t.false(defaults.includes('swimming under the lake for clay'));
-  accepted(t, store.update({ instinct: { intent: 'swimming under the lake for clay', enabled: false } }, 'llm'), 'intent and off');
+  accepted(t, store.update({ instinct: { intent: 'swimming under the lake for clay', enabled: false, lowAir: 4 } }, 'llm'), 'intent, off and lowAir 4');
   const updated = describePolicy(store.get());
   t.true(lineWith(updated, 'intent').includes('swimming under the lake for clay'), updated);
-  t.regex(lineWith(updated, 'lowAir'), /\boff\b/);
+  t.regex(instinctPart(updated), /enabled: off\b/);
+  t.regex(instinctPart(updated), /\b4\b/, 'the new lowAir value is shown');
 });

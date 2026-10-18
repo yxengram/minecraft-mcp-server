@@ -54,7 +54,7 @@ export const followBehavior: BehaviorDefinition<FollowParams, BotEntity> = {
           lostSince = null;
           report(`found ${label} again`);
         }
-        // Re-apply the goal whenever something else cleared it (a pause, a reflex) or the entity object changed.
+        // Re-apply the goal whenever something else cleared it (a pause, the instinct) or the entity object changed.
         if (!goal || live !== entity || bot.pathfinder.goal !== goal) {
           entity = live;
           goal = new goals.GoalFollow(live, params.range);

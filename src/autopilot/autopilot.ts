@@ -1,4 +1,5 @@
-// Contract: docs/BLUEPRINT.md F-001 (arbiter, tasks, behaviors, policy, reflexes, decisions, bind/unbind; the instinct since M8, E-011).
+// Contract: docs/BLUEPRINT.md F-001 (arbiter, tasks, behaviors, policy, decisions, bind/unbind; the instinct since M8, E-011;
+// no reflexes since M9, E-012).
 import type mineflayer from 'mineflayer';
 import { ActionArbiter, HolderInfo, PRIORITY } from './action-arbiter.js';
 import { TaskManager, TaskRecord, BehaviorDefinition } from './task-manager.js';
@@ -10,12 +11,11 @@ import { huntBehavior } from './behaviors/hunt.js';
 import { returnHomeBehavior } from './behaviors/return-home.js';
 import { PolicyStore } from './policy.js';
 import { OpenRouterClient, OpenRouterClientOptions } from '../decisions/openrouter-client.js';
-import { ChatCommand, ChatCommandOutcome, CombatJudge, DecisionHooks, planChatCommand } from '../decisions/decision-hooks.js';
+import { ChatCommand, ChatCommandOutcome, DecisionHooks, planChatCommand } from '../decisions/decision-hooks.js';
 import { findNearbyEntities } from '../tools/entity-utils.js';
 import minecraftData from 'minecraft-data';
-import { DamageInfo, ReflexEngine } from './reflex-engine.js';
-import { REFLEXES } from './reflexes.js';
 import { InstinctEngine } from './instinct/instinct-engine.js';
+import type { DamageInfo } from './instinct/attention.js';
 import type { EventStore } from '../event-store.js';
 import type { WaypointStore } from '../waypoint-store.js';
 import { stopPathfinder } from '../tools/movement-utils.js';
@@ -44,24 +44,15 @@ export class AutopilotNotReady extends Error {
 export class Autopilot {
   private bot: mineflayer.Bot | null = null;
   private arbiterInstance: ActionArbiter | null = null;
-  private reflexEngine: ReflexEngine | null = null;
   private instinctEngine: InstinctEngine | null = null;
   readonly tasks: TaskManager;
   readonly policy: PolicyStore;
   readonly decisions: OpenRouterClient;
   private readonly hooks: DecisionHooks;
-  private readonly combatJudge: CombatJudge;
 
   constructor(private readonly options: AutopilotOptions) {
     this.policy = new PolicyStore({ decisionModel: options.decisionModel });
     this.decisions = new OpenRouterClient({ getPolicy: () => this.policy.get(), ...options.decisions });
-    // Combat judgments share the decision client, and so its per-minute budget, with chat triage.
-    this.combatJudge = new CombatJudge({
-      decide: (state, questions) => this.decisions.decide(state, questions),
-      canDecide: () => this.decisions.isConfigured() && this.policy.get().decisions.enabled,
-      getPolicy: () => this.policy.get(),
-      events: options.events
-    });
     this.hooks = new DecisionHooks({
       decide: (state, questions) => this.decisions.decide(state, questions),
       canDecide: () => this.decisions.isConfigured() && this.policy.get().decisions.enabled,
@@ -102,11 +93,6 @@ export class Autopilot {
     return this.arbiterInstance;
   }
 
-  get reflexes(): ReflexEngine {
-    if (!this.reflexEngine) throw new AutopilotNotReady();
-    return this.reflexEngine;
-  }
-
   get instinct(): InstinctEngine {
     if (!this.instinctEngine) throw new AutopilotNotReady();
     return this.instinctEngine;
@@ -127,20 +113,6 @@ export class Autopilot {
     // Every (re)join starts from the default policy (user decision, PLAN Q2).
     this.policy.reset();
     this.options.events.addEvent('policy', 'policy reset to defaults (bot joined the game)');
-    this.reflexEngine = new ReflexEngine({
-      bot,
-      arbiter,
-      getPolicy: () => this.policy.get(),
-      events: this.options.events,
-      reflexes: REFLEXES,
-      judgeCombat: (attackerId, situation) => this.combatJudge.judge(attackerId, situation),
-      // Runs while a reflex may still hold the body, so a paused task cannot resume in between (M7).
-      onDeath: () => void this.tasks.cancelAll('the bot died'),
-      log: this.options.log
-    });
-    this.reflexEngine.start();
-    // Started after the reflex engine, so on death its onDeath cancels the task before the instinct lets go of the
-    // body (nothing resumes).
     this.instinctEngine = new InstinctEngine({
       bot,
       arbiter,
@@ -148,18 +120,20 @@ export class Autopilot {
       getPolicy: () => this.policy.get(),
       events: this.options.events,
       decide: (state, questions) => this.decisions.decide(state, questions, { budget: 'instinct' }),
+      // Runs while an instinct action may still hold the body, so a paused task cannot resume in between (M7).
+      onDeath: () => void this.tasks.cancelAll('the bot died'),
       log: this.options.log
     });
     this.instinctEngine.start();
+    // The first decision of a process is slower (connection setup); pay for that now, not during the first danger.
+    this.decisions.warmUp();
   }
 
   unbind(reason = 'disconnected'): void {
     if (!this.bot) return;
-    // Cancel tasks first: stopping a running reflex releases its lease, which would otherwise resume the paused task
-    // just before it is cancelled.
+    // Cancel tasks first: stopping a running instinct action releases its lease, which would otherwise resume the
+    // paused task just before it is cancelled.
     void this.tasks.cancelAll(reason);
-    this.reflexEngine?.stop(reason);
-    this.reflexEngine = null;
     this.instinctEngine?.stop(reason);
     this.instinctEngine = null;
     this.bot = null;
@@ -167,7 +141,7 @@ export class Autopilot {
   }
 
   noteDamage(info: DamageInfo): void {
-    this.reflexEngine?.noteDamage(info);
+    this.instinctEngine?.noteDamage(info);
   }
 
   /** A chat line or whisper from another player; sorted by the decision model in the background (F-016). */

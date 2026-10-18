@@ -1,14 +1,14 @@
 // Contract tests for src/decisions/decision-hooks.ts (BLUEPRINT F-016, F-029; G3 event formats; G6 invariant I2; G7).
 // Expected results come from the blueprint, not from what the implementation prints. Chat triage and chat commands
-// (M4) and the combat judgment (M5: fight / flee / hold, 10 s cache) are covered.
+// (M4) are covered; the M5 combat judgment was folded into the instinct in M9 (F1-h) and is tested there.
 import test from 'ava';
 import sinon from 'sinon';
 import { EventEmitter } from 'node:events';
 import { Vec3 } from 'vec3';
 import {
-  CHAT_COMMANDS, ChatCommand, ChatCommandOutcome, ChatWorld, COMBAT_CACHE_MS, CombatJudge, CombatSituation, DecisionHooks,
-  combatQuestions, combatState, parseCount, planChatCommand
+  CHAT_COMMANDS, ChatCommand, ChatCommandOutcome, ChatWorld, DecisionHooks, parseCount, planChatCommand
 } from '../src/decisions/decision-hooks.js';
+import { DECISIONS_URL } from '../src/decisions/openrouter-client.js';
 import type { DecisionAnswer, DecisionErrorKind, DecisionQuestion, DecisionResult } from '../src/decisions/openrouter-client.js';
 import { PolicyStore } from '../src/autopilot/policy.js';
 import { EventStore } from '../src/event-store.js';
@@ -527,7 +527,9 @@ function chatBot() {
 /** A fetch that answers the decisions API: addressed 0.95, request 0.9, follow_me 0.98 for whatever is asked. */
 function fakeFetch() {
   const bodies: { questions: Questions; state: Record<string, unknown> }[] = [];
-  const fetch = sinon.spy(async (_url: string, init: { body?: string }) => {
+  const fetch = sinon.spy(async (url: string, init: { body?: string }) => {
+    // Only decision requests are answered and recorded; anything else (e.g. the model catalog) gets an empty catalog.
+    if (url !== DECISIONS_URL) return { ok: true, status: 200, text: async () => JSON.stringify({ data: [] }) };
     const body = JSON.parse(init.body ?? '{}') as { questions: Questions; state: Record<string, unknown> };
     bodies.push(body);
     const { answers } = answer(body.questions, { addressed: 0.95, category: ['request', 0.9], command: ['follow_me', 0.98] }) as { answers: Record<string, DecisionAnswer> };
@@ -549,7 +551,7 @@ test('Autopilot: an authorized player\'s "follow me" starts a follow task with s
   autopilot.handleChat('Steve', `${BOT}, follow me`, false);
   await waitFor(() => events.query({ types: ['decision'], limit: 50 }).events.some(event => event.message.includes('chat-command')));
 
-  t.true(fetch.calledOnce);
+  t.is(bodies.length, 1, 'one decision request');
   t.true('command' in bodies[0].questions);
   const task = autopilot.currentTask();
   t.truthy(task);
@@ -614,201 +616,4 @@ test('an authorized player giving a command to someone else is neither run nor r
   t.true(h.runCommand.notCalled);
   t.deepEqual(h.of('chat_request'), []);
   t.true(h.of('decision').some(message => message.includes('not run')), 'the decision is still visible');
-});
-
-// ---- combat judgment (M5): fight / flee / hold for the self-defense 'auto' stance (F-016, F-029, G7, I5) -----------
-
-const SITUATION: CombatSituation = {
-  health: 13.5,
-  food: 18,
-  armorPoints: 7,
-  weapon: 'iron_sword',
-  attacker: { type: 'zombie', distance: 2.345 },
-  hostiles: [{ type: 'zombie', distance: 2.345 }, { type: 'skeleton', distance: 9.1 }, { type: 'zombie', distance: 12 }]
-};
-
-/** Collects every string leaf and every object key of a JSON-like value. */
-function stringsIn(value: unknown, keys: string[] = [], leaves: string[] = []): { keys: string[]; leaves: string[] } {
-  if (typeof value === 'string') leaves.push(value);
-  else if (Array.isArray(value)) for (const entry of value) stringsIn(entry, keys, leaves);
-  else if (value && typeof value === 'object') {
-    for (const [key, entry] of Object.entries(value)) {
-      keys.push(key);
-      stringsIn(entry, keys, leaves);
-    }
-  }
-  return { keys, leaves };
-}
-
-test('combatState: only numbers, mob type names and the weapon reach the model; no labels, ids or custom names', (t) => {
-  const state = combatState(SITUATION);
-  const json = JSON.stringify(state);
-  // Round-trips as plain JSON (no entities, no Vec3, no functions).
-  t.deepEqual(JSON.parse(json), state);
-
-  const mobTypes = new Set(['zombie', 'skeleton']);
-  const { keys, leaves } = stringsIn(state);
-  for (const leaf of leaves) {
-    t.true(/^\d+(\.\d+)? of 20$/.test(leaf) || mobTypes.has(leaf) || leaf === 'iron_sword', `unexpected string in the state: ${JSON.stringify(leaf)}`);
-  }
-  // Object keys are fixed field names or mob types (counts by type), never a label such as "zombie (id 12)".
-  for (const key of keys) t.regex(key, /^[a-z_0-9]+$/, `unexpected key ${JSON.stringify(key)}`);
-  t.false(/\bid\b|\(|\)/.test(json), 'no entity labels or ids');
-
-  // The facts themselves are there.
-  t.true(json.includes('13.5'), 'health');
-  t.true(json.includes('18'), 'food');
-  t.true(json.includes('7'), 'armor');
-  t.true(json.includes('iron_sword'));
-  t.true(json.includes('2.3'), 'attacker distance');
-  t.true(json.includes('zombie') && json.includes('skeleton'));
-});
-
-test('combatQuestions: one choice question "stance" with fight, flee, hold and none (G7)', (t) => {
-  const questions = combatQuestions();
-  t.deepEqual(Object.keys(questions), ['stance']);
-  t.is(questions.stance.type, 'choice');
-  t.deepEqual(Object.keys(questions.stance.criteria).sort(), ['fight', 'flee', 'hold', 'none']);
-  t.true(questions.stance.instructions.length > 0);
-});
-
-/** Model answer to the stance question; the rest of the probability is spread over the other choices. */
-function stanceAnswer(choiceName: string, p: number): DecisionResult {
-  const others = ['fight', 'flee', 'hold', 'none'].filter(name => name !== choiceName);
-  const rest = Number(((1 - p) / others.length).toFixed(2));
-  const probabilities: Record<string, number> = { [choiceName]: p };
-  for (const other of others) probabilities[other] = rest;
-  return { ok: true, answers: { stance: { type: 'choice', choice: choiceName, confidence: p, probabilities } }, model: MODEL, latencyMs: 87 };
-}
-
-function judgeSetup(result: DecisionResult | (() => DecisionResult) = stanceAnswer('fight', 0.9)) {
-  const store = new PolicyStore();
-  const events = new EventStore();
-  let now = 1_000_000;
-  const decide = sinon.stub<[Record<string, unknown>, Questions], Promise<DecisionResult>>()
-    .callsFake(async () => (typeof result === 'function' ? result() : result));
-  const canDecide = sinon.stub<[], boolean>().returns(true);
-  const judge = new CombatJudge({ decide, canDecide, getPolicy: () => store.get(), events, now: () => now });
-  const decisions = () => events.query({ types: ['decision'], limit: 200 }).events.map(event => event.message);
-  return {
-    store, events, decide, canDecide, judge, decisions,
-    advance: (ms: number) => { now += ms; }
-  };
-}
-
-test('CombatJudge: a clear answer (fight 0.9) is followed; the decision event names the probabilities, model and latency', async (t) => {
-  const h = judgeSetup(stanceAnswer('fight', 0.9));
-
-  const judgment = await h.judge.judge(12, SITUATION);
-
-  t.like(judgment, { source: 'model', stance: 'fight', probability: 0.9 });
-  t.true(h.decide.calledOnce);
-  const [state, questions] = h.decide.firstCall.args;
-  t.deepEqual(state, combatState(SITUATION), 'the model sees the structured state');
-  t.deepEqual(Object.keys(questions), ['stance']);
-
-  const events = h.decisions();
-  t.is(events.length, 1, 'every judgment is written as a decision event');
-  t.regex(events[0], /fight p=0\.90/);
-  t.regex(events[0], /flee 0\.03/, 'the event lists the other probabilities');
-  t.regex(events[0], /hold 0\.03/);
-  t.true(events[0].includes(MODEL), 'the event names the model');
-  t.regex(events[0], /87 ?ms/, 'the event gives the latency');
-  t.true(events[0].includes('zombie'));
-});
-
-test('CombatJudge: the same attacker within 10 s gets the cached answer without asking again; after 10 s it is asked again', async (t) => {
-  const h = judgeSetup(stanceAnswer('flee', 0.8));
-  t.is(COMBAT_CACHE_MS, 10_000);
-
-  t.like(await h.judge.judge(12, SITUATION), { source: 'model', stance: 'flee' });
-  h.advance(5_000);
-  t.like(await h.judge.judge(12, SITUATION), { source: 'cache', stance: 'flee', probability: 0.8 });
-  h.advance(4_999);
-  t.like(await h.judge.judge(12, SITUATION), { source: 'cache', stance: 'flee' });
-  t.true(h.decide.calledOnce, 'asked once within 10 s');
-  t.is(h.decisions().length, 3, 'cached judgments are written as events too');
-  t.regex(h.decisions()[1], /cache/);
-
-  h.advance(1);
-  t.like(await h.judge.judge(12, SITUATION), { source: 'model', stance: 'flee' });
-  t.is(h.decide.callCount, 2, 'asked again once 10 s have passed');
-});
-
-test('CombatJudge: another attacker is a new encounter and is asked about separately', async (t) => {
-  const h = judgeSetup(stanceAnswer('fight', 0.9));
-
-  await h.judge.judge(12, SITUATION);
-  const other = await h.judge.judge(13, SITUATION);
-
-  t.is(other.source, 'model');
-  t.is(h.decide.callCount, 2);
-});
-
-for (const [label, answer] of [['none', stanceAnswer('none', 0.9)], ['p 0.5 (below combatThreshold 0.6)', stanceAnswer('flee', 0.5)]] as const) {
-  test(`CombatJudge: an unclear answer (${label}) falls back to the rule, with a decision event saying so`, async (t) => {
-    const h = judgeSetup(answer);
-
-    const judgment = await h.judge.judge(12, SITUATION);
-
-    t.is(judgment.source, 'rule');
-    t.false('stance' in judgment, 'no stance to follow');
-    const events = h.decisions();
-    t.is(events.length, 1);
-    t.regex(events[0], /rule fallback/);
-    t.true(events[0].includes(MODEL));
-  });
-}
-
-test('CombatJudge: a failed decision (timeout) falls back to the rule and is written as an event (I5)', async (t) => {
-  const h = judgeSetup({ ok: false, error: 'timeout', message: 'no answer within 1500 ms' } as DecisionResult);
-
-  const judgment = await h.judge.judge(12, SITUATION);
-
-  t.is(judgment.source, 'rule');
-  const events = h.decisions();
-  t.is(events.length, 1);
-  t.regex(events[0], /timeout/);
-  t.regex(events[0], /rule fallback/);
-});
-
-test('CombatJudge: without a decision model the rule decides; the model is not asked and no model judgment is written', async (t) => {
-  const h = judgeSetup(stanceAnswer('fight', 0.99));
-  h.canDecide.returns(false);
-
-  const judgment = await h.judge.judge(12, SITUATION);
-
-  t.is(judgment.source, 'rule');
-  t.true(h.decide.notCalled);
-  for (const message of h.decisions()) {
-    t.false(message.includes(MODEL), `no model judgment: ${message}`);
-    t.false(/p=/.test(message), `no probabilities: ${message}`);
-  }
-});
-
-test('CombatJudge: the threshold follows policy updates (decisions.combatThreshold)', async (t) => {
-  const h = judgeSetup(stanceAnswer('flee', 0.9));
-  t.is(h.store.get().decisions.combatThreshold, 0.6, 'default from the M5 probe');
-
-  t.is((await h.judge.judge(1, SITUATION)).source, 'model', '0.9 ≥ 0.6');
-
-  t.true(h.store.update({ decisions: { combatThreshold: 0.95 } }, 'llm').ok);
-  t.is((await h.judge.judge(2, SITUATION)).source, 'rule', '0.9 < 0.95');
-
-  h.decide.callsFake(async () => stanceAnswer('hold', 0.55));
-  t.is((await h.judge.judge(3, SITUATION)).source, 'rule', '0.55 < 0.95');
-  t.true(h.store.update({ decisions: { combatThreshold: 0.5 } }, 'llm').ok);
-  t.like(await h.judge.judge(4, SITUATION), { source: 'model', stance: 'hold' }, '0.55 ≥ 0.5');
-});
-
-// F-016: "同一场遭遇 10 秒内只问一次" — the same encounter is asked at most once every 10 s, also after an unsure answer
-// or a failure, so a long fight cannot spend the per-minute decision budget shared with chat triage.
-test('CombatJudge: an unsure answer is not asked again for the same attacker within 10 s (F-016)', async (t) => {
-  const h = judgeSetup(stanceAnswer('flee', 0.5));
-
-  t.is((await h.judge.judge(12, SITUATION)).source, 'rule');
-  h.advance(5_000);
-  t.is((await h.judge.judge(12, SITUATION)).source, 'rule');
-
-  t.true(h.decide.calledOnce, 'the same encounter is asked once within 10 s');
 });

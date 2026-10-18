@@ -11,14 +11,24 @@ import {
   safeToDigOut, touchingFire, yawToward
 } from '../hazards.js';
 import { equipBestTool } from '../../tools/block-utils.js';
+import { BotEntity, refreshEntity } from '../../tools/entity-utils.js';
+import { engage } from '../combat.js';
+import { assessThreats } from '../threats.js';
+import type { Policy } from '../policy.js';
+import { eat, holdGround, label, runAway } from './motor.js';
 
-export type MacroName = 'swim_up' | 'swim_to_air' | 'dig_up' | 'leave_lava' | 'go_to_water' | 'step_off_fire';
+export type MacroName =
+  | 'swim_up' | 'swim_to_air' | 'dig_up' | 'leave_lava' | 'go_to_water' | 'step_off_fire'
+  | 'run_from_creeper' | 'flee' | 'fight' | 'hold' | 'eat';
 
 export interface MacroContext {
   bot: mineflayer.Bot;
   signal: AbortSignal;
   /** The spot the menu worked out: the air pocket, the ceiling block, the safe spot or the water. */
   target: Vec3 | null;
+  /** The entity the menu worked out: the creeper to run from, the mob to fight or hold against. */
+  entityId?: number;
+  policy: Policy;
 }
 
 export interface MacroDefinition {
@@ -216,11 +226,95 @@ const stepOffFire: MacroDefinition = {
   }
 };
 
+export const CREEPER_SAFE_DISTANCE = 8;
+const FLEE_DISTANCE = 16;
+
+function target(bot: mineflayer.Bot, id: number | undefined): BotEntity {
+  const found = id === undefined ? undefined : bot.entities?.[id];
+  if (!found || found.isValid === false || !found.position) throw new Error('the target is gone');
+  return found;
+}
+
+const runFromCreeper: MacroDefinition = {
+  name: 'run_from_creeper',
+  maxDurationMs: 4000,
+  async run({ bot, signal, entityId }) {
+    const creeper = target(bot, entityId);
+    let live: BotEntity | null = creeper;
+    const distance = () => (live ? bot.entity.position.distanceTo(live.position) : Infinity);
+    await runAway(bot, signal, () => {
+      live = refreshEntity(bot, creeper);
+      return live ? [live.position] : [];
+    }, () => distance() >= CREEPER_SAFE_DISTANCE);
+    return live ? `moved ${distance().toFixed(1)} blocks away from ${label(creeper)}` : 'the creeper is gone';
+  }
+};
+
+// Runs from every hostile within 16 blocks, plus the attacker even when it is not one (a player, a neutral mob).
+const flee: MacroDefinition = {
+  name: 'flee',
+  maxDurationMs: 10000,
+  async run({ bot, signal, entityId }) {
+    const attacker = entityId === undefined ? null : bot.entities?.[entityId] ?? null;
+    const near = () => {
+      const mobs = assessThreats(bot, { radius: FLEE_DISTANCE }).hostiles.map(threat => threat.entity);
+      const live = attacker ? refreshEntity(bot, attacker) : null;
+      if (live && !mobs.some(mob => mob.id === live.id) && live.position.distanceTo(bot.entity.position) <= FLEE_DISTANCE) mobs.push(live);
+      return mobs;
+    };
+    const from = near().length;
+    await runAway(bot, signal, () => near().map(mob => mob.position), () => near().length === 0);
+    return `got more than ${FLEE_DISTANCE} blocks away from ${from} mob(s)`;
+  }
+};
+
+// Never against a player, whatever the policy says: the menu only offers legal targets, and the rules here say so too.
+const fight: MacroDefinition = {
+  name: 'fight',
+  maxDurationMs: 20000,
+  async run({ bot, signal, entityId, policy }) {
+    const mob = target(bot, entityId);
+    const result = await engage(bot, mob, {
+      signal,
+      maxChase: FLEE_DISTANCE,
+      retreatHealth: policy.combat.retreatHealth,
+      rules: { attackPlayers: false, avoidNeutral: policy.combat.avoidNeutral }
+    });
+    if (result.outcome === 'illegal_target') throw new Error(result.detail);
+    return `fought ${label(mob)}: ${result.detail}`;
+  }
+};
+
+const hold: MacroDefinition = {
+  name: 'hold',
+  maxDurationMs: 20000,
+  async run({ bot, signal, entityId, policy }) {
+    return holdGround(bot, target(bot, entityId), signal, policy);
+  }
+};
+
+const eatNow: MacroDefinition = {
+  name: 'eat',
+  maxDurationMs: 5000,
+  async run({ bot, signal }) {
+    clearGoal(bot);
+    bot.clearControlStates();
+    const ate = await eat(bot, signal);
+    if (!ate) throw new Error('nothing safe to eat, or not hungry');
+    return ate;
+  }
+};
+
 export const MACROS: Record<MacroName, MacroDefinition> = {
   swim_up: swimUp,
   swim_to_air: swimToAir,
   dig_up: digUp,
   leave_lava: leaveLava,
   go_to_water: goToWater,
-  step_off_fire: stepOffFire
+  step_off_fire: stepOffFire,
+  run_from_creeper: runFromCreeper,
+  flee,
+  fight,
+  hold,
+  eat: eatNow
 };

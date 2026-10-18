@@ -229,6 +229,15 @@ export class OpenRouterClient {
     };
   }
 
+  /**
+   * Opens the connection to OpenRouter ahead of the first decision (DNS, TLS): a process's first request costs about
+   * 0.35 s more, which a lit creeper's 1.5 s fuse cannot spare (M9). A free catalog GET; failures are ignored.
+   */
+  warmUp(): void {
+    if (!this.isConfigured() || !this.options.getPolicy().decisions.enabled) return;
+    void this.listModels().catch(() => {});
+  }
+
   /** The live catalog of decision models. Without a key it is not queried (F-018: say that no key is configured). */
   async listModels(): Promise<CatalogResult> {
     const key = this.key();

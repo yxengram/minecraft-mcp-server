@@ -1,6 +1,6 @@
 // Contract: docs/BLUEPRINT.md F-035. Pause-aware building blocks shared by the work behaviors.
 //
-// When a reflex or a manual command takes the body, the arbiter stops the pathfinder, which makes a running
+// When the instinct or a manual command takes the body, the arbiter stops the pathfinder, which makes a running
 // `pathfinder.goto` reject. Without these helpers a behavior would count that as a failed step (and, for example,
 // skip a perfectly good block). Here an interrupted step waits until the task runs again and is retried.
 import type mineflayer from 'mineflayer';

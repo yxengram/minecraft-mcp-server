@@ -178,7 +178,7 @@
 | M-ARB 动作仲裁 | 管理身体控制权（取得、抢占、暂停、恢复、释放）；区分反射抢占（自动恢复）与手动抢占（挂起） | 不决定做什么；不直接操作 bot | `src/autopilot/action-arbiter.ts` | 当前持有者、被暂停者栈 | AP-1 |
 | M-TASK 任务与行为 | 任务生命周期、行为注册、6 种行为的流程 | 不做每刻威胁检测；不调用决策模型 | `src/autopilot/task-manager.ts`、`src/autopilot/behaviors/*.ts` | 当前任务、最近任务记录 | AP-2、AP-3 |
 | M-CMB 战斗与威胁 | 威胁识别（敌对生物、苦力怕膨胀、岩浆/火/溺水）、近战控制 | 不决定是否参战（由调用者决定） | `src/autopilot/threats.ts`、`src/autopilot/combat.ts` | 无持久状态（战斗过程中的临时状态） | AP-4、AP-5 |
-| M-RFX 反射 | 每刻检查触发条件，选出最高优先级的反射并执行 | 不管理任务；不做长期计划 | `src/autopilot/reflex-engine.ts`、`src/autopilot/reflexes.ts` | 各反射的冷却时间、正在执行的反射 | AP-5 |
+| M-RFX 反射（M9 删除） | 已由 M-INS 本能取代 | — | — | — | — |
 | M-INS 本能（M8） | 注意力门判断何时询问；菜单列出可行选项；决策模型选择；小脑宏执行。没有决策时不动身体 | 不把事件直接映射为行为；不做战斗（M9 迁入） | `src/autopilot/hazards.ts`、`src/autopilot/instinct/*.ts` | 在途请求、正在执行的宏、危险期状态 | AP-5、AP-7 |
 | M-POL 策略 | 策略模式、默认值、校验、合并与硬性安全规则 | 不执行任何动作 | `src/autopilot/policy.ts` | 当前策略 | AP-6 |
 | M-DEC 决策 | 调用 OpenRouter、速率限制、三类决策钩子（聊天筛选、授权玩家的聊天命令、战斗判断）与置信度分级 | 不做运动控制；不生成文字 | `src/decisions/openrouter-client.ts`、`src/decisions/decision-hooks.ts` | 速率窗口、最近一次战斗判断缓存 | AP-7、AP-8 |
@@ -249,13 +249,12 @@ src/main.ts（现有，改动）--创建并注册--> src/autopilot/autopilot.ts�
 │   │   ├── policy.ts                 新增：策略
 │   │   ├── threats.ts                新增：威胁识别
 │   │   ├── combat.ts                 新增：近战控制
-│   │   ├── reflex-engine.ts          新增：反射调度
-│   │   ├── reflexes.ts               新增：反射定义（M8 起 4 个，hazard-escape 移入本能）
 │   │   ├── hazards.ts                新增（M8）：火、岩浆、水的只读判断（F-036）
 │   │   ├── instinct/                 新增（M8，设计 v0.4）
 │   │   │   ├── attention.ts          注意力门：何时询问本能（F-037）
 │   │   │   ├── affordances.ts        菜单：当前可行的选项（F-038）
 │   │   │   ├── macros.ts             小脑宏（F-039）
+│   │   │   ├── motor.ts              宏共用的运动代码（M9，F-042）
 │   │   │   └── instinct-engine.ts    本能引擎（F-040）
 │   │   └── behaviors/
 │   │       ├── target.ts             新增（M1 实现时加入）：行为共用的目标参数与解析
@@ -286,7 +285,7 @@ src/main.ts（现有，改动）--创建并注册--> src/autopilot/autopilot.ts�
 │   ├── policy.test.ts                新增
 │   ├── threats.test.ts               新增
 │   ├── combat.test.ts                新增
-│   ├── reflexes.test.ts              新增
+│   ├── motor.test.ts                 新增（M9）：运动代码、宏与 I1 菜单过滤（从 reflexes.test.ts 移来）
 │   ├── instinct.test.ts              新增（M8，F-041）
 │   ├── hazards.test.ts               新增（M8）：从 reflexes.test.ts 移来的 nearestWater 测试
 │   ├── movement-behaviors.test.ts    新增：follow / flee / return-home
@@ -516,7 +515,7 @@ src/main.ts（现有，改动）--创建并注册--> src/autopilot/autopilot.ts�
 - **失败处理**：寻路失败 → lost；装备失败 → 空手继续；目标中途变为非法（例如被驯服）→ 立即结束为 illegal_target。
 - **验收**：正常：模拟目标在若干次攻击后失效 → killed，攻击间隔不小于冷却。 边界或失败：自身血量降到撤退阈值 → retreated；目标为玩家 → illegal_target 且攻击次数为 0；取消信号 → cancelled，1 刻内不再出手，且不清除（已不属于自己的）寻路目标；被守卫的玩家站在目标旁 → 不用剑出手。 位置：tests/combat.test.ts；scripts/test-scenarios.mjs（计划，未执行）
 
-### F-012 · `src/autopilot/reflex-engine.ts`
+### F-012 · `src/autopilot/reflex-engine.ts`（M9 删除，见 F1-h）
 
 - **模块**：M-RFX 反射　**里程碑**：M3　**状态**：verified　**设计**：已确定：每刻评估、优先级、冷却、超时；耗时目标待实测
 - **职责**：订阅每个游戏刻；按优先级评估已启用反射的触发条件；选出一个触发的反射，按其类别（关键反射 30、日常反射 15）取得身体控制权并执行；日常反射被手动命令打断时记为 interrupted；执行期间继续检查更高优先级的反射，可打断较低优先级的反射；管理冷却与最长时长；写 reflex 事件。
@@ -532,7 +531,7 @@ src/main.ts（现有，改动）--创建并注册--> src/autopilot/autopilot.ts�
 - **实现说明（M3）**：持有者名称为 `reflex <名称>`；同一时刻至多一个反射，排名更高者可打断较低者（同为关键反射时用 `acquireNow` 交接）；日常反射拿不到身体（手动命令或关键反射持有）时静默退避 1 秒；被抢占时立即结束并释放租约，避免仲裁器日后恢复一个无人驱动的租约；结束时只在租约仍有效时先停止身体再释放；bot 死亡时中止当前反射，复活后清除自身残留的着火位与氧气值；30 秒内触发 4 次写一条重复警告事件；记录每刻评估耗时（get-policy 显示）。实测（2026-10-16，实机）：平均 0.05–0.09 毫秒/刻，最大 2.4 毫秒。
 - **实现说明（M7）**：新增可选回调 `onDeath`：bot 死亡时先调用（此时正在执行的反射仍持有身体、被它暂停的任务仍是 paused），再中止反射；src/autopilot/autopilot.ts 用它取消当前任务（原因 “the bot died”），这样任务不会在反射释放身体后被恢复，复活后也不会继续。回调抛错只记日志，不影响引擎。
 
-### F-013 · `src/autopilot/reflexes.ts`
+### F-013 · `src/autopilot/reflexes.ts`（M9 删除，见 F1-h）
 
 - **模块**：M-RFX 反射　**里程碑**：M3（self-defense 的 auto 姿态在 M5 接入决策）　**状态**：verified（M3 反射；M5 auto 姿态接入决策）　**设计**：暂定：触发阈值与时长为默认值，待情景测试调整
 - **职责**：定义 5 个反射，每个包含触发条件、动作、类别、优先级、冷却与最长时长。前三个是关键反射（保命，手动命令不能打断），后两个是日常反射（手动命令可以打断）。按优先级从高到低：1. creeper-evade：7 格内有膨胀中的苦力怕 → 冲刺到 8 格以外，最长 3 秒。2. hazard-escape：着火、在岩浆中或氧气 ≤ 6 → 移到最近的安全方块（在水中则向上），最长 5 秒。3. low-health-retreat：血量低于阈值（默认 6）且 16 格内有敌对生物 → 远离到 16 格以外，有食物时进食，最长 10 秒。4. self-defense：刚被敌对生物攻击 → 按姿态还手（fight）、逃离（flee）或交给决策钩子（auto，等待结果期间按规则默认），最长 20 秒。5. auto-eat：饥饿值低于阈值（默认 14）、8 格内没有敌对生物且有食物 → 进食，最长 3 秒。
@@ -569,6 +568,7 @@ src/main.ts（现有，改动）--创建并注册--> src/autopilot/autopilot.ts�
 - **实现说明（M4）**：chat {triage: true, commandsFrom: [], replyInChat: true}；decisions {enabled: true, model: 固定的默认模型或 --decision-model, actThreshold: 0.85, cautiousThreshold: 0.5, maxCallsPerMinute: 30}。commandsFrom 只接受 Minecraft 用户名（3–16 位字母、数字、下划线），区分大小写，整份替换；只有来源 llm 能设置；每次变化返回一条 notice 写入 policy 事件。cautiousThreshold 不能高于 actThreshold。reset 恢复默认值加启动参数（模型），授权名单清空。
 - **实现说明（M5）**：依据 M5 探测把 decisions.actThreshold 改为 0.95，新增 decisions.combatThreshold（默认 0.6：战斗判断中所选项概率低于此值时按规则）；cautiousThreshold 保持 0.5。观察值见 PLAN M5 记录。
 - **实现说明（M8）**：删除 reflexes.hazardEscape；新增 instinct 分组 {enabled: true, intent: ''（最长 300 字符，只有来源 llm 能设置）, lowAir: 6, reaskMs: 1500（500–10000）, actThreshold: 0.4, urgentThreshold: 0.6, maxCallsPerMinute: 90（1–600）}；两个阈值依据 M8 探测（PLAN M8）。
+- **实现说明（M9）**：删除 reflexes 分组与 decisions.combatThreshold；instinct 分组增加 lowHealth（6）、hostileRadius（16）、food（14）；actThreshold 依据 M9 探测改为 0.3（PLAN M9）。
 
 ### F-015 · `src/decisions/openrouter-client.ts`
 
@@ -585,6 +585,7 @@ src/main.ts（现有，改动）--创建并注册--> src/autopilot/autopilot.ts�
 - **验收**：正常：模拟服务器返回示例响应 → 解析出 noul 与 choice 答案、模型名和延迟。 边界或失败：没有 key → disabled 且未发起请求；模拟 2 秒无响应 → timeout；1 分钟内第 31 次调用 → rate_limited；响应缺少问题答案 → invalid_response；错误信息中不包含 key。 位置：tests/openrouter-client.test.ts（计划，未执行）
 - **实现说明（M4）**：fetch、时钟与 key 读取都可注入（测试不碰网络与环境变量）；超时用计时器与请求赛跑，请求不响应中止信号也能按时结束；只接受选项自身的键（`toString` 不算选项）；`null` 等非对象响应归为 invalid_response；错误正文先去掉 key 再截断（避免截断处漏出半个 key）；服务器省略 confidence 时取最大概率。实测见上面的一手资料与 PLAN M4 记录。
 - **实现说明（M8）**：decide 增加 budget 选项：'instinct' 使用独立的一分钟窗口与 instinct.maxCallsPerMinute，与聊天筛选、战斗判断的窗口互不占用；status 增加 instinctCallsLastMinute。
+- **实现说明（M9）**：新增 warmUp：bot 进入游戏时，若有 key 且 decisions.enabled，发一次免费的模型目录 GET 来提前建立连接（DNS、TLS），错误忽略。原因：进程的第一次决策请求慢约 0.35 秒（实测约 1.0–1.24 秒对平时约 0.65 秒），苦力怕 1.5 秒的引信等不起；加入后 creeper-ambush 5 轮由 1/5 通过变为 5/5（PLAN M9）。这是新的联网副作用：每次 bot 进入游戏一次请求，不产生费用。
 
 ### F-016 · `src/decisions/decision-hooks.ts`
 
@@ -722,7 +723,7 @@ src/main.ts（现有，改动）--创建并注册--> src/autopilot/autopilot.ts�
 - **失败处理**：断言失败时给出具体的期望与实际值。
 - **验收**：正常：模拟目标在若干次攻击后失效 → killed；两次出手间隔不小于冷却；结束后没有残留寻路目标。 边界或失败：血量降到撤退阈值 → retreated；目标为玩家 → illegal_target 且未出手；取消 → cancelled，不再出手且不触碰身体（由当前租约持有者停止，见 G4）；目标走出追击距离 → out_of_range；装备失败时空手继续。 位置：tests/combat.test.ts（本文件）（计划，未执行）
 
-### F-025 · `tests/reflexes.test.ts`
+### F-025 · `tests/reflexes.test.ts`（M9 删除，测试移到 tests/motor.test.ts、tests/instinct.test.ts、tests/autopilot.test.ts）
 
 - **模块**：M-VER 验证　**里程碑**：M3　**状态**：verified　**设计**：已确定：覆盖范围；具体样例随实现补充，不能照抄实现行为
 - **职责**：验证 src/autopilot/reflex-engine.ts 与 src/autopilot/reflexes.ts 的契约行为。
@@ -1006,7 +1007,7 @@ src/main.ts（现有，改动）--创建并注册--> src/autopilot/autopilot.ts�
 
 ### F-042 · `src/autopilot/instinct/motor.ts`
 
-- **模块**：M-INS 本能　**里程碑**：M9　**状态**：placeholder　**设计**：已确定：从 reflexes.ts 移来的、已实机验证的运动代码
+- **模块**：M-INS 本能　**里程碑**：M9　**状态**：implemented-unverified（单元测试与全量实机测试通过；情景验收见 PLAN M9）　**设计**：已确定：从 reflexes.ts 移来的、已实机验证的运动代码
 - **职责**：宏共用的运动代码：
   - runAway：第一刻就用按键冲刺离开一组位置，检查前方两格（含对角线两侧）是否安全：不进岩浆、火、仙人掌、蜘蛛网，不跳上 1.5 格高的栅栏或墙，落差不超过 3。没有安全方向或卡住 1 秒时，改由寻路器接手 2 秒。
   - bestFood：挑最好的安全食物，不吃腐肉、蜘蛛眼、毒马铃薯、河豚、生鸡肉、紫颂果、金苹果、附魔金苹果、金胡萝卜、迷之炖菜。
@@ -1014,14 +1015,14 @@ src/main.ts（现有，改动）--创建并注册--> src/autopilot/autopilot.ts�
   - holdGround：原地不动，目标进入攻击距离时才出手，不追击、不逃跑；目标离开 16 格或消失时结束。
 - **不负责**：不判断做什么。
 - **依赖**：src/autopilot/hazards.ts、src/autopilot/combat.ts、src/autopilot/task-manager.ts（delay）、minecraft-data。
-- **验收**：tests/motor.test.ts（从 reflexes.test.ts 移来，断言不变）：逃跑不进岩浆、不跳下高处、不撞栅栏和蜘蛛网，卡住时交给寻路器；进食避开有害食物，被取消时停止并换回原物品；holdGround 不追击。
+- **验收**：tests/motor.test.ts（从 reflexes.test.ts 移来；与运动有关的断言不变，与租约、reflex 事件、停身体有关的断言随反射引擎删除，由 tests/instinct.test.ts 中本能引擎的测试承接）：逃跑不进岩浆、不跳下高处、不撞栅栏和蜘蛛网，卡住时交给寻路器；进食避开有害食物，被取消时停止并换回原物品；holdGround 不追击。
 
 ### F-036～F-040 的 M9 变化
 
 - **F-037 注意力门**：
   - **新信号**：
     - creeper_swelling：7 格内有正在膨胀或已点燃的苦力怕。
-    - creeper_near：10 格内有苦力怕，但没在膨胀。目的是提前问，给决策留出时间（Q11）。
+    - creeper_near：10 格内有苦力怕，但不在 7 格内膨胀（说明里写明它是否在膨胀）。目的是提前问，给决策留出时间（Q11）。
     - attacked：3 秒内被实体攻击过（来自 E-005 的受伤信息）。如果 bot 已经在和这个攻击者战斗（例如守卫任务正在打它），这不是新的危险，不算信号。
     - low_health：血量低于 instinct.lowHealth（默认 6），或不高于 combat.retreatHealth，且 instinct.hostileRadius（默认 16）格内有敌对生物。
     - hungry：饥饿值低于 instinct.food（默认 14），且身上有能吃的安全食物。
@@ -1033,7 +1034,7 @@ src/main.ts（现有，改动）--创建并注册--> src/autopilot/autopilot.ts�
     - run_from_creeper：冲刺到离苦力怕 8 格以外。
     - flee：跑到 16 格内没有攻击者和敌对生物为止。
     - fight：用最好的武器打攻击者，或最近的合法敌对生物；血量 ≤ combat.retreatHealth 时脱离。
-    - hold：原地防守。
+    - hold：原地防守；目标不合法时失败，而不是报告成功。
     - eat：吃最好的安全食物。
   - **安全过滤（I1）**：
     - fight 与 hold 只针对 checkTarget 合法的目标。
@@ -1044,7 +1045,7 @@ src/main.ts（现有，改动）--创建并注册--> src/autopilot/autopilot.ts�
   - 新增 run_from_creeper（最长 4 秒）、flee（最长 10 秒）、fight（最长 20 秒，调用 combat.engage）、hold（最长 20 秒）、eat（最长 5 秒）。
   - 宏的上下文增加实体 id 与当前策略。
 - **F-040 本能引擎**：
-  - **新信号可以顶替在途请求**：信号原因为 new 时，即使已有请求在途也立即再发一个，只有最新一个请求的答复能执行。被顶替的答复只记录（事件里写 superseded），不执行。这样一次“被攻击”的请求不会挡住刚点燃的苦力怕。reask 与 action_ended 仍然等在途请求结束。
+  - **更紧急的新信号可以顶替在途请求**：信号原因为 new，且新信号比在途请求中的所有信号都更紧急时，立即再发一个请求，只有最新一个请求的答复能执行。被顶替的答复只记录（事件里写 superseded），不执行。这样一次“被攻击”的请求不会挡住刚点燃的苦力怕。紧急程度的顺序（attention.ts 的 CUE_URGENCY，只用于决定何时询问，不决定做什么）：creeper_swelling、in_lava、trapped_underwater、low_air、low_health、on_fire、attacked、creeper_near、hungry。不够紧急的新信号，以及 reask 与 action_ended，都等在途请求结束。实机发现（M9）：不加这个限制时，“着火”顶替了正在途中的苦力怕请求，答复被丢弃，苦力怕在新答复到达前就爆炸了。
   - **受伤信息**：noteDamage 接收受伤信息（攻击者 id、伤害类型、时间），供 attacked 信号使用。
   - **复活清理**：从反射引擎移来。死亡后复活时，清除 bot 自己残留的着火位，并把氧气重置为 300；否则本能会对已经不存在的着火和缺氧继续提问。
   - **死亡顺序**：新增可选回调 onDeath。死亡时在自己的处理里先调用它，再中止宏；src/autopilot/autopilot.ts 用它取消任务（the bot died）。不再依赖监听器的注册顺序。
@@ -1085,16 +1086,15 @@ src/main.ts（现有，改动）--创建并注册--> src/autopilot/autopilot.ts�
 
 | 优先级 | 数值 | 持有者 | 可以抢占 | 被抢占者之后 |
 |---|---|---|---|---|
-| 关键反射 | 30 | `src/autopilot/reflex-engine.ts`：creeper-evade、hazard-escape、low-health-retreat | 手动、日常反射、任务 | 反射结束后自动恢复 |
-| 紧急本能（M8） | 30 | `src/autopilot/instinct/instinct-engine.ts`：决策模型判为 urgent 的动作 | 手动、日常反射、任务（与关键反射同级，互不抢占） | 动作结束后任务自动恢复 |
-| 手动 | 20 | `src/tool-factory.ts` 中的身体类工具调用（LLM 的直接命令） | 日常反射、任务 | 被挂起，不自动恢复：任务等待 resume-task / cancel-task；日常反射记为 interrupted 并进入冷却 |
-| 日常反射 | 15 | `src/autopilot/reflex-engine.ts`：self-defense、auto-eat | 任务 | 反射结束后自动恢复 |
-| 本能（M8） | 15 | `src/autopilot/instinct/instinct-engine.ts`：不紧急的动作 | 任务（与日常反射同级，互不抢占） | 动作结束后任务自动恢复；本能选 suspend_task / ask_llm 时任务被挂起，等 resume-task |
+| 紧急本能 | 30 | `src/autopilot/instinct/instinct-engine.ts`：决策模型判为 urgent 的动作（M8 起；M9 起反射全部删除） | 手动、本能、任务 | 动作结束后任务自动恢复，除非模型要求先交给 LLM |
+| 手动 | 20 | `src/tool-factory.ts` 中的身体类工具调用（LLM 的直接命令） | 本能、任务 | 被挂起，不自动恢复：任务等待 resume-task / cancel-task；被打断的本能动作记为 interrupted |
+| 本能 | 15 | `src/autopilot/instinct/instinct-engine.ts`：不紧急的动作 | 任务 | 动作结束后任务自动恢复；本能选 suspend_task / ask_llm、或 resume_task 答“否”时任务被挂起，等 resume-task |
 | 任务 | 10 | `src/autopilot/task-manager.ts` | 无 | — |
 
 - “身体”指 pathfinder、按键状态、视角、攻击、使用或切换手中物品。只读工具、背包整理（丢弃、卸下装备）和聊天不需要租约（暂定）。
-- 被抢占者收到暂停通知后必须在 1 刻内停止发出动作；反射释放后，被暂停者按后进先出顺序恢复；手动命令抢占的持有者不进入恢复栈。
-- 手动命令遇到关键反射时排队等待，最长 10 秒；结果中说明等待的反射与时长。
+- 被抢占者收到暂停通知后必须在 1 刻内停止发出动作；本能动作释放后，被暂停者按后进先出顺序恢复；手动命令抢占的持有者不进入恢复栈。
+- 手动命令遇到紧急本能动作时排队等待，最长 10 秒；结果中说明等待的动作与时长。
+- 常量名（M9）：PRIORITY.URGENT_INSTINCT 30、MANUAL 20、INSTINCT 15、TASK 10；抢占者类型 'instinct' | 'manual'。
 - 没有租约的代码不得设置 pathfinder 目标或按键状态。
 
 ### G2. 任务状态迁移
@@ -1140,12 +1140,12 @@ done / failed / cancelled 为终态，不能再改变
 
 | 编号 | 不变量 | 保证位置 | 测试 |
 |---|---|---|---|
-| I1 | 除非策略显式开启 `combat.attackPlayers`，任何代码路径都不会攻击玩家 | `src/autopilot/threats.ts`、`src/autopilot/combat.ts` | `tests/threats.test.ts`、`tests/combat.test.ts`、`tests/reflexes.test.ts` |
+| I1 | 除非策略显式开启 `combat.attackPlayers`，任何代码路径都不会攻击玩家 | `src/autopilot/threats.ts`、`src/autopilot/combat.ts` | `tests/threats.test.ts`、`tests/combat.test.ts`、`tests/motor.test.ts`（M9：本能的 fight / hold 永不针对玩家，即使开启 attackPlayers） |
 | I2 | 来自聊天的内容不能修改策略或授权名单；默认（无人授权）时聊天不会直接改变 bot 的行为；被授权玩家的聊天也只能启动安全清单内的行为 | `src/decisions/decision-hooks.ts`、`src/autopilot/policy.ts` | `tests/decision-hooks.test.ts`、`tests/policy.test.ts` |
 | I3 | 同一时刻至多一个主体控制 bot 身体 | `src/autopilot/action-arbiter.ts` | `tests/action-arbiter.test.ts` |
 | I4 | OpenRouter API key 不出现在任何日志、事件、错误或工具输出中 | `src/decisions/openrouter-client.ts`、`src/tools/policy-tools.ts` | `tests/openrouter-client.test.ts`、`tests/policy-tools.test.ts` |
 | I5 | 没有 key 或决策失败时，反射与任务的功能不受影响。M8 起（设计 v0.4，用户决定）：本能在这些情况下不动身体，只写 instinct 事件，交给 LLM | `src/autopilot/autopilot.ts`、`src/decisions/decision-hooks.ts`、`src/autopilot/instinct/instinct-engine.ts` | `tests/autopilot.test.ts`、`tests/decision-hooks.test.ts`、`tests/instinct.test.ts` |
-| I6 | 每刻的反射评估、注意力门与菜单构建不等待网络或磁盘（决策请求在后台进行，同一时刻至多一个） | `src/autopilot/reflex-engine.ts`、`src/autopilot/instinct/attention.ts`、`src/autopilot/instinct/instinct-engine.ts` | `tests/reflexes.test.ts`、`tests/instinct.test.ts` |
+| I6 | 注意力门与菜单构建不等待网络或磁盘；决策请求在后台进行，通常同一时刻至多一个，新信号可以顶替（只有最新的答复能执行） | `src/autopilot/instinct/attention.ts`、`src/autopilot/instinct/instinct-engine.ts` | `tests/instinct.test.ts` |
 
 ### G7. 决策模型的使用规则
 

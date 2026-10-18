@@ -218,7 +218,7 @@ export class TaskManager {
     return { ok: true, task: { ...record } };
   }
 
-  /** Resume a task that a manual command suspended. Tasks paused by reflexes resume on their own. */
+  /** Resume a task that a manual command suspended. Tasks paused by the instinct resume on their own. */
   resume(id?: string): StartResult {
     const task = this.current;
     if (!task || (id && task.record.id !== id)) {
@@ -262,7 +262,7 @@ export class TaskManager {
     }
     this.finish(task, 'cancelled', reason);
     task.controller.abort(new TaskCancelled(reason));
-    // Only stop the body if this task was driving it; otherwise a manual command or reflex owns it now.
+    // Only stop the body if this task was driving it; otherwise a manual command or the instinct owns it now.
     if (task.lease?.isActive()) this.stopBody();
     task.lease?.release();
     await Promise.race([task.finished, new Promise(resolve => setTimeout(resolve, CANCEL_GRACE_MS))]);

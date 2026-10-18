@@ -206,7 +206,7 @@ export async function engage(bot: mineflayer.Bot, target: BotEntity, options: En
     if (activeTargets.get(bot) === target.id) activeTargets.delete(bot);
     bot.removeListener?.('entityDead', onDead);
     bot.removeListener?.('entityHurt', onHurt);
-    // A cancelled fight no longer owns the body: after a pause it belongs to a manual command or reflex, and a
+    // A cancelled fight no longer owns the body: after a pause it belongs to a manual command or the instinct, and a
     // cancelled task is stopped by the task manager. Stopping here would break their pathfinder goal (G1, G4).
     if (outcome !== 'cancelled') {
       try {

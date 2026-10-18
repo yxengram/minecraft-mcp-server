@@ -98,7 +98,7 @@ export const gatherBehavior: BehaviorDefinition<GatherParams, BlockInfo> = {
                 if (!digging || digging.equals(target)) bot.stopDigging?.();
               }
             );
-            // Interrupted by a reflex or a command: look for a target again once the task runs again.
+            // Interrupted by the instinct or a command: look for a target again once the task runs again.
             if (!attempt.done) continue;
             result = attempt.value;
           }

@@ -1,7 +1,8 @@
 // Verifies docs/BLUEPRINT.md F-031 against the F-018 contract (src/tools/policy-tools.ts), together with the policy
 // parts of F-001 (reset to defaults with a policy event whenever the bot (re)joins; idempotent bind/unbind without
 // leftover listeners), F-014 (partial updates, all-or-nothing validation, attackPlayers warning) and invariant I4 (G6).
-// The policy text format is tentative (F-018), so the tests only check the facts each line must show.
+// The policy text format is tentative (F-018), so the tests only check the facts each line must show. Since M9 (E-012)
+// there is no reflexes group and no reflex engine: get-policy reports the instinct's per-tick checks instead.
 import test from 'ava';
 import sinon from 'sinon';
 import { EventEmitter } from 'node:events';
@@ -11,6 +12,7 @@ import { Autopilot, AutopilotOptions } from '../src/autopilot/autopilot.js';
 import { DEFAULT_POLICY } from '../src/autopilot/policy.js';
 import { EventStore } from '../src/event-store.js';
 import { registerPolicyTools } from '../src/tools/policy-tools.js';
+import { DECISIONS_URL } from '../src/decisions/openrouter-client.js';
 import { createFactory } from './_helpers.js';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
@@ -20,9 +22,7 @@ import type { BotConnection } from '../src/bot-connection.js';
 
 const VERSION = '1.21.8';
 const registry = minecraftData(VERSION);
-const REFLEX_KEYS = ['creeperEvade', 'lowHealthRetreat', 'selfDefense', 'autoEat'] as const;
-
-/** A bot with real events (so the reflex engine subscribes), standing safely in the open with bread in its inventory. */
+/** A bot with real events (so the instinct subscribes), standing safely in the open with bread in its inventory. */
 function fakeBot({ food = 20, lavaAtFeet = false } = {}) {
   let finishEating: (() => void) | null = null;
   const self = { id: 1, type: 'player', username: 'ClaudeBot', position: new Vec3(0, 64, 0), metadata: [] as unknown[] };
@@ -49,7 +49,7 @@ function fakeBot({ food = 20, lavaAtFeet = false } = {}) {
     setControlState: sinon.stub(),
     lookAt: sinon.stub().resolves(),
     equip: sinon.stub().resolves(),
-    // Eating lasts until it is cut short, so a started auto-eat stays visible as the running reflex.
+    // Eating lasts until it is cut short, so a started meal stays visible while it runs.
     consume: sinon.stub().callsFake(() => new Promise<void>(resolve => { finishEating = resolve; })),
     deactivateItem: sinon.stub().callsFake(() => finishEating?.())
   });
@@ -75,7 +75,7 @@ function setup({ bind = true, decisions, lavaAtFeet = false }: { bind?: boolean;
   return { events, autopilot, bot, call, policyEvents };
 }
 
-/** The lines of a tool reply that name `key` (e.g. "autoEat"). */
+/** The lines of a tool reply that name `key` (e.g. "retreatHealth"). */
 function linesOf(text: string, key: string): string[] {
   return text.split('\n').filter(line => new RegExp(`\\b${key}\\b`).test(line));
 }
@@ -85,11 +85,21 @@ function lineOf(text: string, key: string): string {
   return linesOf(text, key)[0] ?? `<no line for ${key}>`;
 }
 
-/** The self-defense stance as shown by the policy text (the line also explains the reflex, which mentions fleeing). */
-const STANCE = (stance: string) => new RegExp(`stance\\W+${stance}\\b`);
+/** The instinct part of the policy text: from its "Instinct (" header up to the "Combat:" header. */
+function instinctSection(text: string): string {
+  const start = text.indexOf('Instinct (');
+  if (start < 0) return '';
+  const end = text.indexOf('\nCombat:', start);
+  return text.slice(start, end < 0 ? undefined : end);
+}
 
 const ON = /\b(on|enabled|true)\b/;
 const OFF = /\b(off|disabled|false)\b/;
+
+/** How many decision requests a fake fetch got (other requests, such as the model catalog, do not count). */
+function decisionRequests(fetch: sinon.SinonStub): number {
+  return fetch.getCalls().filter(call => call.args[0] === DECISIONS_URL).length;
+}
 
 /** The numbers a line shows, so thresholds can be checked without fixing the wording around them. */
 function numbersIn(line: string): number[] {
@@ -105,87 +115,76 @@ test('both policy tools are registered', (t) => {
   t.truthy(getTool('set-policy'));
 });
 
-test('get-policy shows the default policy: every reflex on, stance auto, players never attacked, neutral mobs avoided', async (t) => {
+test('get-policy shows the default policy: the instinct on with its cue thresholds, players never attacked, neutral mobs avoided, no reflexes', async (t) => {
   const { call, autopilot } = setup();
 
   const { text, isError } = await call('get-policy');
 
   t.false(isError);
   t.deepEqual(autopilot.policy.get(), DEFAULT_POLICY);
-  for (const key of REFLEX_KEYS) {
-    t.regex(lineOf(text, key), ON, `${key} should be on by default`);
-    t.notRegex(lineOf(text, key), OFF, `${key} should not be shown as off`);
+  const instinct = instinctSection(text);
+  t.regex(instinct, ON, `the instinct is on by default: ${instinct}`);
+  t.notRegex(instinct, OFF);
+  const i = DEFAULT_POLICY.instinct;
+  for (const value of [i.lowAir, i.lowHealth, i.hostileRadius, i.food]) {
+    t.true(numbersIn(instinct).includes(value), `the instinct section shows ${value}: ${instinct}`);
   }
-  const d = DEFAULT_POLICY.reflexes;
-  t.true(numbersIn(lineOf(text, 'lowAir')).includes(DEFAULT_POLICY.instinct.lowAir), 'the instinct low-air threshold');
-  t.true(numbersIn(lineOf(text, 'lowHealthRetreat')).includes(d.lowHealthRetreat.health));
-  t.true(numbersIn(lineOf(text, 'lowHealthRetreat')).includes(d.lowHealthRetreat.radius));
-  t.true(numbersIn(lineOf(text, 'autoEat')).includes(d.autoEat.food));
-  t.regex(lineOf(text, 'selfDefense'), STANCE('auto'));
   t.regex(lineOf(text, 'attackPlayers'), /\bfalse\b|\boff\b/);
   t.regex(lineOf(text, 'avoidNeutral'), /\btrue\b|\bon\b/);
   t.true(numbersIn(lineOf(text, 'retreatHealth')).includes(DEFAULT_POLICY.combat.retreatHealth));
+  t.notRegex(text, /reflex|selfDefense|autoEat|stance|combatThreshold/i, 'nothing about the removed reflexes or combat judgment');
 });
 
-test('set-policy turning autoEat off is shown by get-policy at once and writes a policy event', async (t) => {
+test('set-policy turning the instinct off is shown by get-policy at once and writes a policy event', async (t) => {
   const { call, autopilot, policyEvents } = setup();
   const before = policyEvents().length;
 
-  const set = await call('set-policy', { reflexes: { autoEat: { enabled: false } } });
+  const set = await call('set-policy', { instinct: { enabled: false } });
   const { text } = await call('get-policy');
 
   t.false(set.isError);
-  t.regex(set.text, /autoEat/, 'the reply says what changed');
-  t.true(linesOf(set.text, 'autoEat').some(line => OFF.test(line)), `the reply carries the updated summary: ${set.text}`);
-  t.regex(lineOf(text, 'autoEat'), OFF);
-  t.true(numbersIn(lineOf(text, 'autoEat')).includes(DEFAULT_POLICY.reflexes.autoEat.food), 'the food threshold keeps its value');
-  for (const key of REFLEX_KEYS.filter(k => k !== 'autoEat')) {
-    t.regex(lineOf(text, key), ON, `${key} is untouched`);
-  }
-  t.deepEqual(autopilot.policy.get(), {
-    ...DEFAULT_POLICY,
-    reflexes: { ...DEFAULT_POLICY.reflexes, autoEat: { ...DEFAULT_POLICY.reflexes.autoEat, enabled: false } }
-  });
+  t.regex(set.text, /instinct\.enabled/, 'the reply says what changed');
+  t.regex(instinctSection(set.text), OFF, `the reply carries the updated summary: ${set.text}`);
+  t.regex(instinctSection(text), OFF);
+  t.true(numbersIn(instinctSection(text)).includes(DEFAULT_POLICY.instinct.food), 'the food threshold keeps its value');
+  t.deepEqual(autopilot.policy.get(), { ...DEFAULT_POLICY, instinct: { ...DEFAULT_POLICY.instinct, enabled: false } });
   const added = policyEvents().slice(before);
   t.true(added.length >= 1, 'a policy event is written');
-  t.true(added.some(message => message.includes('autoEat')), `policy events: ${JSON.stringify(added)}`);
+  t.true(added.some(message => message.includes('instinct.enabled')), `policy events: ${JSON.stringify(added)}`);
 });
 
 test('set-policy changes several fields in one call and leaves every other field alone', async (t) => {
   const { call, autopilot } = setup();
 
   const set = await call('set-policy', {
-    reflexes: { selfDefense: { stance: 'flee' }, lowHealthRetreat: { health: 8 } },
+    instinct: { lowHealth: 8, hostileRadius: 12 },
     combat: { retreatHealth: 9 }
   });
 
   t.false(set.isError);
-  for (const path of ['selfDefense', 'lowHealthRetreat', 'retreatHealth']) t.true(set.text.includes(path), `reply names ${path}`);
+  for (const path of ['instinct.lowHealth', 'instinct.hostileRadius', 'combat.retreatHealth']) t.true(set.text.includes(path), `reply names ${path}`);
   t.deepEqual(autopilot.policy.get(), {
-    reflexes: {
-      ...DEFAULT_POLICY.reflexes,
-      selfDefense: { enabled: true, stance: 'flee' },
-      lowHealthRetreat: { ...DEFAULT_POLICY.reflexes.lowHealthRetreat, health: 8 }
-    },
-    instinct: DEFAULT_POLICY.instinct,
+    instinct: { ...DEFAULT_POLICY.instinct, lowHealth: 8, hostileRadius: 12 },
     combat: { ...DEFAULT_POLICY.combat, retreatHealth: 9 },
     chat: DEFAULT_POLICY.chat,
     decisions: DEFAULT_POLICY.decisions
   });
   const { text } = await call('get-policy');
-  t.regex(lineOf(text, 'selfDefense'), STANCE('flee'));
-  t.true(numbersIn(lineOf(text, 'lowHealthRetreat')).includes(8));
+  t.true(numbersIn(instinctSection(text)).includes(8), text);
+  t.true(numbersIn(instinctSection(text)).includes(12), text);
   t.true(numbersIn(lineOf(text, 'retreatHealth')).includes(9));
 });
 
 const rejected: [string, Record<string, unknown>, string][] = [
-  ['an unknown field next to a valid change', { reflexes: { autoEat: { enabled: false, speed: 2 } } }, 'speed'],
-  ['an unknown reflex', { reflexes: { danceParty: { enabled: true } } }, 'danceParty'],
+  ['an unknown field next to a valid change', { instinct: { enabled: false, speed: 2 } }, 'speed'],
+  ['the removed reflexes group (M9)', { reflexes: { autoEat: { enabled: false } } }, 'reflexes'],
+  ['the removed reflexes group next to a valid instinct change (M9)', { instinct: { food: 10 }, reflexes: { selfDefense: { stance: 'flee' } } }, 'reflexes'],
+  ['the removed decisions.combatThreshold (M9)', { decisions: { combatThreshold: 0.5 } }, 'combatThreshold'],
   ['an unknown combat rule next to attackPlayers', { combat: { attackPlayers: true, friendlyFire: true } }, 'friendlyFire'],
   ['an unknown top-level group', { chaos: { level: 3 } }, 'chaos'],
-  ['a food threshold above 20', { reflexes: { autoEat: { food: 25 } } }, 'food'],
-  ['a radius below 1', { reflexes: { lowHealthRetreat: { radius: 0 } } }, 'radius'],
-  ['an unknown stance', { reflexes: { selfDefense: { stance: 'berserk' } } }, 'stance']
+  ['a food threshold above 20', { instinct: { food: 25 } }, 'food'],
+  ['a lowHealth above 20', { instinct: { lowHealth: 21 } }, 'lowHealth'],
+  ['a hostileRadius below 1', { instinct: { hostileRadius: 0 } }, 'hostileRadius']
 ];
 
 for (const [title, args, field] of rejected) {
@@ -241,18 +240,18 @@ test('turning attackPlayers on writes a warning policy event and the reply carri
 
 test('set-policy with values that are already set reports that nothing changed and writes no event', async (t) => {
   const { call, autopilot, policyEvents } = setup();
-  await call('set-policy', { reflexes: { autoEat: { food: 10 } } });
+  await call('set-policy', { instinct: { food: 10 } });
   const eventsBefore = policyEvents();
 
-  const defaults = await call('set-policy', { reflexes: { creeperEvade: { enabled: true }, selfDefense: { stance: 'auto' } }, combat: { avoidNeutral: true } });
-  const same = await call('set-policy', { reflexes: { autoEat: { food: 10 } } });
+  const defaults = await call('set-policy', { instinct: { enabled: true, lowHealth: 6 }, combat: { avoidNeutral: true } });
+  const same = await call('set-policy', { instinct: { food: 10 } });
 
   for (const result of [defaults, same]) {
     t.false(result.isError, result.text);
     t.regex(result.text, /nothing (was )?changed|no change|unchanged/i);
   }
   t.deepEqual(policyEvents(), eventsBefore);
-  t.is(autopilot.policy.get().reflexes.autoEat.food, 10);
+  t.is(autopilot.policy.get().instinct.food, 10);
 });
 
 test('the first bind writes a policy event that the policy starts from its defaults', (t) => {
@@ -266,7 +265,7 @@ for (const via of ['a disconnect and reconnect', 'a direct rebind'] as const) {
   test(`binding a new bot after ${via} resets a changed policy to its defaults and writes "policy reset to defaults"`, async (t) => {
     const { call, autopilot, policyEvents } = setup();
     await call('set-policy', {
-      reflexes: { autoEat: { enabled: false }, selfDefense: { stance: 'flee' } },
+      instinct: { enabled: false, food: 3 },
       combat: { attackPlayers: true, retreatHealth: 3 }
     });
     t.notDeepEqual(autopilot.policy.get(), DEFAULT_POLICY);
@@ -277,9 +276,9 @@ for (const via of ['a disconnect and reconnect', 'a direct rebind'] as const) {
 
     t.deepEqual(autopilot.policy.get(), DEFAULT_POLICY);
     const { text } = await call('get-policy');
-    t.regex(lineOf(text, 'autoEat'), ON);
+    t.regex(instinctSection(text), ON);
+    t.true(numbersIn(instinctSection(text)).includes(DEFAULT_POLICY.instinct.food));
     t.regex(lineOf(text, 'attackPlayers'), /\bfalse\b|\boff\b/);
-    t.regex(lineOf(text, 'selfDefense'), STANCE('auto'));
     const messages = policyEvents();
     t.true(messages.at(-1)!.startsWith('policy reset to defaults'), `last policy event: ${messages.at(-1)}`);
     t.is(messages.filter(message => message.startsWith('policy reset to defaults')).length, 2, 'one per bind');
@@ -289,22 +288,23 @@ for (const via of ['a disconnect and reconnect', 'a direct rebind'] as const) {
 test('binding the same bot again keeps the policy and a single set of tick listeners', async (t) => {
   const { call, autopilot, bot, policyEvents } = setup();
   t.teardown(() => autopilot.unbind('test finished'));
-  await call('set-policy', { reflexes: { autoEat: { enabled: false } } });
-  const engine = autopilot.reflexes;
+  await call('set-policy', { instinct: { food: 3 } });
+  const engine = autopilot.instinct;
 
   autopilot.bind(bot as never);
 
-  t.false(autopilot.policy.get().reflexes.autoEat.enabled, 'a repeated ready callback is not a rejoin');
+  t.is(autopilot.policy.get().instinct.food, 3, 'a repeated ready callback is not a rejoin');
   t.is(policyEvents().filter(message => message.startsWith('policy reset to defaults')).length, 1);
-  t.is(autopilot.reflexes, engine);
-  // One each for the reflex engine and the instinct (M8).
-  t.is(bot.listenerCount('physicsTick'), 2);
-  t.is(bot.listenerCount('death'), 2);
+  t.is(autopilot.instinct, engine);
+  // Only the instinct follows the bot since M9.
+  t.is(bot.listenerCount('physicsTick'), 1);
+  t.is(bot.listenerCount('death'), 1);
+  t.is(bot.listenerCount('spawn'), 1);
   bot.emit('physicsTick');
-  t.is(autopilot.reflexes.timing().ticks, 1, 'one evaluation per game tick');
+  t.is(autopilot.instinct.status().timing.ticks, 1, 'one evaluation per game tick');
 });
 
-test('after bind every game tick reaches the reflex engine, and get-policy reports the checks', async (t) => {
+test('after bind every game tick reaches the instinct, and get-policy reports its checks', async (t) => {
   const { autopilot, bot, call } = setup();
   t.teardown(() => autopilot.unbind('test finished'));
 
@@ -312,10 +312,11 @@ test('after bind every game tick reaches the reflex engine, and get-policy repor
   bot.emit('physicsTick');
   bot.emit('physicsTick');
 
-  t.is(autopilot.reflexes.timing().ticks, 3);
-  t.is(autopilot.reflexes.current(), null);
+  t.is(autopilot.instinct.status().timing.ticks, 3);
+  t.is(autopilot.instinct.status().running, null);
   const { text } = await call('get-policy');
-  t.true(numbersIn(lineOf(text, 'ticks')).includes(3), `get-policy: ${text}`);
+  t.regex(text, /^Instinct checks: 3 ticks, \d+(\.\d+)? ms on average, \d+(\.\d+)? ms at most$/m, `get-policy: ${text}`);
+  t.notRegex(text, /Reflex/, 'no reflex lines any more');
 });
 
 function listenerTotal(bot: FakeBot): number {
@@ -325,12 +326,13 @@ function listenerTotal(bot: FakeBot): number {
 test('unbind removes every listener the autopilot added to the bot, and later ticks do nothing', (t) => {
   const { autopilot, bot } = setup({ bind: false });
   autopilot.bind(bot as never);
-  t.is(bot.listenerCount('physicsTick'), 2, 'the reflex engine and the instinct');
+  t.is(bot.listenerCount('physicsTick'), 1, 'the instinct');
 
   autopilot.unbind('disconnected');
 
   t.is(bot.listenerCount('physicsTick'), 0);
   t.is(bot.listenerCount('death'), 0);
+  t.is(bot.listenerCount('spawn'), 0);
   t.is(listenerTotal(bot), 0);
   t.notThrows(() => bot.emit('physicsTick'));
   t.false(autopilot.isReady());
@@ -344,7 +346,7 @@ test('binding a new bot leaves no listeners on the old one', (t) => {
   t.teardown(() => autopilot.unbind('test finished'));
 
   t.is(listenerTotal(first), 0);
-  t.is(second.listenerCount('physicsTick'), 2);
+  t.is(second.listenerCount('physicsTick'), 1);
 });
 
 test('noteDamage before any bot is bound, or after unbind, does not throw', (t) => {
@@ -358,24 +360,25 @@ test('noteDamage before any bot is bound, or after unbind, does not throw', (t) 
   t.notThrows(() => autopilot.noteDamage({ attackerId: 5, type: 'mob_attack', time: Date.now() }));
 });
 
-test('the reflex engine follows a set-policy change on its next tick', async (t) => {
-  const { autopilot, bot, call } = setup();
+test('the instinct follows a set-policy change on its next tick', async (t) => {
+  const fetch = sinon.stub().rejects(new Error('no network in tests'));
+  const { autopilot, bot, call } = setup({ decisions: { getKey: () => 'sk-or-v1-FAKE-policy-tools-next-tick', fetch } });
   t.teardown(() => autopilot.unbind('test finished'));
 
-  await call('set-policy', { reflexes: { autoEat: { enabled: false } } });
+  await call('set-policy', { instinct: { enabled: false } });
+  // Hungry (food 5 below 14) with bread in the bag: a cue the instinct would ask about.
   bot.food = 5;
   bot.emit('physicsTick');
 
-  t.is(autopilot.reflexes.current(), null, 'auto-eat is off');
+  t.is(decisionRequests(fetch), 0, 'the instinct is off: nobody is asked');
   t.is(autopilot.arbiter.holder(), null);
   t.false(bot.equip.called);
 
-  await call('set-policy', { reflexes: { autoEat: { enabled: true } } });
+  await call('set-policy', { instinct: { enabled: true } });
   bot.emit('physicsTick');
 
-  t.is(autopilot.reflexes.current()?.name, 'auto-eat', 'turned back on, the hungry bot starts eating');
-  t.is(autopilot.arbiter.holder()?.holder, 'reflex auto-eat');
-  t.regex((await call('get-policy')).text, /auto-eat/, 'get-policy names the running reflex');
+  t.is(decisionRequests(fetch), 1, 'turned back on, the hungry bot asks the decision model on the next tick');
+  t.is(autopilot.arbiter.holder(), null, 'nothing acts without an answer');
 });
 
 test.serial('policy tool output and policy events never contain the OpenRouter API key (I4)', async (t) => {
@@ -391,7 +394,7 @@ test.serial('policy tool output and policy events never contain the OpenRouter A
   const outputs = [
     await call('get-policy'),
     await call('set-policy', { combat: { attackPlayers: true } }),
-    await call('set-policy', { reflexes: { autoEat: { food: 99 } } }),
+    await call('set-policy', { instinct: { food: 99 } }),
     await call('set-policy', {}),
     await call('get-policy')
   ];
@@ -407,14 +410,14 @@ test.serial('policy tool output and policy events never contain the OpenRouter A
 /** A bound setup whose policy is already off the defaults, so "unchanged" cannot pass by coincidence. */
 async function setupOffDefaults() {
   const context = setup();
-  const set = await context.call('set-policy', { reflexes: { autoEat: { food: 10 } }, combat: { retreatHealth: 8 } });
+  const set = await context.call('set-policy', { instinct: { food: 10 }, combat: { retreatHealth: 8 } });
   if (set.isError) throw new Error(`setup update failed: ${set.text}`);
   return context;
 }
 
 for (const [name, args] of [
-  ['{ reflexes: {} }', { reflexes: {} }],
-  ['{ reflexes: { autoEat: {} } }', { reflexes: { autoEat: {} } }],
+  ['{ instinct: {} }', { instinct: {} }],
+  ['{ instinct: {}, chat: {} }', { instinct: {}, chat: {} }],
   ['{ combat: {} }', { combat: {} }]
 ] as const) {
   test(`fix 10: set-policy with ${name} is an error, changes nothing and writes no event`, async (t) => {
@@ -462,7 +465,7 @@ test('fix 12: set-policy before the bot joined is a clear error, the policy is u
   const { call, autopilot, policyEvents } = setup({ bind: false });
   const before = autopilot.policy.get();
 
-  const off = await call('set-policy', { reflexes: { autoEat: { enabled: false } } });
+  const off = await call('set-policy', { instinct: { enabled: false } });
   const attack = await call('set-policy', { combat: { attackPlayers: true } });
 
   for (const result of [off, attack]) {
@@ -476,17 +479,17 @@ test('fix 12: set-policy before the bot joined is a clear error, the policy is u
 
 test('fix 12: set-policy after the bot left the game is refused and the last policy stays as it was', async (t) => {
   const { call, autopilot, policyEvents } = setup();
-  const set = await call('set-policy', { reflexes: { selfDefense: { stance: 'flee' } } });
+  const set = await call('set-policy', { instinct: { lowHealth: 9 } });
   t.false(set.isError, set.text);
   autopilot.unbind('disconnected');
   const held = autopilot.policy.get();
   const eventsBefore = policyEvents();
 
-  const result = await call('set-policy', { reflexes: { selfDefense: { stance: 'fight' } }, combat: { attackPlayers: true } });
+  const result = await call('set-policy', { instinct: { lowHealth: 2 }, combat: { attackPlayers: true } });
 
   t.true(result.isError, `expected an error, got: ${result.text}`);
   t.is(autopilot.policy.get(), held);
-  t.is(autopilot.policy.get().reflexes.selfDefense.stance, 'flee');
+  t.is(autopilot.policy.get().instinct.lowHealth, 9);
   t.false(autopilot.policy.get().combat.attackPlayers);
   t.deepEqual(policyEvents(), eventsBefore);
 });
@@ -533,7 +536,7 @@ async function realServer(t: import('ava').ExecutionContext, { bind = true }: { 
   return { autopilot, client, call, policyEvents };
 }
 
-test('fix 12 (real MCP): the policy tools are listed and set-policy takes the five policy groups', async (t) => {
+test('fix 12 (real MCP): the policy tools are listed and set-policy takes the four policy groups (no reflexes since M9)', async (t) => {
   const { client } = await realServer(t);
 
   const { tools } = await client.listTools();
@@ -542,7 +545,7 @@ test('fix 12 (real MCP): the policy tools are listed and set-policy takes the fi
   const setPolicy = tools.find(tool => tool.name === 'set-policy');
   t.truthy(setPolicy);
   const properties = Object.keys((setPolicy?.inputSchema.properties ?? {}) as Record<string, unknown>).sort();
-  t.deepEqual(properties, ['chat', 'combat', 'decisions', 'instinct', 'reflexes']);
+  t.deepEqual(properties, ['chat', 'combat', 'decisions', 'instinct']);
 });
 
 test('fix 12 (real MCP): an unknown group (party) next to a valid combat change is an error and nothing is applied', async (t) => {
@@ -578,20 +581,28 @@ test('fix 12 (real MCP): a misspelled group (Combat) turning attackPlayers on is
   t.regex(lineOf((await call('get-policy')).text, 'attackPlayers'), /\bfalse\b|\boff\b/);
 });
 
-test('fix 12 (real MCP): an unknown group next to a valid reflex change, and a misspelled combat field, are errors', async (t) => {
+test('fix 12 (real MCP): the removed reflexes group or an unknown group next to a valid instinct change, the removed decisions.combatThreshold, and a misspelled combat field, are errors', async (t) => {
   const { autopilot, call, policyEvents } = await realServer(t);
   const before = autopilot.policy.get();
   const eventsBefore = policyEvents();
 
-  const group = await call('set-policy', { reflexes: { autoEat: { enabled: false } }, decision: { enabled: true } });
+  // M9: had the SDK stripped `reflexes`, the instinct change would have gone through.
+  const removed = await call('set-policy', { instinct: { enabled: false }, reflexes: { autoEat: { enabled: false } } });
+  const group = await call('set-policy', { instinct: { enabled: false }, decision: { enabled: true } });
+  const threshold = await call('set-policy', { decisions: { combatThreshold: 0.5, enabled: false } });
   const field = await call('set-policy', { combat: { retreatHealt: 8 } });
 
+  t.true(removed.isError, `removed group: ${removed.text}`);
+  t.true(removed.text.includes('reflexes'), removed.text);
   t.true(group.isError, `unknown group: ${group.text}`);
   t.true(group.text.includes('decision'), group.text);
+  t.true(threshold.isError, `removed field: ${threshold.text}`);
+  t.true(threshold.text.includes('combatThreshold'), threshold.text);
   t.true(field.isError, `misspelled field: ${field.text}`);
   t.true(field.text.includes('retreatHealt'), field.text);
   t.is(autopilot.policy.get(), before);
-  t.true(autopilot.policy.get().reflexes.autoEat.enabled, 'the valid autoEat part is not applied');
+  t.true(autopilot.policy.get().instinct.enabled, 'the valid instinct part is not applied');
+  t.true(autopilot.policy.get().decisions.enabled, 'the valid decisions part is not applied');
   t.deepEqual(policyEvents(), eventsBefore);
 });
 
@@ -599,17 +610,17 @@ test('fix 12 (real MCP): a valid set-policy call succeeds, is shown by get-polic
   const { autopilot, call, policyEvents } = await realServer(t);
   const eventsBefore = policyEvents().length;
 
-  const result = await call('set-policy', { combat: { retreatHealth: 8 }, reflexes: { selfDefense: { stance: 'flee' } } });
+  const result = await call('set-policy', { combat: { retreatHealth: 8 }, instinct: { hostileRadius: 10 } });
 
   t.false(result.isError, result.text);
   t.is(autopilot.policy.get().combat.retreatHealth, 8);
-  t.is(autopilot.policy.get().reflexes.selfDefense.stance, 'flee');
-  t.deepEqual(autopilot.policy.get().reflexes.autoEat, DEFAULT_POLICY.reflexes.autoEat, 'other fields untouched');
+  t.deepEqual(autopilot.policy.get().instinct, { ...DEFAULT_POLICY.instinct, hostileRadius: 10 }, 'other instinct fields untouched');
   const added = policyEvents().slice(eventsBefore);
   t.true(added.some(message => message.includes('retreatHealth')), `policy events: ${JSON.stringify(added)}`);
+  t.true(added.some(message => message.includes('instinct.hostileRadius')), `policy events: ${JSON.stringify(added)}`);
   const shown = (await call('get-policy')).text;
   t.true(numbersIn(lineOf(shown, 'retreatHealth')).includes(8), shown);
-  t.regex(lineOf(shown, 'selfDefense'), STANCE('flee'));
+  t.true(numbersIn(instinctSection(shown)).includes(10), shown);
 });
 
 test('fix 12 (real MCP): set-policy before the bot joined is an error and the policy is unchanged', async (t) => {
@@ -628,7 +639,7 @@ test('fix 10 (real MCP): set-policy with an empty group is an error; attackPlaye
   const { autopilot, call, policyEvents } = await realServer(t);
   const before = autopilot.policy.get();
 
-  const empty = await call('set-policy', { reflexes: {} });
+  const empty = await call('set-policy', { instinct: {} });
   t.true(empty.isError, `expected an error, got: ${empty.text}`);
   t.is(autopilot.policy.get(), before);
 
@@ -671,7 +682,7 @@ const instinctRejected: [string, Record<string, unknown>, string][] = [
   ['an intent of 301 characters', { instinct: { intent: 'x'.repeat(301) } }, 'intent'],
   ['a reaskMs below 500', { instinct: { reaskMs: 499 } }, 'reaskMs'],
   ['an unknown instinct field', { instinct: { panic: true } }, 'panic'],
-  ['the removed reflexes.hazardEscape', { reflexes: { hazardEscape: { enabled: false } } }, 'hazardEscape']
+  ['the removed reflexes.hazardEscape (the whole reflexes group since M9)', { reflexes: { hazardEscape: { enabled: false } } }, 'reflexes']
 ];
 
 for (const [title, args, field] of instinctRejected) {
@@ -723,7 +734,7 @@ test('M8: get-policy says the instinct is online with a key, and turned off afte
   const off = await call('set-policy', { instinct: { enabled: false } });
   t.false(off.isError, off.text);
   t.regex(instinctLine((await call('get-policy')).text) ?? '', /turned off/);
-  t.true(fetch.notCalled, 'nothing was asked: the bot stands safely in the open');
+  t.is(decisionRequests(fetch), 0, 'nothing was asked: the bot stands safely in the open');
 });
 
 test.serial('M8: after an instinct decision, get-policy counts the call and shows the last decision', async (t) => {
@@ -743,7 +754,7 @@ test.serial('M8: after an instinct decision, get-policy counts the call and show
   bot.emit('physicsTick');
   await clock.tickAsync(10);
 
-  t.true(fetch.calledOnce, 'one instinct request');
+  t.is(decisionRequests(fetch), 1, 'one instinct request');
   const { text } = await call('get-policy');
   t.regex(instinctLine(text) ?? '', /^Instinct: online; 1 call\(s\) in the last minute/);
   t.true(text.split('\n').includes('No instinct action is running'), 'ask_llm runs no action');
@@ -773,9 +784,9 @@ for (const [label, decisions] of [
     const line = instinctLine((await call('get-policy')).text) ?? '';
     t.regex(line, /offline/, line);
     if ('decisions' in decisions) {
-      t.true(fetch.notCalled, 'decisions off: no request');
+      t.is(decisionRequests(fetch), 0, 'decisions off: no request');
     } else {
-      t.true(fetch.calledOnce);
+      t.is(decisionRequests(fetch), 1);
       t.regex(line, /http_error/, `the reason is named: ${line}`);
     }
     const offline = events.query({ types: ['instinct'], limit: 20 }).events.filter(event => event.message.includes('instinct offline'));
@@ -798,7 +809,7 @@ test.serial('M8: get-policy shows the instinct action that is running', async (t
   bot.emit('physicsTick');
   await clock.tickAsync(500);
 
-  t.true(fetch.calledOnce);
+  t.is(decisionRequests(fetch), 1);
   t.is(autopilot.arbiter.holder()?.holder, 'instinct leave_lava');
   const { text } = await call('get-policy');
   const running = text.split('\n').find(line => line.startsWith('Instinct action running now: ')) ?? '';

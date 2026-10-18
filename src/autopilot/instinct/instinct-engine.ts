@@ -1,16 +1,19 @@
-// Contract: docs/BLUEPRINT.md F-040. The instinct: when the attention gate says so, hands the situation and the menu
+// Contract: docs/BLUEPRINT.md F-040 (M9 changes in F1-h). The instinct: when the attention gate says so, hands the situation and the menu
 // of what is possible to the decision model, and runs the macro it picks. Code never maps an event to a behavior
 // here: without a decision (no key, turned off, timeout, error, budget used up) the bot does not act on its own and
 // the danger is left to the LLM (user decision, BLUEPRINT I1).
 import type mineflayer from 'mineflayer';
+import { performance } from 'node:perf_hooks';
 import { ActionArbiter, Lease, Preemptor, PRIORITY } from '../action-arbiter.js';
 import type { Policy } from '../policy.js';
 import type { TaskManager } from '../task-manager.js';
 import type { EventStore } from '../../event-store.js';
 import type { DecisionQuestion, DecisionResult } from '../../decisions/openrouter-client.js';
 import { stopPathfinder } from '../../tools/movement-utils.js';
-import { airLevel } from '../../tools/gamestate-tools.js';
-import { Attention, Cue, readCues } from './attention.js';
+import { airLevel, armorPoints } from '../../tools/gamestate-tools.js';
+import { Attention, Cue, DamageInfo, outranks, readCues } from './attention.js';
+import { assessThreats } from '../threats.js';
+import { bestWeaponName } from '../combat.js';
 import { buildMenu, MenuOption, OptionId } from './affordances.js';
 import { MACROS } from './macros.js';
 import { burningNow, headInWater, inLavaNow } from '../hazards.js';
@@ -23,6 +26,8 @@ export interface InstinctEngineOptions {
   events: EventStore;
   /** A decision request on the instinct's own budget (F-015). */
   decide: (state: Record<string, unknown>, questions: Record<string, DecisionQuestion>) => Promise<DecisionResult>;
+  /** Called first when the bot dies, before a running action lets go of the body (autopilot.ts cancels the task). */
+  onDeath?: () => void;
   log?: (level: string, message: string) => void;
 }
 
@@ -32,7 +37,11 @@ export interface InstinctStatus {
   offline: string | null;
   running: { action: OptionId; ms: number; reason: string } | null;
   lastDecision: string | null;
+  /** Per-tick evaluation cost (invariant I6). */
+  timing: { ticks: number; averageMs: number; maxMs: number };
 }
+
+const FULL_AIR_TICKS = 300;
 
 type Outcome = 'done' | 'failed' | 'timeout' | 'interrupted';
 
@@ -66,12 +75,14 @@ const ACTION_INSTRUCTIONS =
   'You are the instinct of a Minecraft bot that an AI player controls. The bot senses the danger described in ' +
   '`danger`. Choose what the bot should do in the next few seconds. Prefer an option that ends the danger before it ' +
   'costs much health; an instinct action that is already running (instinct_action_running) can be kept with ' +
-  '`continue`. If ai_player_intent says the bot is in this situation on purpose and it is not about to be badly hurt, ' +
-  '`continue` is right.';
+  '`continue`. ai_player_intent is what the AI player wants right now and outweighs earlier_dangers: if it says the ' +
+  'bot is in this situation on purpose, `continue` is right until the bot is about to be badly hurt (for example ' +
+  'very little air left).';
 const URGENT_INSTRUCTIONS =
   'Is the danger in `danger` serious enough that the bot must act now, even if that interrupts a command the AI ' +
-  'player is running? Low air under water, a ceiling over the water, standing in lava and burning are serious; plenty ' +
-  'of air with an open way up is not.';
+  'player is running? Low air under water, a ceiling over the water, standing in lava, burning, a creeper about to ' +
+  'explode and low health with hostiles near are serious; plenty of air with an open way up, mild hunger, or one ' +
+  'hit at high health is not.';
 
 const RESUME_INSTRUCTIONS =
   'Once the bot is out of this danger, should the task in doing_now carry on by itself? Answer false when ' +
@@ -100,10 +111,25 @@ export function instinctQuestions(menu: MenuOption[], { hasTask = false } = {}):
   return questions;
 }
 
+function orUnknown<T>(read: () => T): T | 'unknown' {
+  try {
+    return read();
+  } catch {
+    return 'unknown';
+  }
+}
+
 export class InstinctEngine {
   private readonly attention = new Attention();
   private running: Running | null = null;
+  // Requests are numbered; only the newest one's answer may act (a new cue supersedes one in flight).
+  private requestSeq = 0;
   private inFlight = false;
+  // The cues of the request in flight, to judge whether a new cue is more urgent than all of them.
+  private inFlightCues: Cue[] = [];
+  private damage: DamageInfo | null = null;
+  private diedSinceSpawn = false;
+  private stats = { ticks: 0, totalMs: 0, maxMs: 0 };
   private stopped = true;
   private offline: string | null = null;
   // Offline reasons already reported in the current danger episode (one event per episode and reason).
@@ -117,18 +143,43 @@ export class InstinctEngine {
   private episodeInfo = { kinds: '', rounds: 0, result: null as string | null };
   private readonly onTick = () => this.tick();
   private readonly onDeath = () => {
+    this.diedSinceSpawn = true;
+    // First, while an action may still hold the body: the task is cancelled before anything could resume it (M7).
+    try {
+      this.options.onDeath?.();
+    } catch (error) {
+      this.options.log?.('warn', `Instinct death callback failed: ${error}`);
+    }
+    this.damage = null;
     if (this.running) this.finish(this.running, 'interrupted', 'the bot died');
     if (this.attention.inEpisode()) this.endEpisode(Date.now(), 'the bot died');
     this.attention.reset();
   };
 
+  // mineflayer keeps the bot's own entity data across a respawn, and the server only sends values that change, so a
+  // burning flag or low air from the moment of death would stay set and keep the instinct asking about them.
+  private readonly onSpawn = () => {
+    if (!this.diedSinceSpawn) return;
+    this.diedSinceSpawn = false;
+    const metadata = this.options.bot.entity?.metadata as unknown[] | undefined;
+    if (!metadata) return;
+    if (typeof metadata[0] === 'number') metadata[0] = metadata[0] & ~0x01;
+    metadata[1] = FULL_AIR_TICKS;
+  };
+
   constructor(private readonly options: InstinctEngineOptions) {}
+
+  /** The latest hit (E-005 onDamage), for the 'attacked' cue. */
+  noteDamage(info: DamageInfo): void {
+    this.damage = info;
+  }
 
   start(): void {
     if (!this.stopped || typeof this.options.bot.on !== 'function') return;
     this.stopped = false;
     this.options.bot.on('physicsTick', this.onTick);
     this.options.bot.on('death', this.onDeath);
+    this.options.bot.on('spawn', this.onSpawn);
   }
 
   stop(reason = 'stopped'): void {
@@ -137,6 +188,7 @@ export class InstinctEngine {
     this.stopped = true;
     this.options.bot.removeListener('physicsTick', this.onTick);
     this.options.bot.removeListener('death', this.onDeath);
+    this.options.bot.removeListener('spawn', this.onSpawn);
   }
 
   status(): InstinctStatus {
@@ -145,7 +197,8 @@ export class InstinctEngine {
       enabled: this.options.getPolicy().instinct.enabled,
       offline: this.offline,
       running: run ? { action: run.option.id, ms: Date.now() - run.started, reason: run.reason } : null,
-      lastDecision: this.lastDecision
+      lastDecision: this.lastDecision,
+      timing: { ticks: this.stats.ticks, averageMs: this.stats.ticks ? this.stats.totalMs / this.stats.ticks : 0, maxMs: this.stats.maxMs }
     };
   }
 
@@ -153,6 +206,19 @@ export class InstinctEngine {
   tick(now = Date.now()): void {
     const { bot } = this.options;
     if (this.stopped || !bot.entity || (typeof bot.health === 'number' && bot.health <= 0)) return;
+    const startedAt = performance.now();
+    try {
+      this.evaluate(now);
+    } finally {
+      const elapsed = performance.now() - startedAt;
+      this.stats.ticks++;
+      this.stats.totalMs += elapsed;
+      this.stats.maxMs = Math.max(this.stats.maxMs, elapsed);
+    }
+  }
+
+  private evaluate(now: number): void {
+    const { bot } = this.options;
     const policy = this.options.getPolicy();
     if (!policy.instinct.enabled) {
       if (this.running) this.finish(this.running, 'interrupted', 'the instinct was turned off');
@@ -161,17 +227,20 @@ export class InstinctEngine {
     }
     let cues: Cue[];
     try {
-      cues = readCues(bot, policy);
+      cues = readCues(bot, policy, this.damage, now);
     } catch (error) {
       this.options.log?.('warn', `Instinct could not read the situation: ${error}`);
       return;
     }
     const wasInEpisode = this.attention.inEpisode();
     const episode = this.attention.episode;
-    const ask = this.attention.shouldAsk(cues, now, policy.instinct.reaskMs);
+    // The episode lasts while an instinct action runs, even if its cue is hidden meanwhile (a fight hides 'attacked').
+    const reason = this.attention.shouldAsk(cues, now, policy.instinct.reaskMs, this.running !== null);
     if (wasInEpisode && !this.attention.inEpisode()) this.endEpisode(now);
     if (this.attention.episode !== episode) this.episodeInfo = { kinds: '', rounds: 0, result: null };
-    if (!ask || this.inFlight) return;
+    // A new, more urgent cue does not wait behind a request about something else (a hit must not hold up a lit
+    // creeper); a less urgent one does not throw away the answer that is on its way.
+    if (!reason || (this.inFlight && !(reason === 'new' && outranks(cues, this.inFlightCues)))) return;
     this.ask(cues, policy, now);
   }
 
@@ -195,7 +264,7 @@ export class InstinctEngine {
     this.episodeInfo.rounds++;
     this.episodeInfo.kinds = [...new Set(cues.map(cue => cue.kind))].join(', ');
     try {
-      menu = buildMenu(bot, cues, { hasTask });
+      menu = buildMenu(bot, cues, { hasTask, policy });
       state = this.state(cues, policy);
     } catch (error) {
       this.options.log?.('warn', `Instinct could not build its menu: ${error}`);
@@ -203,12 +272,23 @@ export class InstinctEngine {
     }
     this.attention.noteAsked(cues, now);
     this.inFlight = true;
+    this.inFlightCues = cues;
     const episode = this.attention.episode;
+    const seq = ++this.requestSeq;
     this.options.decide(state, instinctQuestions(menu, { hasTask }))
-      .then(result => this.handle(result, menu, cues, episode))
+      .then(result => {
+        if (seq !== this.requestSeq) {
+          // A newer request about a new cue is out: this answer only goes on record.
+          if (result.ok && result.answers.action?.type === 'choice') {
+            this.options.events.addEvent('instinct', `${cues.map(cue => cue.detail).join('; ')} → ${result.answers.action.choice} (superseded by a newer request; not acted on)`);
+          }
+          return;
+        }
+        this.handle(result, menu, cues, episode);
+      })
       .catch(error => this.options.log?.('warn', `Instinct decision failed: ${error}`))
       .finally(() => {
-        this.inFlight = false;
+        if (seq === this.requestSeq) this.inFlight = false;
       });
   }
 
@@ -229,7 +309,12 @@ export class InstinctEngine {
         head_under_water: headInWater(bot),
         in_lava: inLavaNow(bot),
         on_fire: burningNow(bot),
-        held_item: bot.heldItem?.name ?? 'nothing'
+        held_item: bot.heldItem?.name ?? 'nothing',
+        // Optional facts: one that cannot be read must not cost the whole decision.
+        armor_points: orUnknown(() => armorPoints(bot)),
+        best_weapon: orUnknown(() => bestWeaponName(bot)),
+        hostiles_within_16: orUnknown(() => assessThreats(bot, { radius: 16 }).hostiles.slice(0, 8)
+          .map(threat => `${threat.entity.name ?? 'unknown'} ${threat.distance.toFixed(1)} blocks`))
       },
       danger: cues.map(cue => cue.detail),
       doing_now: doing.length > 0 ? doing.join('; ') : 'nothing',
@@ -343,7 +428,7 @@ export class InstinctEngine {
       finished: false
     };
     this.running = running;
-    macro.run({ bot, signal: controller.signal, target: option.target ?? null })
+    macro.run({ bot, signal: controller.signal, target: option.target ?? null, entityId: option.entityId, policy: this.options.getPolicy() })
       .then(text => this.finish(running, 'done', text))
       .catch(error => {
         if (controller.signal.aborted) return;

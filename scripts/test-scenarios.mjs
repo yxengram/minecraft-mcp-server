@@ -5,10 +5,10 @@
 //   npm run build
 //   npm run test:scenarios -- <LAN_PORT> --allow-world-changes [--only <scenario>] [--rounds <n>]
 //
-// Configurations (M8, BLUEPRINT E-011):
-//   llm-only  reflexes and instinct off: only what the LLM's tools would do (nobody reacts in time)
-//   no-key    default policy without a decision model: the remaining reflexes work, the instinct is offline (fire,
-//             lava and water are only reported to the LLM, by design)
+// Configurations (M9, BLUEPRINT E-012):
+//   llm-only  instinct off: only what the LLM's tools would do (nobody reacts in time)
+//   no-key    default policy without a decision model: the instinct is offline, so dangers are only reported to the
+//             LLM and the bot does not act on them (by design)
 //   instinct  default policy with the decision model (needs OPENROUTER_API_KEY; skipped without it)
 // The instinct configuration must pass every scenario; the others are for comparison.
 import { createArena, parseLiveArgs, SetupFailed, sleep, ARENA_RADIUS } from './lib/live-arena.mjs';
@@ -19,12 +19,7 @@ const BOT_NAME = 'MCPWorldTest';
 const HELPER_NAME = 'MCPHelper';
 const key = process.env.OPENROUTER_API_KEY;
 
-const AUTOPILOT_OFF = {
-  reflexes: {
-    creeperEvade: { enabled: false }, lowHealthRetreat: { enabled: false }, selfDefense: { enabled: false }, autoEat: { enabled: false }
-  },
-  instinct: { enabled: false }
-};
+const AUTOPILOT_OFF = { instinct: { enabled: false } };
 const CONFIGS = [
   { name: 'llm-only', policy: AUTOPILOT_OFF, withKey: false },
   { name: 'no-key', policy: null, withKey: false },
@@ -128,6 +123,23 @@ const SCENARIOS = {
     return drowning(s, { pocket: false });
   },
 
+  /**
+   * The same pool with an air pocket, but the LLM says it is diving on purpose (instinct.intent). Success: the instinct
+   * starts no action while the bot still has 12 air or more, and the bot still gets out alive (M9).
+   */
+  async 'intent-dive'(s) {
+    await s.call('set-policy', { instinct: { intent: 'exploring an underwater cave on purpose; I will surface when air gets low' } });
+    try {
+      const result = await drowning(s, { pocket: true });
+      const started = (await s.eventsSince(s.drowningSince, ['instinct'])).find(line => /→ started /.test(line));
+      const air = Number(started?.match(/(\d+) air left/)?.[1] ?? NaN);
+      const ok = result.ok && Number.isFinite(air) && air < 12;
+      return { ok, detail: `${started ? `first action at ${air} air` : 'no action started'}; ${result.detail}` };
+    } finally {
+      await s.call('set-policy', { instinct: { intent: '' } });
+    }
+  },
+
   /** A player asks the bot for help, then says "follow me"; success: chat_request within 3 s and no following. */
   async 'chat-triage'(s) {
     const helper = s.arena.helper;
@@ -161,6 +173,7 @@ async function drowning(s, { pocket }) {
   await cmd(`/fill ${x0 + 1} ${y0} ${z0 + 1} ${x1 - 1} ${y0 + 2} ${z1 - 1} water`);
   if (pocket) await cmd(`/fill ${x1 - 1} ${y0 + 3} ${z0 + 1} ${x1 - 1} ${y0 + 4} ${z1 - 1} air`);
   const since = await s.cursor();
+  s.drowningSince = since;
   await call('send-chat', { message: `/tp @s ${x0 + 2} ${y0} ${cz}` });
   const t0 = Date.now();
   let escaped = null;

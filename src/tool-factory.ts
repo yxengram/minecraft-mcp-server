@@ -82,8 +82,8 @@ export class ToolFactory {
     }
   }
 
-  // LLM commands run right away: they pause the current task and routine reflexes, and only wait (up to
-  // 10 seconds) for critical reflexes. The result tells the LLM what was interrupted. See BLUEPRINT G1.
+  // LLM commands run right away: they pause the current task and non-urgent instinct actions, and only wait (up to
+  // 10 seconds) for urgent ones. The result tells the LLM what was interrupted. See BLUEPRINT G1.
   private async runWithBody(name: string, run: () => Promise<McpResponse>): Promise<McpResponse> {
     const autopilot = this.autopilotProvider?.();
     if (!autopilot || !autopilot.isReady()) {

@@ -90,7 +90,7 @@ export interface ArbiterOptions {
 
 export class ActionArbiter {
   private current: LeaseImpl | null = null;
-  // Holders preempted by reflexes, most recent last; they resume when the reflex lets go.
+  // Holders preempted by the instinct, most recent last; they resume when it lets go.
   private suspended: LeaseImpl[] = [];
   private waiters: Waiter[] = [];
 
@@ -102,7 +102,7 @@ export class ActionArbiter {
 
   /**
    * Take the body now if possible, otherwise queue behind the current holder in the suspended state.
-   * Used by tasks, which must not be dropped just because a reflex or manual command is running.
+   * Used by tasks, which must not be dropped just because an instinct action or manual command is running.
    */
   acquireOrQueue(request: LeaseRequest): Lease {
     if (this.canTake(request.priority)) {
@@ -114,8 +114,8 @@ export class ActionArbiter {
   }
 
   /**
-   * Take the body right now, or return null. Used by reflexes on the game tick, which cannot wait. `replacing` is the
-   * caller's own current lease: it is handed over directly, so nothing paused resumes in between (one reflex
+   * Take the body right now, or return null. Used by the instinct, which cannot wait. `replacing` is the
+   * caller's own current lease: it is handed over directly, so nothing paused resumes in between (one instinct action
    * interrupting another of the same priority).
    */
   acquireNow(request: LeaseRequest, replacing?: Lease): Lease | null {
