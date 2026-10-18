@@ -100,16 +100,18 @@ function eventBot() {
   return { bot, self, water };
 }
 
-const ENGINE_EVENTS = ['physicsTick', 'death', 'spawn'];
+// Listeners per event once bound: the reflex engine follows physicsTick, death and spawn; the instinct (M8) also
+// follows physicsTick and death.
+const ENGINE_EVENTS: Record<string, number> = { physicsTick: 2, death: 2, spawn: 1 };
 
 test('the reflex engine follows physicsTick only while bound; rebinding and unbinding leave no listeners behind', (t) => {
   const autopilot = new Autopilot({ events: new EventStore() });
   const first = eventBot();
   autopilot.bind(first.bot as never);
 
-  for (const name of ENGINE_EVENTS) t.is(first.bot.listenerCount(name), 1, `one ${name} listener after bind`);
+  for (const [name, count] of Object.entries(ENGINE_EVENTS)) t.is(first.bot.listenerCount(name), count, `${count} ${name} listener(s) after bind`);
   autopilot.bind(first.bot as never);
-  for (const name of ENGINE_EVENTS) t.is(first.bot.listenerCount(name), 1, `a repeated bind adds no second ${name} listener`);
+  for (const [name, count] of Object.entries(ENGINE_EVENTS)) t.is(first.bot.listenerCount(name), count, `a repeated bind adds no further ${name} listener`);
 
   const firstEngine = autopilot.reflexes;
   first.bot.emit('physicsTick');
@@ -118,27 +120,28 @@ test('the reflex engine follows physicsTick only while bound; rebinding and unbi
   const second = eventBot();
   autopilot.bind(second.bot as never);
   t.deepEqual(first.bot.eventNames(), [], 'rebinding leaves no listener on the old bot');
-  for (const name of ENGINE_EVENTS) t.is(second.bot.listenerCount(name), 1);
+  for (const [name, count] of Object.entries(ENGINE_EVENTS)) t.is(second.bot.listenerCount(name), count);
   const secondEngine = autopilot.reflexes;
   t.not(secondEngine, firstEngine);
   second.bot.emit('physicsTick');
   t.is(secondEngine.timing().ticks, 1);
 
   autopilot.unbind('disconnected');
-  for (const name of ENGINE_EVENTS) t.is(second.bot.listenerCount(name), 0, `unbind removes the ${name} listener`);
+  for (const name of Object.keys(ENGINE_EVENTS)) t.is(second.bot.listenerCount(name), 0, `unbind removes the ${name} listeners`);
   t.deepEqual(second.bot.eventNames(), []);
   first.bot.emit('physicsTick');
   second.bot.emit('physicsTick');
   t.is(firstEngine.timing().ticks, 1, 'an unbound engine no longer evaluates reflexes');
   t.is(secondEngine.timing().ticks, 1);
   t.throws(() => autopilot.reflexes, { instanceOf: AutopilotNotReady });
+  t.throws(() => autopilot.instinct, { instanceOf: AutopilotNotReady });
 });
 
 test.serial('unbinding while a reflex has the task paused cancels the task without resuming it first', async (t) => {
   const clock = sinon.useFakeTimers({ now: 1.7e12 });
   t.teardown(() => clock.restore());
   const events = new EventStore();
-  const autopilot = new Autopilot({ events });
+  const autopilot = new Autopilot({ events, decisions: { getKey: () => undefined, fetch: sinon.stub().rejects(new Error('no network in tests')) } });
   const world = eventBot();
   autopilot.bind(world.bot as never);
   t.teardown(() => autopilot.unbind('test finished'));
@@ -148,23 +151,24 @@ test.serial('unbinding while a reflex has the task paused cancels the task witho
   await clock.tickAsync(300);
   t.is(autopilot.currentTask()?.status, 'running');
 
-  // Head under water with 4 bubbles left (60 ticks, below the default lowAir of 6): hazard-escape swims up, and keeps
-  // swimming because the fake air supply never refills.
-  world.self.metadata[1] = 60;
-  world.water.add('0,65,0');
+  // Health 4 (below the default 6) with a zombie 6 blocks away: low-health-retreat runs, and keeps running because
+  // the fake bot never gets farther from the zombie.
+  const zombie = { id: 9, name: 'zombie', type: 'hostile', position: new Vec3(6, 64, 0), isValid: true, height: 1.95, width: 0.6 };
+  (world.bot.entities as Record<number, unknown>)[zombie.id] = zombie;
+  world.bot.health = 4;
   world.bot.emit('physicsTick');
   await clock.tickAsync(300);
 
   // Preconditions: the engine's own reflex holds the body and the task is paused under it.
-  t.is(autopilot.reflexes.current()?.name, 'hazard-escape');
-  t.is(autopilot.arbiter.holder()?.holder, 'reflex hazard-escape');
+  t.is(autopilot.reflexes.current()?.name, 'low-health-retreat');
+  t.is(autopilot.arbiter.holder()?.holder, 'reflex low-health-retreat');
   t.is(autopilot.currentTask()?.status, 'paused');
 
   autopilot.unbind('disconnected');
   await clock.tickAsync(100);
 
   const log = events.query({ limit: 200 }).events;
-  const paused = log.findIndex(event => event.type === 'task_paused' && event.message === 't1 follow: paused by reflex hazard-escape');
+  const paused = log.findIndex(event => event.type === 'task_paused' && event.message === 't1 follow: paused by reflex low-health-retreat');
   const cancelled = log.findIndex(event => event.type === 'task_cancelled');
   t.true(paused >= 0, 'the task was paused by the reflex');
   t.true(cancelled > paused, 'the task was cancelled after the pause');
@@ -178,8 +182,69 @@ test.serial('unbinding while a reflex has the task paused cancels the task witho
 
   const reflexEvents = log.filter(event => event.type === 'reflex').map(event => event.message);
   t.is(reflexEvents.length, 1);
-  t.regex(reflexEvents[0], /^hazard-escape: running out of air \(4 left\) → interrupted: disconnected \(\d+\.\ds\)$/);
+  t.regex(reflexEvents[0], /^low-health-retreat: health 4 with 1 hostile\(s\) within 16 blocks .* → interrupted: disconnected \(\d+\.\ds\)$/);
   t.false(autopilot.isReady());
   t.is(autopilot.currentTask(), null);
   t.deepEqual(world.bot.eventNames(), []);
+});
+
+// ---- M8: the instinct without a decision model (F-001, F-040, E-011) ------------------------------------------------
+// Expected from the contract: fire, lava and water are no longer handled by a reflex; without a key the instinct does
+// not move the body and reports "instinct offline (<reason>)" once per danger episode and reason.
+
+test.serial('M8: with no decision key, low air under water takes the body from nobody; one "instinct offline" event per danger', async (t) => {
+  const clock = sinon.useFakeTimers({ now: 1.7e12 });
+  t.teardown(() => clock.restore());
+  const events = new EventStore();
+  const fetch = sinon.stub().rejects(new Error('no network in tests'));
+  const autopilot = new Autopilot({ events, decisions: { getKey: () => undefined, fetch } });
+  const world = eventBot();
+  autopilot.bind(world.bot as never);
+  t.teardown(() => autopilot.unbind('test finished'));
+  const tick = async (ms: number) => {
+    for (let elapsed = 0; elapsed < ms; elapsed += 50) {
+      world.bot.emit('physicsTick');
+      await clock.tickAsync(50);
+    }
+  };
+
+  const started = await autopilot.tasks.start('follow', { target: 'Steve' });
+  t.true(started.ok);
+  await clock.tickAsync(300);
+  t.is(autopilot.currentTask()?.status, 'running');
+  const offline = () => events.query({ types: ['instinct'], limit: 200 }).events.map(event => event.message)
+    .filter(message => message.includes('instinct offline'));
+
+  // Head under open water with 4 bubbles left (60 ticks, below the default lowAir of 6), for about 4 s: well past
+  // several re-ask intervals (1.5 s), and the fake air supply never refills.
+  world.self.metadata[1] = 60;
+  world.water.add('0,65,0');
+  await tick(4000);
+
+  t.is(autopilot.arbiter.holder()?.holder, 'task t1 follow', 'neither a reflex nor the instinct took the body');
+  t.is(autopilot.currentTask()?.status, 'running');
+  t.is(autopilot.reflexes.current(), null);
+  t.is(autopilot.instinct.status().running, null);
+  t.is(offline().length, 1, `one offline event for the whole danger: ${JSON.stringify(offline())}`);
+  t.regex(offline()[0] ?? '', /disabled/, 'it names why there is no decision');
+  t.regex(offline()[0] ?? '', /4 air left/, 'and what the bot senses');
+  t.true(fetch.notCalled, 'no request leaves the client without a key');
+  const log = events.query({ limit: 200 }).events;
+  t.deepEqual(log.filter(event => event.type === 'reflex').map(event => event.message), [], 'no reflex event');
+  t.deepEqual(log.filter(event => event.type.startsWith('task_')).map(event => event.type), ['task_started'], 'the task was never paused');
+
+  // The bot surfaces (the episode ends), then goes under again: a new episode is reported once more.
+  world.water.delete('0,65,0');
+  await tick(200);
+  world.water.add('0,65,0');
+  await tick(2000);
+  t.is(offline().length, 2, 'a new danger episode is reported again, once');
+
+  autopilot.unbind('disconnected');
+  await clock.tickAsync(100);
+  const after = events.query({ limit: 200 }).events;
+  t.is(after.filter(event => event.type === 'task_cancelled').at(-1)?.message, 't1 follow: cancelled (disconnected)');
+  t.deepEqual(after.filter(event => event.type === 'task_resumed'), []);
+  t.deepEqual(world.bot.eventNames(), [], 'the instinct left no listener behind');
+  t.throws(() => autopilot.instinct, { instanceOf: AutopilotNotReady });
 });

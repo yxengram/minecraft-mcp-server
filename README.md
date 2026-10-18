@@ -164,7 +164,7 @@ Both tools look down from the sky by default and switch to the bot's own level w
 
 ## Autopilot
 
-The bot does not have to wait for the LLM for everything. Long jobs run as **background tasks**, and **reflexes** react within a game tick (50 ms) to things the LLM could never answer in time, such as a creeper about to explode. The LLM stays in charge: it starts and stops tasks, adjusts the **policy**, and is woken up through events when something needs its attention.
+The bot does not have to wait for the LLM for everything. Long jobs run as **background tasks**. With a decision model, an **instinct** chooses within about a second what to do about fire, lava and water, and code carries it out. **Reflexes** react within a game tick (50 ms) to creepers, low health, attacks and hunger; they move to the instinct in a later milestone. The LLM stays in charge: it starts and stops tasks, adjusts the **policy**, tells the instinct what it is up to, and is woken up through events when something needs its attention.
 
 ### Background tasks
 - `start-task` - Start a task and return at once: `follow`, `flee`, `guard`, `gather`, `hunt` or `return-home`. Starting a task replaces the current one unless `replace` is false
@@ -191,22 +191,31 @@ Checked on every game tick, without the LLM:
 | Reflex | When | What it does | Your commands |
 |---|---|---|---|
 | `creeperEvade` | a creeper within 7 blocks is about to explode | sprints at least 8 blocks away | wait for it (up to 10 s) |
-| `hazardEscape` | in lava, on fire next to fire or water, or out of air under water | gets out, into water if one is near, or swims up | wait for it |
 | `lowHealthRetreat` | health below 6 (or at the combat retreat health) with hostiles near | runs away, then eats | wait for it |
 | `selfDefense` | hit by a hostile mob | fights back or runs, depending on the stance | interrupt it |
 | `autoEat` | food below 14, no hostile within 8 blocks | eats the best safe food | interrupt it |
 
 Reflexes never attack players. A task paused by a reflex resumes on its own afterwards. Reflex runs are reported as `reflex` events.
 
+### Instinct (fire, lava and water)
+When the bot senses danger (standing in lava, on fire, under water with a ceiling above, or low on air), code works out what it can do right now and a decision model picks one option. The options are: swim up, swim to an air pocket it can reach, dig up through the ceiling, get out of the lava, walk into water to put the fire out, step off the fire, keep going, pause the current task, or leave it to the LLM. Code then carries out the choice. While the danger lasts, the model is asked again every 1.5 s and after each action ends.
+
+- An action the model marks as urgent may interrupt the LLM's own command; otherwise the command goes first.
+- When the model leaves a danger to the LLM, the current task stays paused until `resume-task` or `cancel-task`.
+- Set `instinct.intent` to tell the instinct what the bot is doing, for example `{ "instinct": { "intent": "exploring an underwater cave on purpose" } }`, so that it does not try to save the bot from a situation it is in on purpose.
+- Every decision and action is reported as an `instinct` event.
+- **Without a decision model (no key, turned off, timeout or error), the bot does not act on these dangers by itself.** Each danger is reported once as an `instinct offline` event, and the LLM decides.
+
 ### Policy
-- `get-policy` - Show the reflex switches and thresholds, the combat rules, the chat settings and the decision model status
+- `get-policy` - Show the reflex switches and thresholds, the instinct settings and whether it is online, the combat rules, the chat settings and the decision model status
 - `set-policy` - Change part of it; unknown fields are rejected. Example: `{ "reflexes": { "autoEat": { "enabled": false } }, "combat": { "retreatHealth": 8 } }`
 
 The policy lives in memory only and goes back to its defaults whenever the bot (re)joins the game. Turning on `combat.attackPlayers` is possible but always writes a warning event.
 
 ### Optional: decision model (OpenRouter)
-With an [OpenRouter](https://openrouter.ai) API key, a fast decision model (about 0.6 s per call) handles two things the LLM is too slow for:
+With an [OpenRouter](https://openrouter.ai) API key, a fast decision model (about 0.6 s per call) handles three things the LLM is too slow for:
 
+- **Instinct:** fire, lava and water, as described above. It has its own budget (`instinct.maxCallsPerMinute`, 90 by default), so chat cannot crowd it out.
 - **Chat triage:** messages meant for the bot become `chat_request` events, so the LLM can wait for them with `wait-for-event` instead of reading all chat. Small talk between other players is not reported.
 - **Combat judgment:** with the self-defense stance `auto` (the default), the model decides whether to fight, flee or hold when the bot is attacked. The bot acts on a simple rule at once and switches if the model disagrees.
 
@@ -272,6 +281,6 @@ To compare how the bot copes with and without the autopilot, run in a throwaway 
 npm run test:scenarios -- LAN_PORT --allow-world-changes
 ```
 
-It plays five scenarios (`zombie-wave`, `creeper-ambush`, `hunger`, `fire`, `chat-triage`) under three configurations: reflexes off (only what the LLM's tools would do), reflexes on, and reflexes with the decision model (only when `OPENROUTER_API_KEY` is set). It prints a table of the results and fails if any scenario fails with reflexes on. Use `--only <scenario>` to run one scenario and `--rounds <n>` to repeat. It **modifies the world** in the same way as the full world test, and also sets the bot on fire, starves it and summons hostile mobs, so the bot can die.
+It plays seven scenarios (`zombie-wave`, `creeper-ambush`, `hunger`, `fire`, `drowning-pocket`, `drowning-dig`, `chat-triage`) under three configurations: `llm-only` (reflexes and instinct off: only what the LLM's tools would do), `no-key` (no decision model: reflexes on, instinct offline) and `instinct` (with the decision model; only when `OPENROUTER_API_KEY` is set). It prints a table of the results and fails if any scenario fails in the `instinct` configuration. Use `--only <scenario>` to run one scenario and `--rounds <n>` to repeat. It **modifies the world** in the same way as the full world test, and also sets the bot on fire, starves it and summons hostile mobs, so the bot can die.
 
 Minecraft Java 26.1.2 (protocol 775) was also manually verified with a Survival bot: place a dirt block, read it back, dig it, and restore the borrowed dirt to its original location.

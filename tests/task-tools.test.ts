@@ -120,12 +120,12 @@ test.serial('a body tool waits for a critical reflex and says so, or reports bus
   const jumped = await pending;
   t.is(jumped.content[1].text, 'Waited 1.5s for reflex creeper-evade to finish before running this command.');
 
-  await autopilot.arbiter.acquire({ holder: 'reflex hazard-escape', priority: PRIORITY.CRITICAL_REFLEX });
+  await autopilot.arbiter.acquire({ holder: 'reflex low-health-retreat', priority: PRIORITY.CRITICAL_REFLEX });
   const busyPending = getTool('jump')!.execute({});
   await clock.tickAsync(10000);
   const busy = await busyPending;
   t.true(busy.isError);
-  t.is(busy.content[0].text, 'Failed: Busy: reflex hazard-escape is controlling the bot (waited 10.0s). Try again shortly');
+  t.is(busy.content[0].text, 'Failed: Busy: reflex low-health-retreat is controlling the bot (waited 10.0s). Try again shortly');
 });
 
 test('read-only tools never take the action lease', async (t) => {

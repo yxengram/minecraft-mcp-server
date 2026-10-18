@@ -7,7 +7,7 @@ import sinon from 'sinon';
 import { EventEmitter } from 'node:events';
 import { Vec3 } from 'vec3';
 import minecraftData from 'minecraft-data';
-import { Autopilot } from '../src/autopilot/autopilot.js';
+import { Autopilot, AutopilotOptions } from '../src/autopilot/autopilot.js';
 import { DEFAULT_POLICY } from '../src/autopilot/policy.js';
 import { EventStore } from '../src/event-store.js';
 import { registerPolicyTools } from '../src/tools/policy-tools.js';
@@ -20,10 +20,10 @@ import type { BotConnection } from '../src/bot-connection.js';
 
 const VERSION = '1.21.8';
 const registry = minecraftData(VERSION);
-const REFLEX_KEYS = ['creeperEvade', 'hazardEscape', 'lowHealthRetreat', 'selfDefense', 'autoEat'] as const;
+const REFLEX_KEYS = ['creeperEvade', 'lowHealthRetreat', 'selfDefense', 'autoEat'] as const;
 
 /** A bot with real events (so the reflex engine subscribes), standing safely in the open with bread in its inventory. */
-function fakeBot({ food = 20 } = {}) {
+function fakeBot({ food = 20, lavaAtFeet = false } = {}) {
   let finishEating: (() => void) | null = null;
   const self = { id: 1, type: 'player', username: 'ClaudeBot', position: new Vec3(0, 64, 0), metadata: [] as unknown[] };
   return Object.assign(new EventEmitter(), {
@@ -38,7 +38,12 @@ function fakeBot({ food = 20 } = {}) {
     oxygenLevel: 20,
     heldItem: null as unknown,
     inventory: { items: () => [{ name: 'bread', type: registry.itemsByName.bread.id, count: 3, slot: 36 }] },
-    blockAt: (position: Vec3) => ({ name: 'air', position }),
+    // Air everywhere, or (M8 instinct tests) lava at the bot's feet.
+    blockAt: (position: Vec3) => {
+      const p = position.floored();
+      return { name: lavaAtFeet && p.x === 0 && p.y === 64 && p.z === 0 ? 'lava' : 'air', position };
+    },
+    look: sinon.stub().resolves(),
     pathfinder: { goal: null as unknown, stop: sinon.stub(), setGoal: sinon.stub(), goto: sinon.stub().resolves() },
     clearControlStates: sinon.stub(),
     setControlState: sinon.stub(),
@@ -52,10 +57,10 @@ function fakeBot({ food = 20 } = {}) {
 
 type FakeBot = ReturnType<typeof fakeBot>;
 
-function setup({ bind = true }: { bind?: boolean } = {}) {
+function setup({ bind = true, decisions, lavaAtFeet = false }: { bind?: boolean; decisions?: AutopilotOptions['decisions']; lavaAtFeet?: boolean } = {}) {
   const events = new EventStore();
-  const autopilot = new Autopilot({ events });
-  const bot = fakeBot();
+  const autopilot = new Autopilot({ events, decisions });
+  const bot = fakeBot({ lavaAtFeet });
   if (bind) autopilot.bind(bot as never);
   const { factory, getTool } = createFactory();
   registerPolicyTools(factory, () => autopilot, events);
@@ -112,7 +117,7 @@ test('get-policy shows the default policy: every reflex on, stance auto, players
     t.notRegex(lineOf(text, key), OFF, `${key} should not be shown as off`);
   }
   const d = DEFAULT_POLICY.reflexes;
-  t.true(numbersIn(lineOf(text, 'hazardEscape')).includes(d.hazardEscape.lowAir));
+  t.true(numbersIn(lineOf(text, 'lowAir')).includes(DEFAULT_POLICY.instinct.lowAir), 'the instinct low-air threshold');
   t.true(numbersIn(lineOf(text, 'lowHealthRetreat')).includes(d.lowHealthRetreat.health));
   t.true(numbersIn(lineOf(text, 'lowHealthRetreat')).includes(d.lowHealthRetreat.radius));
   t.true(numbersIn(lineOf(text, 'autoEat')).includes(d.autoEat.food));
@@ -162,6 +167,7 @@ test('set-policy changes several fields in one call and leaves every other field
       selfDefense: { enabled: true, stance: 'flee' },
       lowHealthRetreat: { ...DEFAULT_POLICY.reflexes.lowHealthRetreat, health: 8 }
     },
+    instinct: DEFAULT_POLICY.instinct,
     combat: { ...DEFAULT_POLICY.combat, retreatHealth: 9 },
     chat: DEFAULT_POLICY.chat,
     decisions: DEFAULT_POLICY.decisions
@@ -291,8 +297,9 @@ test('binding the same bot again keeps the policy and a single set of tick liste
   t.false(autopilot.policy.get().reflexes.autoEat.enabled, 'a repeated ready callback is not a rejoin');
   t.is(policyEvents().filter(message => message.startsWith('policy reset to defaults')).length, 1);
   t.is(autopilot.reflexes, engine);
-  t.is(bot.listenerCount('physicsTick'), 1);
-  t.is(bot.listenerCount('death'), 1);
+  // One each for the reflex engine and the instinct (M8).
+  t.is(bot.listenerCount('physicsTick'), 2);
+  t.is(bot.listenerCount('death'), 2);
   bot.emit('physicsTick');
   t.is(autopilot.reflexes.timing().ticks, 1, 'one evaluation per game tick');
 });
@@ -318,7 +325,7 @@ function listenerTotal(bot: FakeBot): number {
 test('unbind removes every listener the autopilot added to the bot, and later ticks do nothing', (t) => {
   const { autopilot, bot } = setup({ bind: false });
   autopilot.bind(bot as never);
-  t.is(bot.listenerCount('physicsTick'), 1);
+  t.is(bot.listenerCount('physicsTick'), 2, 'the reflex engine and the instinct');
 
   autopilot.unbind('disconnected');
 
@@ -337,7 +344,7 @@ test('binding a new bot leaves no listeners on the old one', (t) => {
   t.teardown(() => autopilot.unbind('test finished'));
 
   t.is(listenerTotal(first), 0);
-  t.is(second.listenerCount('physicsTick'), 1);
+  t.is(second.listenerCount('physicsTick'), 2);
 });
 
 test('noteDamage before any bot is bound, or after unbind, does not throw', (t) => {
@@ -526,7 +533,7 @@ async function realServer(t: import('ava').ExecutionContext, { bind = true }: { 
   return { autopilot, client, call, policyEvents };
 }
 
-test('fix 12 (real MCP): the policy tools are listed and set-policy takes the four policy groups', async (t) => {
+test('fix 12 (real MCP): the policy tools are listed and set-policy takes the five policy groups', async (t) => {
   const { client } = await realServer(t);
 
   const { tools } = await client.listTools();
@@ -535,7 +542,7 @@ test('fix 12 (real MCP): the policy tools are listed and set-policy takes the fo
   const setPolicy = tools.find(tool => tool.name === 'set-policy');
   t.truthy(setPolicy);
   const properties = Object.keys((setPolicy?.inputSchema.properties ?? {}) as Record<string, unknown>).sort();
-  t.deepEqual(properties, ['chat', 'combat', 'decisions', 'reflexes']);
+  t.deepEqual(properties, ['chat', 'combat', 'decisions', 'instinct', 'reflexes']);
 });
 
 test('fix 12 (real MCP): an unknown group (party) next to a valid combat change is an error and nothing is applied', async (t) => {
@@ -631,4 +638,172 @@ test('fix 10 (real MCP): set-policy with an empty group is an error; attackPlaye
   t.false(second.isError, second.text);
   t.regex(second.text, /warning[^\n]*attackPlayers|attackPlayers[^\n]*warning/i);
   t.is(policyEvents().filter(message => /warning/i.test(message) && message.includes('attackPlayers')).length, 2);
+});
+
+// ---------------------------------------------------------------------------------------------------------------
+// M8: the instinct group and its status (E-011, F-018, F-040). No test here reaches the network: every autopilot gets
+// an injected key getter and fetch.
+
+const NO_KEY = { getKey: () => undefined, fetch: sinon.stub().rejects(new Error('no network in tests')) };
+const FAKE_KEY = 'sk-or-v1-FAKE-policy-tools-instinct-0000';
+
+/** The get-policy status line for the instinct (the policy text itself has an "Instinct (...)" section header). */
+function instinctLine(text: string): string | undefined {
+  return text.split('\n').find(line => /^Instinct: /.test(line));
+}
+
+test('M8: set-policy with instinct.intent changes it, writes a policy event and get-policy shows it', async (t) => {
+  const { call, autopilot, policyEvents } = setup({ decisions: NO_KEY });
+  t.teardown(() => autopilot.unbind('test finished'));
+  const before = policyEvents().length;
+
+  const set = await call('set-policy', { instinct: { intent: 'diving to the ocean monument on purpose' } });
+
+  t.false(set.isError, set.text);
+  t.regex(set.text, /instinct\.intent/);
+  t.is(autopilot.policy.get().instinct.intent, 'diving to the ocean monument on purpose');
+  t.deepEqual(autopilot.policy.get(), { ...DEFAULT_POLICY, instinct: { ...DEFAULT_POLICY.instinct, intent: 'diving to the ocean monument on purpose' } });
+  t.deepEqual(policyEvents().slice(before), ['set-policy changed instinct.intent']);
+  t.true((await call('get-policy')).text.includes('diving to the ocean monument on purpose'));
+});
+
+const instinctRejected: [string, Record<string, unknown>, string][] = [
+  ['an intent of 301 characters', { instinct: { intent: 'x'.repeat(301) } }, 'intent'],
+  ['a reaskMs below 500', { instinct: { reaskMs: 499 } }, 'reaskMs'],
+  ['an unknown instinct field', { instinct: { panic: true } }, 'panic'],
+  ['the removed reflexes.hazardEscape', { reflexes: { hazardEscape: { enabled: false } } }, 'hazardEscape']
+];
+
+for (const [title, args, field] of instinctRejected) {
+  test(`M8: set-policy with ${title} is an error and changes nothing`, async (t) => {
+    const { call, autopilot, policyEvents } = setup({ decisions: NO_KEY });
+    t.teardown(() => autopilot.unbind('test finished'));
+    const eventsBefore = policyEvents();
+
+    const result = await call('set-policy', args);
+
+    t.true(result.isError);
+    t.true(result.text.includes(field), `the error names ${field}: ${result.text}`);
+    t.deepEqual(autopilot.policy.get(), DEFAULT_POLICY);
+    t.deepEqual(policyEvents(), eventsBefore);
+  });
+}
+
+test('M8: get-policy without a decision key shows the instinct section and says it is offline, with no action running', async (t) => {
+  const { call, autopilot } = setup({ decisions: NO_KEY });
+  t.teardown(() => autopilot.unbind('test finished'));
+
+  const { text } = await call('get-policy');
+
+  t.regex(text, /^Instinct \(/m, 'the policy text has an instinct section');
+  const line = instinctLine(text) ?? '';
+  t.regex(line, /offline/, `status line: ${line}`);
+  t.regex(line, /\b0 call\(s\) in the last minute/);
+  t.true(text.split('\n').includes('No instinct action is running'));
+  t.false(text.includes('Last instinct decision'), 'no decision has been made');
+});
+
+test('M8: get-policy before the bot joined shows the instinct settings but no instinct status', async (t) => {
+  const { call } = setup({ bind: false, decisions: NO_KEY });
+
+  const { text, isError } = await call('get-policy');
+
+  t.false(isError);
+  t.regex(text, /^Instinct\b/m, 'the policy text still has its instinct section');
+  t.is(instinctLine(text), undefined, 'no status line without a bot');
+  t.false(text.includes('No instinct action is running'));
+});
+
+test('M8: get-policy says the instinct is online with a key, and turned off after set-policy instinct.enabled false', async (t) => {
+  const fetch = sinon.stub().rejects(new Error('no network in tests'));
+  const { call, autopilot } = setup({ decisions: { getKey: () => FAKE_KEY, fetch } });
+  t.teardown(() => autopilot.unbind('test finished'));
+
+  t.regex(instinctLine((await call('get-policy')).text) ?? '', /^Instinct: online\b/);
+  const off = await call('set-policy', { instinct: { enabled: false } });
+  t.false(off.isError, off.text);
+  t.regex(instinctLine((await call('get-policy')).text) ?? '', /turned off/);
+  t.true(fetch.notCalled, 'nothing was asked: the bot stands safely in the open');
+});
+
+test.serial('M8: after an instinct decision, get-policy counts the call and shows the last decision', async (t) => {
+  const clock = sinon.useFakeTimers({ now: 1.7e12 });
+  t.teardown(() => clock.restore());
+  // The decision model leaves it to the AI player.
+  const answers = {
+    action: { type: 'choice', choice: 'ask_llm', confidence: 0.9, probabilities: { continue: 0.05, ask_llm: 0.9, none: 0.05 } },
+    urgent: { type: 'noul', noul: 0.2 }
+  };
+  const fetch = sinon.stub().resolves({ ok: true, status: 200, text: async () => JSON.stringify({ model: 'test/decider-1', answers }) });
+  const { call, autopilot, bot, events } = setup({ decisions: { getKey: () => FAKE_KEY, fetch } });
+  t.teardown(() => autopilot.unbind('test finished'));
+
+  // On fire in the open: a cue for the instinct.
+  bot.entity.metadata[0] = 0x01;
+  bot.emit('physicsTick');
+  await clock.tickAsync(10);
+
+  t.true(fetch.calledOnce, 'one instinct request');
+  const { text } = await call('get-policy');
+  t.regex(instinctLine(text) ?? '', /^Instinct: online; 1 call\(s\) in the last minute/);
+  t.true(text.split('\n').includes('No instinct action is running'), 'ask_llm runs no action');
+  const last = text.split('\n').find(line => line.startsWith('Last instinct decision: ')) ?? '';
+  t.regex(last, /on fire/, last);
+  t.regex(last, /ask_llm/, last);
+  t.is(autopilot.arbiter.holder(), null, 'the body was not taken');
+  t.true(events.query({ types: ['instinct'], limit: 20 }).events.some(event => event.message.includes('ask_llm')));
+});
+
+for (const [label, decisions] of [
+  ['the request fails', {}],
+  ['decisions are turned off in the policy', { decisions: { enabled: false } }]
+] as const) {
+  test.serial(`M8: with a key but ${label}, get-policy says the instinct is offline and why; the body is not taken`, async (t) => {
+    const clock = sinon.useFakeTimers({ now: 1.7e12 });
+    t.teardown(() => clock.restore());
+    const fetch = sinon.stub().rejects(new Error('connection refused'));
+    const { call, autopilot, bot, events } = setup({ decisions: { getKey: () => FAKE_KEY, fetch } });
+    t.teardown(() => autopilot.unbind('test finished'));
+    if ('decisions' in decisions) t.false((await call('set-policy', decisions)).isError);
+
+    bot.entity.metadata[0] = 0x01;
+    bot.emit('physicsTick');
+    await clock.tickAsync(10);
+
+    const line = instinctLine((await call('get-policy')).text) ?? '';
+    t.regex(line, /offline/, line);
+    if ('decisions' in decisions) {
+      t.true(fetch.notCalled, 'decisions off: no request');
+    } else {
+      t.true(fetch.calledOnce);
+      t.regex(line, /http_error/, `the reason is named: ${line}`);
+    }
+    const offline = events.query({ types: ['instinct'], limit: 20 }).events.filter(event => event.message.includes('instinct offline'));
+    t.is(offline.length, 1);
+    t.is(autopilot.arbiter.holder(), null, 'the body is not taken');
+  });
+}
+
+test.serial('M8: get-policy shows the instinct action that is running', async (t) => {
+  const clock = sinon.useFakeTimers({ now: 1.7e12 });
+  t.teardown(() => clock.restore());
+  const answers = {
+    action: { type: 'choice', choice: 'leave_lava', confidence: 0.9, probabilities: { leave_lava: 0.9, continue: 0.05, ask_llm: 0.05, none: 0 } },
+    urgent: { type: 'noul', noul: 0.9 }
+  };
+  const fetch = sinon.stub().resolves({ ok: true, status: 200, text: async () => JSON.stringify({ model: 'test/decider-1', answers }) });
+  const { call, autopilot, bot } = setup({ decisions: { getKey: () => FAKE_KEY, fetch }, lavaAtFeet: true });
+  t.teardown(() => autopilot.unbind('test finished'));
+
+  bot.emit('physicsTick');
+  await clock.tickAsync(500);
+
+  t.true(fetch.calledOnce);
+  t.is(autopilot.arbiter.holder()?.holder, 'instinct leave_lava');
+  const { text } = await call('get-policy');
+  const running = text.split('\n').find(line => line.startsWith('Instinct action running now: ')) ?? '';
+  t.regex(running, /leave_lava/, text);
+  t.regex(running, /lava/);
+  t.false(text.split('\n').includes('No instinct action is running'));
+  t.regex(text.split('\n').find(line => line.startsWith('Last instinct decision: ')) ?? '', /leave_lava/);
 });

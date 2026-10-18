@@ -1,4 +1,4 @@
-// Contract: docs/BLUEPRINT.md F-001 (M1–M3 scope: arbiter, tasks, behaviors, policy, reflexes, bind/unbind; decisions come in M4).
+// Contract: docs/BLUEPRINT.md F-001 (arbiter, tasks, behaviors, policy, reflexes, decisions, bind/unbind; the instinct since M8, E-011).
 import type mineflayer from 'mineflayer';
 import { ActionArbiter, HolderInfo, PRIORITY } from './action-arbiter.js';
 import { TaskManager, TaskRecord, BehaviorDefinition } from './task-manager.js';
@@ -15,6 +15,7 @@ import { findNearbyEntities } from '../tools/entity-utils.js';
 import minecraftData from 'minecraft-data';
 import { DamageInfo, ReflexEngine } from './reflex-engine.js';
 import { REFLEXES } from './reflexes.js';
+import { InstinctEngine } from './instinct/instinct-engine.js';
 import type { EventStore } from '../event-store.js';
 import type { WaypointStore } from '../waypoint-store.js';
 import { stopPathfinder } from '../tools/movement-utils.js';
@@ -44,6 +45,7 @@ export class Autopilot {
   private bot: mineflayer.Bot | null = null;
   private arbiterInstance: ActionArbiter | null = null;
   private reflexEngine: ReflexEngine | null = null;
+  private instinctEngine: InstinctEngine | null = null;
   readonly tasks: TaskManager;
   readonly policy: PolicyStore;
   readonly decisions: OpenRouterClient;
@@ -105,6 +107,11 @@ export class Autopilot {
     return this.reflexEngine;
   }
 
+  get instinct(): InstinctEngine {
+    if (!this.instinctEngine) throw new AutopilotNotReady();
+    return this.instinctEngine;
+  }
+
   bind(bot: mineflayer.Bot): void {
     if (this.bot === bot) return;
     if (this.bot) this.unbind('rebound to a new bot');
@@ -132,6 +139,18 @@ export class Autopilot {
       log: this.options.log
     });
     this.reflexEngine.start();
+    // Started after the reflex engine, so on death its onDeath cancels the task before the instinct lets go of the
+    // body (nothing resumes).
+    this.instinctEngine = new InstinctEngine({
+      bot,
+      arbiter,
+      tasks: this.tasks,
+      getPolicy: () => this.policy.get(),
+      events: this.options.events,
+      decide: (state, questions) => this.decisions.decide(state, questions, { budget: 'instinct' }),
+      log: this.options.log
+    });
+    this.instinctEngine.start();
   }
 
   unbind(reason = 'disconnected'): void {
@@ -141,6 +160,8 @@ export class Autopilot {
     void this.tasks.cancelAll(reason);
     this.reflexEngine?.stop(reason);
     this.reflexEngine = null;
+    this.instinctEngine?.stop(reason);
+    this.instinctEngine = null;
     this.bot = null;
     this.arbiterInstance = null;
   }

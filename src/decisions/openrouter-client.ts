@@ -46,7 +46,12 @@ export interface ClientStatus {
   model: string;
   callsLastMinute: number;
   callsLastHour: number;
+  /** The instinct's own budget (M8), counted apart from chat triage and combat judgments. */
+  instinctCallsLastMinute: number;
 }
+
+/** Which per-minute limit a call counts against: decisions.maxCallsPerMinute or instinct.maxCallsPerMinute. */
+export type DecisionBudget = 'decisions' | 'instinct';
 
 type FetchLike = (url: string, init: { method: string; headers: Record<string, string>; body?: string; signal: AbortSignal }) => Promise<{
   ok: boolean;
@@ -107,6 +112,7 @@ function parseAnswer(question: DecisionQuestion, raw: unknown): DecisionAnswer |
 
 export class OpenRouterClient {
   private calls: number[] = [];
+  private instinctCalls: number[] = [];
   private readonly fetch: FetchLike;
   private readonly now: () => number;
 
@@ -134,18 +140,27 @@ export class OpenRouterClient {
   status(): ClientStatus {
     const now = this.now();
     this.calls = this.calls.filter(time => now - time < HOUR_MS);
+    this.instinctCalls = this.instinctCalls.filter(time => now - time < MINUTE_MS);
     const decisions = this.options.getPolicy().decisions;
     return {
       configured: this.isConfigured(),
       enabled: decisions.enabled,
       model: decisions.model,
       callsLastMinute: this.calls.filter(time => now - time < MINUTE_MS).length,
-      callsLastHour: this.calls.length
+      callsLastHour: this.calls.length,
+      instinctCallsLastMinute: this.instinctCalls.length
     };
   }
 
-  /** One decision request. Never retries; every failure is a typed result, never a thrown error or a made-up answer. */
-  async decide(state: Record<string, unknown>, questions: Record<string, DecisionQuestion>, { model }: { model?: string } = {}): Promise<DecisionResult> {
+  /**
+   * One decision request. Never retries; every failure is a typed result, never a thrown error or a made-up answer.
+   * The instinct has its own budget, so a chatty player cannot use up the calls the instinct needs (BLUEPRINT I4).
+   */
+  async decide(
+    state: Record<string, unknown>,
+    questions: Record<string, DecisionQuestion>,
+    { model, budget = 'decisions' }: { model?: string; budget?: DecisionBudget } = {}
+  ): Promise<DecisionResult> {
     const started = this.now();
     const fail = (error: DecisionErrorKind, message: string): DecisionResult => ({ ok: false, error, message: this.scrub(message), latencyMs: this.now() - started });
     const policy = this.options.getPolicy().decisions;
@@ -156,10 +171,16 @@ export class OpenRouterClient {
     if (names.length === 0 || names.length > MAX_QUESTIONS) return fail('invalid_response', `a request needs 1 to ${MAX_QUESTIONS} questions`);
 
     const status = this.status();
-    if (status.callsLastMinute >= policy.maxCallsPerMinute) {
-      return fail('rate_limited', `rate limit reached (${policy.maxCallsPerMinute} decisions per minute)`);
+    if (budget === 'instinct') {
+      const limit = this.options.getPolicy().instinct.maxCallsPerMinute;
+      if (status.instinctCallsLastMinute >= limit) return fail('rate_limited', `rate limit reached (${limit} instinct decisions per minute)`);
+      this.instinctCalls.push(started);
+    } else {
+      if (status.callsLastMinute >= policy.maxCallsPerMinute) {
+        return fail('rate_limited', `rate limit reached (${policy.maxCallsPerMinute} decisions per minute)`);
+      }
+      this.calls.push(started);
     }
-    this.calls.push(started);
 
     const timeoutMs = this.options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     const controller = new AbortController();

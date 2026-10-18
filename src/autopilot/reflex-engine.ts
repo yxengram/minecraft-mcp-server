@@ -9,7 +9,7 @@ import type { EventStore } from '../event-store.js';
 import type { CombatJudgment, CombatSituation } from '../decisions/decision-hooks.js';
 import { stopPathfinder } from '../tools/movement-utils.js';
 
-export type ReflexName = 'creeper-evade' | 'hazard-escape' | 'low-health-retreat' | 'self-defense' | 'auto-eat';
+export type ReflexName = 'creeper-evade' | 'low-health-retreat' | 'self-defense' | 'auto-eat';
 
 /** The most recent hit the bot took (E-005 onDamage). */
 export interface DamageInfo {
@@ -107,7 +107,7 @@ export class ReflexEngine {
     this.abortRunning('the bot died');
   };
   // mineflayer keeps the bot's own entity data across a respawn, and the server only sends values that change, so a
-  // burning flag or low air from the moment of death would stay set and keep triggering hazard-escape.
+  // burning flag or low air from the moment of death would stay set and keep the instinct asking about them.
   private readonly onSpawn = () => {
     if (!this.diedSinceSpawn) return;
     this.diedSinceSpawn = false;
@@ -162,7 +162,7 @@ export class ReflexEngine {
       const threats = assessThreats(bot, {
         radius: Math.max(DEFAULT_THREAT_RADIUS, policy.reflexes.lowHealthRetreat.radius),
         lowHealth: policy.reflexes.lowHealthRetreat.health,
-        lowAir: policy.reflexes.hazardEscape.lowAir
+        lowAir: policy.instinct.lowAir
       });
       const context: TriggerContext = { bot, policy, threats, damage, now };
       const reflexes = this.options.reflexes;

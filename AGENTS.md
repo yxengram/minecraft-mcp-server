@@ -39,7 +39,7 @@
 ## 恢复
 
 - 每个里程碑以独立提交完成，回退提交即可恢复代码。Autopilot 不保存持久数据；策略与任务只在内存中。
-- 运行时的应急手段：`set-policy` 关闭反射或决策；`stop-pathfinding` 取消当前任务。
+- 运行时的应急手段：`set-policy` 关闭反射、本能（`instinct.enabled`）或决策；`stop-pathfinding` 取消当前任务。
 
 ## 机密
 

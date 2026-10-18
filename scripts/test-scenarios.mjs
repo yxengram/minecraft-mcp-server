@@ -5,11 +5,12 @@
 //   npm run build
 //   npm run test:scenarios -- <LAN_PORT> --allow-world-changes [--only <scenario>] [--rounds <n>]
 //
-// Configurations:
-//   llm-only            reflexes off: only what the LLM's tools would do (nobody reacts in time)
-//   reflexes            default policy, no decision model
-//   reflexes+decisions  default policy with the decision model (needs OPENROUTER_API_KEY; skipped without it)
-// The reflexes configuration must pass every scenario; the others are for comparison.
+// Configurations (M8, BLUEPRINT E-011):
+//   llm-only  reflexes and instinct off: only what the LLM's tools would do (nobody reacts in time)
+//   no-key    default policy without a decision model: the remaining reflexes work, the instinct is offline (fire,
+//             lava and water are only reported to the LLM, by design)
+//   instinct  default policy with the decision model (needs OPENROUTER_API_KEY; skipped without it)
+// The instinct configuration must pass every scenario; the others are for comparison.
 import { createArena, parseLiveArgs, SetupFailed, sleep, ARENA_RADIUS } from './lib/live-arena.mjs';
 
 const { port, only, args } = parseLiveArgs('The scenario test');
@@ -18,16 +19,16 @@ const BOT_NAME = 'MCPWorldTest';
 const HELPER_NAME = 'MCPHelper';
 const key = process.env.OPENROUTER_API_KEY;
 
-const REFLEXES_OFF = {
+const AUTOPILOT_OFF = {
   reflexes: {
-    creeperEvade: { enabled: false }, hazardEscape: { enabled: false }, lowHealthRetreat: { enabled: false },
-    selfDefense: { enabled: false }, autoEat: { enabled: false }
-  }
+    creeperEvade: { enabled: false }, lowHealthRetreat: { enabled: false }, selfDefense: { enabled: false }, autoEat: { enabled: false }
+  },
+  instinct: { enabled: false }
 };
 const CONFIGS = [
-  { name: 'llm-only', policy: REFLEXES_OFF, withKey: false },
-  { name: 'reflexes', policy: null, withKey: false, required: true },
-  { name: 'reflexes+decisions', policy: null, withKey: true }
+  { name: 'llm-only', policy: AUTOPILOT_OFF, withKey: false },
+  { name: 'no-key', policy: null, withKey: false },
+  { name: 'instinct', policy: null, withKey: true, required: true }
 ];
 
 // ---- scenarios: each returns { ok, detail } and must leave the arena reusable ---------------------------------------
@@ -116,6 +117,17 @@ const SCENARIOS = {
     return { ok: lastFire > 0 && lastFire <= 6000, detail: lastFire ? `last fire damage ${(lastFire / 1000).toFixed(1)}s after ignition` : 'never caught fire' };
   },
 
+  /** Under water below a stone ceiling, with an air pocket at the end of the pool; success: gets to air, alive (M8). */
+  async 'drowning-pocket'(s) {
+    return drowning(s, { pocket: true });
+  },
+
+  /** The same pool without a pocket but with a stone pickaxe; success: digs up through the ceiling to air, alive (M8). */
+  async 'drowning-dig'(s) {
+    await s.cmd('/give @s stone_pickaxe');
+    return drowning(s, { pocket: false });
+  },
+
   /** A player asks the bot for help, then says "follow me"; success: chat_request within 3 s and no following. */
   async 'chat-triage'(s) {
     const helper = s.arena.helper;
@@ -137,6 +149,36 @@ const SCENARIOS = {
   }
 };
 
+/**
+ * A sealed water pool inside a stone block: 5x3x3 of water whose ceiling is solid stone, so swimming straight up
+ * cannot reach air. With `pocket`, the east end has two blocks of air above the water to swim to.
+ */
+async function drowning(s, { pocket }) {
+  const { cmd, call } = s;
+  const { cx, y0, cz } = s.arena;
+  const [x0, x1, z0, z1] = [cx + 2, cx + 8, cz - 2, cz + 2];
+  await cmd(`/fill ${x0} ${y0} ${z0} ${x1} ${y0 + 5} ${z1} stone`);
+  await cmd(`/fill ${x0 + 1} ${y0} ${z0 + 1} ${x1 - 1} ${y0 + 2} ${z1 - 1} water`);
+  if (pocket) await cmd(`/fill ${x1 - 1} ${y0 + 3} ${z0 + 1} ${x1 - 1} ${y0 + 4} ${z1 - 1} air`);
+  const since = await s.cursor();
+  await call('send-chat', { message: `/tp @s ${x0 + 2} ${y0} ${cz}` });
+  const t0 = Date.now();
+  let escaped = null;
+  while (Date.now() - t0 < 30000) {
+    if (await s.died(since)) break;
+    escaped = (await s.eventsSince(since, ['instinct'])).find(line => /\] (swim_to_air|dig_up|swim_up) → (?!failed|timeout|interrupted)/.test(line));
+    if (escaped) break;
+    await sleep(500);
+  }
+  const died = await s.died(since);
+  const how = escaped ? `${escaped.replace(/^.*\] /, '')} after ${((Date.now() - t0) / 1000).toFixed(1)}s` : 'did not get out';
+  const result = { ok: Boolean(escaped) && !died, detail: `${how}${died ? ', bot drowned' : ''}, air ${(await call('get-observation')).match(/air: (\d+)/)?.[1]}/20, health ${await s.health()}` };
+  // Take the pool away so the next scenario starts on open ground.
+  await cmd(`/tp @s ${cx} ${y0} ${cz}`);
+  await cmd(`/fill ${x0} ${y0} ${z0} ${x1} ${y0 + 5} ${z1} air`);
+  return result;
+}
+
 // ---- running ---------------------------------------------------------------------------------------------------
 
 function extend(session) {
@@ -157,7 +199,7 @@ function extend(session) {
     const r = ARENA_RADIUS - 1;
     await cmd('/kill @e[type=!player,distance=..40]');
     await cmd(`/fill ${cx - r} ${y0 - 5} ${cz - r} ${cx + r} ${y0 - 1} ${cz + r} stone`);
-    await cmd(`/fill ${cx - r} ${y0} ${cz - r} ${cx + r} ${y0 + 4} ${cz + r} air`);
+    await cmd(`/fill ${cx - r} ${y0} ${cz - r} ${cx + r} ${y0 + 6} ${cz + r} air`);
     await cmd('/effect clear @s');
     await cmd('/clear @s');
     await cmd('/effect give @s minecraft:instant_health 1 5 true');
@@ -229,6 +271,6 @@ console.log('\n| round | scenario | configuration | result | details |\n|---|---
 for (const row of table) console.log(`| ${row.round} | ${row.scenario} | ${row.config} | ${row.result} | ${row.detail} |`);
 const requiredFailures = table.filter(row => row.required && row.result !== 'pass');
 console.log(requiredFailures.length === 0 && !setupFailed
-  ? '\nScenario test passed: every scenario passed with reflexes on'
+  ? '\nScenario test passed: every scenario passed in the instinct configuration'
   : `\nScenario test failed: ${requiredFailures.map(row => `${row.scenario} (round ${row.round})`).join(', ') || 'setup'}`);
 process.exitCode = requiredFailures.length === 0 && !setupFailed ? 0 : 1;

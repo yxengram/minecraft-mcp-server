@@ -240,6 +240,21 @@ export class TaskManager {
     return { ok: true, task: { ...task.record } };
   }
 
+  /**
+   * Holds the current task until the LLM calls resume-task or cancel-task, as a manual command would (used when the
+   * instinct leaves a danger to the LLM, M8). Stops the body only if the task was driving it.
+   */
+  hold(reason: string): StartResult {
+    const task = this.current;
+    if (!task) return { ok: false, error: 'There is no running task' };
+    if (task.lease?.isActive()) this.stopBody();
+    const lease = task.lease;
+    task.lease = null;
+    lease?.release();
+    this.markPaused(task, `${reason} (waiting for resume-task or cancel-task)`, true);
+    return { ok: true, task: { ...task.record } };
+  }
+
   async cancel(id: string | undefined, reason: string): Promise<StartResult> {
     const task = this.current;
     if (!task || (id && task.record.id !== id)) {

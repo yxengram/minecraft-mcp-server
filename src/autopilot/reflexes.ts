@@ -1,5 +1,6 @@
-// Contract: docs/BLUEPRINT.md F-013. The five reflexes, highest priority first. The first three are critical (manual
-// commands wait for them); self-defense and auto-eat are routine (manual commands interrupt them).
+// Contract: docs/BLUEPRINT.md F-013. The four remaining reflexes, highest priority first. The first two are critical
+// (manual commands wait for them); self-defense and auto-eat are routine (manual commands interrupt them). Fire, lava
+// and water moved to the instinct in M8 (F-036 to F-040); the rest follow in M9.
 import type mineflayer from 'mineflayer';
 import { Vec3 } from 'vec3';
 import pathfinderPkg from 'mineflayer-pathfinder';
@@ -15,7 +16,8 @@ import type { CombatSituation, CombatStance } from '../decisions/decision-hooks.
 import { armorPoints } from '../tools/gamestate-tools.js';
 import { stopPathfinder } from '../tools/movement-utils.js';
 import { BotEntity, entityLabel, refreshEntity } from '../tools/entity-utils.js';
-import { describeOffset, isPassable, isWaterLike } from '../tools/terrain-utils.js';
+import { describeOffset, isPassable } from '../tools/terrain-utils.js';
+import { isHazard, isWater, yawToward } from './hazards.js';
 
 type Block = NonNullable<ReturnType<mineflayer.Bot['blockAt']>>;
 
@@ -23,8 +25,6 @@ const TICK_MS = 50;
 export const CREEPER_SAFE_DISTANCE = 8;
 const SELF_DEFENSE_FLEE_DISTANCE = 16;
 const AUTO_EAT_HOSTILE_RADIUS = 8;
-const WATER_SEARCH_RADIUS = 8;
-const SAFE_SPOT_RADIUS = 5;
 const MAX_SAFE_DROP = 3;
 // Not moving this far within a second while running away means the way is blocked: let the pathfinder find one.
 const STUCK_MS = 1000;
@@ -35,23 +35,11 @@ const FLEE_GOAL_DISTANCE = 12;
 const AUTO_FIGHT_MIN_HEALTH = 10;
 const AUTO_FIGHT_MAX_HOSTILES = 2;
 
-const HAZARD_BLOCKS = new Set([
-  'lava', 'fire', 'soul_fire', 'magma_block', 'campfire', 'soul_campfire', 'cactus', 'sweet_berry_bush',
-  'wither_rose', 'powder_snow', 'pointed_dripstone'
-]);
 // Food that hurts (poison, hunger, teleporting) or is too valuable to eat automatically.
 const AVOID_FOODS = new Set([
   'rotten_flesh', 'spider_eye', 'poisonous_potato', 'pufferfish', 'chicken', 'chorus_fruit',
   'golden_apple', 'enchanted_golden_apple', 'golden_carrot', 'suspicious_stew'
 ]);
-
-function isHazard(block: Block | null): boolean {
-  return Boolean(block && HAZARD_BLOCKS.has(block.name));
-}
-
-function isWater(block: Block | null): boolean {
-  return isWaterLike(block);
-}
 
 function label(entity: BotEntity): string {
   return `${entityLabel(entity)} (id ${entity.id})`;
@@ -133,10 +121,6 @@ function awayFrom(self: Vec3, threats: Vec3[]): Vec3 {
   const length = Math.hypot(away.x, away.z);
   // Standing right on top of the threat: any direction will do.
   return length < 1e-6 ? new Vec3(1, 0, 0) : away.scaled(1 / length);
-}
-
-function yawToward(direction: Vec3): number {
-  return Math.atan2(-direction.x, -direction.z);
 }
 
 /**
@@ -258,197 +242,6 @@ const creeperEvade: ReflexDefinition = {
       return live ? [live.position] : [];
     }, () => distance() >= CREEPER_SAFE_DISTANCE);
     return live ? `moved ${distance().toFixed(1)} blocks away` : 'the creeper is gone';
-  }
-};
-
-function headInWater(bot: mineflayer.Bot): boolean {
-  return isWater(bot.blockAt(bot.entity.position.floored().offset(0, 1, 0)));
-}
-
-function inLavaNow(bot: mineflayer.Bot): boolean {
-  const feet = bot.entity.position.floored();
-  return bot.blockAt(feet)?.name === 'lava' || bot.blockAt(feet.offset(0, 1, 0))?.name === 'lava';
-}
-
-function burningNow(bot: mineflayer.Bot): boolean {
-  const flags = (bot.entity.metadata as unknown[] | undefined)?.[0];
-  return typeof flags === 'number' && (flags & 0x01) !== 0;
-}
-
-function touchingFire(bot: mineflayer.Bot): boolean {
-  const feet = bot.entity.position.floored();
-  return [feet, feet.offset(0, 1, 0), feet.offset(0, -1, 0)].some(pos => {
-    const block = bot.blockAt(pos);
-    return isHazard(block) && block?.name !== 'cactus';
-  });
-}
-
-// Water searches are cached per block the bot stands on: the trigger runs every tick while the bot burns.
-const WATER_CACHE_MS = 1000;
-const waterCache = new WeakMap<mineflayer.Bot, { key: string; time: number; water: Vec3 | null }>();
-// Water the bot just failed to reach (behind a wall, below the floor) is ignored for a while, so hazard-escape does
-// not keep firing for nothing while the fire burns out.
-const UNREACHABLE_WATER_MS = 15000;
-const unreachableWater = new WeakMap<mineflayer.Bot, { position: Vec3; until: number }>();
-
-/** The nearest water block within 8 blocks (a bounded scan; mineflayer's findBlock scans whole chunk sections). */
-export function nearestWater(bot: mineflayer.Bot): Vec3 | null {
-  const feet = bot.entity.position.floored();
-  const key = feet.toString();
-  const now = Date.now();
-  const cached = waterCache.get(bot);
-  if (cached && cached.key === key && now - cached.time < WATER_CACHE_MS) return cached.water;
-
-  let best: Vec3 | null = null;
-  let bestDistance = Infinity;
-  const limit = WATER_SEARCH_RADIUS * WATER_SEARCH_RADIUS;
-  const unreachable = unreachableWater.get(bot);
-  const skip = unreachable && unreachable.until > now ? unreachable.position : null;
-  for (let dy = -2; dy <= 1; dy++) {
-    for (let dx = -WATER_SEARCH_RADIUS; dx <= WATER_SEARCH_RADIUS; dx++) {
-      for (let dz = -WATER_SEARCH_RADIUS; dz <= WATER_SEARCH_RADIUS; dz++) {
-        const distance = dx * dx + dy * dy + dz * dz;
-        if (distance > limit || distance >= bestDistance) continue;
-        const position = feet.offset(dx, dy, dz);
-        if (skip && position.equals(skip)) continue;
-        if (bot.blockAt(position, false)?.name === 'water') {
-          best = position;
-          bestDistance = distance;
-        }
-      }
-    }
-  }
-  waterCache.set(bot, { key, time: now, water: best });
-  return best;
-}
-
-/** The nearest spot within a few blocks to stand on that is not in or next to fire or lava. */
-function nearestSafeSpot(bot: mineflayer.Bot): Vec3 | null {
-  const feet = bot.entity.position.floored();
-  let best: Vec3 | null = null;
-  let bestDistance = Infinity;
-  for (let dx = -SAFE_SPOT_RADIUS; dx <= SAFE_SPOT_RADIUS; dx++) {
-    for (let dz = -SAFE_SPOT_RADIUS; dz <= SAFE_SPOT_RADIUS; dz++) {
-      for (let dy = -1; dy <= 2; dy++) {
-        const spot = feet.offset(dx, dy, dz);
-        // Prefer the bot's own level and one up (climbing out); prefer closer spots.
-        const distance = spot.distanceTo(feet) + (dy < 0 ? 1 : 0);
-        if (distance >= bestDistance) continue;
-        const body = bot.blockAt(spot);
-        const head = bot.blockAt(spot.offset(0, 1, 0));
-        const floor = bot.blockAt(spot.offset(0, -1, 0));
-        if (!body || !head || !floor || !isPassable(body) || !isPassable(head) || isPassable(floor) || isHazard(floor) || floor.name === 'water') continue;
-        const nearHazard = [[1, 0], [-1, 0], [0, 1], [0, -1], [0, 0]].some(([ox, oz]) =>
-          isHazard(bot.blockAt(spot.offset(ox, 0, oz))) || isHazard(bot.blockAt(spot.offset(ox, -1, oz))));
-        if (nearHazard) continue;
-        best = spot;
-        bestDistance = distance;
-      }
-    }
-  }
-  return best;
-}
-
-const ESCAPE_STALL_MS = 2000;
-
-const hazardEscape: ReflexDefinition = {
-  name: 'hazard-escape',
-  priority: PRIORITY.CRITICAL_REFLEX,
-  cooldownMs: 1000,
-  maxDurationMs: 5000,
-  enabled: policy => policy.reflexes.hazardEscape.enabled,
-  trigger: ({ bot, threats }) => {
-    if (threats.inLava) return { fire: 'standing in lava' };
-    if (threats.lowAir && headInWater(bot)) return { fire: `running out of air (${threats.air} left)` };
-    // Burning on safe ground can only be helped by water; without water nearby there is nothing to do but wait.
-    if (threats.onFire && (touchingFire(bot) || nearestWater(bot))) return { fire: 'on fire' };
-    return null;
-  },
-  async run({ bot, signal, policy }) {
-    const lowAir = policy.reflexes.hazardEscape.lowAir;
-    let mode: 'lava' | 'swim' | 'walk' | null = null;
-    let lavaSpot: { from: string; spot: Vec3 | null } | null = null;
-    let target: Vec3 | null = null;
-    let goal: InstanceType<typeof goals.GoalBlock> | null = null;
-    let closest = Infinity;
-    let progressAt = Date.now();
-    let triedSafeSpot = false;
-
-    const enter = (next: 'lava' | 'swim' | 'walk') => {
-      if (mode === next) return;
-      mode = next;
-      goal = null;
-      if (bot.pathfinder.goal) bot.pathfinder.setGoal(null);
-      bot.clearControlStates();
-    };
-
-    for (;;) {
-      signal.throwIfAborted();
-      const feet = bot.entity.position.floored();
-      const inLava = inLavaNow(bot);
-      const burning = burningNow(bot);
-      const underwater = headInWater(bot);
-
-      if (inLava) {
-        // The pathfinder cannot plan a way out of a lava pool, so steer to the nearest safe spot directly and keep
-        // jumping; leaving the liquid lifts the bot over the edge.
-        enter('lava');
-        if (!lavaSpot || lavaSpot.from !== feet.toString()) lavaSpot = { from: feet.toString(), spot: nearestSafeSpot(bot) };
-        if (lavaSpot.spot) {
-          const toward = lavaSpot.spot.offset(0.5, 0, 0.5).minus(bot.entity.position);
-          void bot.look(yawToward(toward), 0, true).catch(() => {});
-          bot.setControlState('forward', true);
-          bot.setControlState('sprint', true);
-        }
-        bot.setControlState('jump', true);
-      } else if (underwater && !burning) {
-        // Swim straight up.
-        enter('swim');
-        bot.setControlState('jump', true);
-        const air = (bot.entity.metadata as unknown[] | undefined)?.[1];
-        if (typeof air === 'number' && air / 15 > lowAir + 4) return 'air recovered';
-      } else if (burning) {
-        if (isWater(bot.blockAt(feet))) {
-          // In water: the fire goes out on the next update.
-          bot.clearControlStates();
-        } else {
-          const water = nearestWater(bot);
-          if (!water && !touchingFire(bot)) return 'out of the fire; no water nearby to put it out';
-          enter('walk');
-          if (!target) target = water ?? nearestSafeSpot(bot);
-          if (!target) throw new Error('no safe spot nearby');
-          if (!goal || bot.pathfinder.goal !== goal) {
-            goal = new goals.GoalBlock(target.x, target.y, target.z);
-            bot.pathfinder.setGoal(goal);
-          }
-          const distance = bot.entity.position.distanceTo(target);
-          if (distance < closest - 0.5) {
-            closest = distance;
-            progressAt = Date.now();
-          } else if (Date.now() - progressAt > ESCAPE_STALL_MS) {
-            // No way to the water: remember that, then step off the fire if still on it, otherwise give up.
-            if (water && target.equals(water)) {
-              unreachableWater.set(bot, { position: water, until: Date.now() + UNREACHABLE_WATER_MS });
-              waterCache.delete(bot);
-            }
-            if (triedSafeSpot || !touchingFire(bot)) return `could not reach ${water ? 'water' : 'a safe spot'}; still burning`;
-            triedSafeSpot = true;
-            target = nearestSafeSpot(bot);
-            if (!target) return 'could not reach water; still burning';
-            goal = null;
-            closest = Infinity;
-            progressAt = Date.now();
-          }
-        }
-      } else if (mode === 'swim') {
-        return 'air recovered';
-      } else if (mode === 'walk' || isWater(bot.blockAt(feet))) {
-        return 'put the fire out';
-      } else {
-        return underwater ? 'air recovered' : 'out of danger';
-      }
-      await delay(TICK_MS, signal);
-    }
   }
 };
 
@@ -656,4 +449,4 @@ const autoEat: ReflexDefinition = {
 };
 
 /** All reflexes, highest priority first (BLUEPRINT F-013). */
-export const REFLEXES: ReflexDefinition[] = [creeperEvade, hazardEscape, lowHealthRetreat, selfDefense, autoEat];
+export const REFLEXES: ReflexDefinition[] = [creeperEvade, lowHealthRetreat, selfDefense, autoEat];

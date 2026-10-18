@@ -2,12 +2,12 @@
 import { ToolFactory } from '../tool-factory.js';
 import type { Autopilot } from '../autopilot/autopilot.js';
 import type { EventStore } from '../event-store.js';
-import { chatUpdateSchema, combatUpdateSchema, decisionsUpdateSchema, describePolicy, reflexesUpdateSchema } from '../autopilot/policy.js';
+import { chatUpdateSchema, combatUpdateSchema, decisionsUpdateSchema, describePolicy, instinctUpdateSchema, reflexesUpdateSchema } from '../autopilot/policy.js';
 
 export function registerPolicyTools(factory: ToolFactory, getAutopilot: () => Autopilot, events: EventStore): void {
   factory.registerTool(
     "get-policy",
-    "Show the autopilot policy: which reflexes are on and their thresholds, the self-defense stance and the combat rules. The policy goes back to its defaults whenever the bot (re)joins the game",
+    "Show the autopilot policy: which reflexes are on and their thresholds, the instinct (decision-model choices about fire, lava and water) and whether it is online, the self-defense stance and the combat rules. The policy goes back to its defaults whenever the bot (re)joins the game",
     {},
     async () => {
       const autopilot = getAutopilot();
@@ -21,6 +21,17 @@ export function registerPolicyTools(factory: ToolFactory, getAutopilot: () => Au
         lines.push('', running ? `Reflex running now: ${running.name} (${running.reason}; ${(running.ms / 1000).toFixed(1)}s)` : 'No reflex is running');
         const { ticks, averageMs, maxMs } = autopilot.reflexes.timing();
         lines.push(`Reflex checks: ${ticks} ticks, ${averageMs.toFixed(3)} ms on average, ${maxMs.toFixed(2)} ms at most`);
+        const instinct = autopilot.instinct.status();
+        const online = !instinct.enabled
+          ? 'turned off in the policy'
+          : !status.configured
+            ? 'offline (no OPENROUTER_API_KEY); dangers are only reported as instinct events, the bot does not act on them'
+            : !status.enabled
+              ? 'offline (decisions are turned off in the policy); dangers are only reported as instinct events, the bot does not act on them'
+            : instinct.offline ? `offline at the last request (${instinct.offline}); dangers are left to you` : 'online';
+        lines.push(`Instinct: ${online}; ${status.instinctCallsLastMinute} call(s) in the last minute`);
+        lines.push(instinct.running ? `Instinct action running now: ${instinct.running.action} (${(instinct.running.ms / 1000).toFixed(1)}s; ${instinct.running.reason})` : 'No instinct action is running');
+        if (instinct.lastDecision) lines.push(`Last instinct decision: ${instinct.lastDecision}`);
       }
       return factory.createResponse(lines.join('\n'));
     }
@@ -28,9 +39,10 @@ export function registerPolicyTools(factory: ToolFactory, getAutopilot: () => Au
 
   factory.registerTool(
     "set-policy",
-    "Change part of the autopilot policy; fields you leave out keep their values, unknown fields are rejected. Example: { \"reflexes\": { \"autoEat\": { \"enabled\": false }, \"selfDefense\": { \"stance\": \"flee\" } }, \"combat\": { \"retreatHealth\": 8 } }. Reflexes: creeperEvade {enabled}, hazardEscape {enabled, lowAir}, lowHealthRetreat {enabled, health, radius}, selfDefense {enabled, stance: fight|flee|auto}, autoEat {enabled, food}. Combat: attackPlayers, avoidNeutral, retreatHealth. Chat: triage (report messages meant for the bot), commandsFrom (list of player names whose clear commands such as 'follow me' run without asking you; empty by default, replaces the whole list), replyInChat. Decisions: enabled, model, actThreshold, cautiousThreshold (0-1), maxCallsPerMinute. Health and food are 0-20, radius 1-32",
+    "Change part of the autopilot policy; fields you leave out keep their values, unknown fields are rejected. Example: { \"reflexes\": { \"autoEat\": { \"enabled\": false }, \"selfDefense\": { \"stance\": \"flee\" } }, \"combat\": { \"retreatHealth\": 8 } }. Reflexes: creeperEvade {enabled}, lowHealthRetreat {enabled, health, radius}, selfDefense {enabled, stance: fight|flee|auto}, autoEat {enabled, food}. Instinct (the decision model chooses what to do about fire, lava and water): enabled, intent (up to 300 characters telling it what you are doing, e.g. 'diving to the ocean monument on purpose'), lowAir, reaskMs, actThreshold, urgentThreshold (0-1), maxCallsPerMinute. Combat: attackPlayers, avoidNeutral, retreatHealth. Chat: triage (report messages meant for the bot), commandsFrom (list of player names whose clear commands such as 'follow me' run without asking you; empty by default, replaces the whole list), replyInChat. Decisions: enabled, model, actThreshold, cautiousThreshold (0-1), maxCallsPerMinute. Health and food are 0-20, radius 1-32",
     {
       reflexes: reflexesUpdateSchema.optional().describe("Reflex settings to change"),
+      instinct: instinctUpdateSchema.optional().describe("Instinct settings to change"),
       combat: combatUpdateSchema.optional().describe("Combat rules to change"),
       chat: chatUpdateSchema.optional().describe("Chat settings to change"),
       decisions: decisionsUpdateSchema.optional().describe("Decision model settings to change")

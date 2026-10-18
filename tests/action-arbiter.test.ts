@@ -86,7 +86,7 @@ test.serial('a manual command gives up after 10 seconds behind a critical reflex
   const clock = sinon.useFakeTimers();
   t.teardown(() => clock.restore());
   const { arbiter: a } = arbiter();
-  await a.acquire(holder('reflex hazard-escape', PRIORITY.CRITICAL_REFLEX));
+  await a.acquire(holder('reflex low-health-retreat', PRIORITY.CRITICAL_REFLEX));
 
   const pending = a.acquire(holder('manual jump', PRIORITY.MANUAL));
   await clock.tickAsync(10000);
@@ -94,7 +94,7 @@ test.serial('a manual command gives up after 10 seconds behind a critical reflex
 
   t.false(result.ok);
   if (result.ok) return;
-  t.is(result.busy.holder, 'reflex hazard-escape');
+  t.is(result.busy.holder, 'reflex low-health-retreat');
   t.is(result.waitedMs, 10000);
 });
 
@@ -103,7 +103,7 @@ test('equal and lower priorities never preempt', async (t) => {
   await a.acquire(holder('reflex creeper-evade', PRIORITY.CRITICAL_REFLEX));
 
   const routine = await a.acquire(holder('reflex auto-eat', PRIORITY.ROUTINE_REFLEX));
-  const otherCritical = await a.acquire(holder('reflex hazard-escape', PRIORITY.CRITICAL_REFLEX));
+  const otherCritical = await a.acquire(holder('reflex low-health-retreat', PRIORITY.CRITICAL_REFLEX));
 
   t.false(routine.ok);
   t.false(otherCritical.ok);
@@ -217,7 +217,7 @@ test('a critical reflex taking over from a routine one by handover keeps the tas
 
 test('acquireNow returns null without touching the body when an equal or higher priority holds it', async (t) => {
   const { arbiter: a, stopBody } = arbiter();
-  const hazard = holder('reflex hazard-escape', PRIORITY.CRITICAL_REFLEX);
+  const hazard = holder('reflex low-health-retreat', PRIORITY.CRITICAL_REFLEX);
   const hazardLease = a.acquireNow(hazard);
   t.truthy(hazardLease);
   stopBody.resetHistory();
@@ -230,7 +230,7 @@ test('acquireNow returns null without touching the body when an equal or higher 
   t.false(stopBody.called);
   t.true(hazardLease!.isActive());
   t.false(hazard.onSuspend.called);
-  t.deepEqual(a.holder(), { holder: 'reflex hazard-escape', priority: PRIORITY.CRITICAL_REFLEX });
+  t.deepEqual(a.holder(), { holder: 'reflex low-health-retreat', priority: PRIORITY.CRITICAL_REFLEX });
   hazardLease!.release();
   t.is(a.holder(), null, 'a refused acquireNow leaves nothing queued behind');
 
@@ -248,7 +248,7 @@ test('handing over a lease that no longer holds the body does not release the cu
   const { arbiter: a, stopBody } = arbiter();
   const eatLease = a.acquireNow(holder('reflex auto-eat', PRIORITY.ROUTINE_REFLEX));
   t.truthy(eatLease);
-  const hazardLease = a.acquireNow(holder('reflex hazard-escape', PRIORITY.CRITICAL_REFLEX));
+  const hazardLease = a.acquireNow(holder('reflex low-health-retreat', PRIORITY.CRITICAL_REFLEX));
   t.truthy(hazardLease);
   t.is(eatLease!.state, 'suspended');
   stopBody.resetHistory();
@@ -256,7 +256,7 @@ test('handing over a lease that no longer holds the body does not release the cu
   // auto-eat's lease is suspended, not current: passing it as `replacing` must not count as a handover.
   t.is(a.acquireNow(holder('reflex self-defense', PRIORITY.ROUTINE_REFLEX), eatLease!), null);
   t.true(hazardLease!.isActive());
-  t.is(a.holder()?.holder, 'reflex hazard-escape');
+  t.is(a.holder()?.holder, 'reflex low-health-retreat');
   t.false(stopBody.called);
 
   // Nor does a lease that was already released.

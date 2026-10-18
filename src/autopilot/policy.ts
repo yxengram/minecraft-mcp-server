@@ -1,4 +1,4 @@
-// Contract: docs/BLUEPRINT.md F-014 (reflexes and combat since M3; chat and decisions since M4).
+// Contract: docs/BLUEPRINT.md F-014 (reflexes and combat since M3; chat and decisions since M4; instinct since M8, E-011).
 // The policy lives in memory only and goes back to its defaults whenever the bot (re)joins the game.
 import { z } from 'zod';
 
@@ -19,10 +19,26 @@ export const DEFAULT_DECISION_MODEL = 'perplexity/pplx-decider-v1.2-20261016';
 
 const reflexesSchema = z.object({
   creeperEvade: z.object({ enabled: z.boolean() }).strict(),
-  hazardEscape: z.object({ enabled: z.boolean(), lowAir: vital() }).strict(),
   lowHealthRetreat: z.object({ enabled: z.boolean(), health: vital(), radius: distance() }).strict(),
   selfDefense: z.object({ enabled: z.boolean(), stance: z.enum(['fight', 'flee', 'auto']) }).strict(),
   autoEat: z.object({ enabled: z.boolean(), food: vital() }).strict()
+}).strict();
+
+const instinctSchema = z.object({
+  /** Let the decision model choose what to do about fire, lava and water (M8). Without a decision nothing acts. */
+  enabled: z.boolean(),
+  /** What the LLM is up to, for the instinct to weigh (e.g. "diving to the ocean monument on purpose"). LLM only. */
+  intent: z.string().max(300),
+  /** Under open water, air at or below this many bubbles is a cue. */
+  lowAir: vital(),
+  /** While a cue lasts, the instinct is asked again this often. */
+  reaskMs: z.number().int().min(500).max(10000),
+  /** The chosen action runs only at or above this probability. */
+  actThreshold: probability(),
+  /** At or above this probability of "urgent", the action may interrupt the LLM's own command. */
+  urgentThreshold: probability(),
+  /** The instinct's own budget, apart from chat triage and combat judgments (F-015). */
+  maxCallsPerMinute: z.number().int().min(1).max(600)
 }).strict();
 
 const combatSchema = z.object({
@@ -52,23 +68,24 @@ const decisionsSchema = z.object({
   maxCallsPerMinute: z.number().int().min(1).max(600)
 }).strict();
 
-export const policySchema = z.object({ reflexes: reflexesSchema, combat: combatSchema, chat: chatSchema, decisions: decisionsSchema }).strict();
+export const policySchema = z.object({ reflexes: reflexesSchema, instinct: instinctSchema, combat: combatSchema, chat: chatSchema, decisions: decisionsSchema }).strict();
 export type Policy = z.infer<typeof policySchema>;
 export type Stance = Policy['reflexes']['selfDefense']['stance'];
 
 // Every field optional at every level, but unknown fields are still rejected.
 export const reflexesUpdateSchema = z.object({
   creeperEvade: reflexesSchema.shape.creeperEvade.partial().strict().optional(),
-  hazardEscape: reflexesSchema.shape.hazardEscape.partial().strict().optional(),
   lowHealthRetreat: reflexesSchema.shape.lowHealthRetreat.partial().strict().optional(),
   selfDefense: reflexesSchema.shape.selfDefense.partial().strict().optional(),
   autoEat: reflexesSchema.shape.autoEat.partial().strict().optional()
 }).strict();
+export const instinctUpdateSchema = instinctSchema.partial().strict();
 export const combatUpdateSchema = combatSchema.partial().strict();
 export const chatUpdateSchema = chatSchema.partial().strict();
 export const decisionsUpdateSchema = decisionsSchema.partial().strict();
 export const policyUpdateSchema = z.object({
   reflexes: reflexesUpdateSchema.optional(),
+  instinct: instinctUpdateSchema.optional(),
   combat: combatUpdateSchema.optional(),
   chat: chatUpdateSchema.optional(),
   decisions: decisionsUpdateSchema.optional()
@@ -80,11 +97,15 @@ export type PolicyUpdate = z.infer<typeof policyUpdateSchema>;
 export const DEFAULT_POLICY: Policy = {
   reflexes: {
     creeperEvade: { enabled: true },
-    hazardEscape: { enabled: true, lowAir: 6 },
     lowHealthRetreat: { enabled: true, health: 6, radius: 16 },
     selfDefense: { enabled: true, stance: 'auto' },
     autoEat: { enabled: true, food: 14 }
   },
+  // Thresholds from the M8 probe of the pinned model (PLAN M8): the expected option won all 13 situations, the weakest at
+  // 0.47 (suspend_task with no way out) while runners-up stayed at 0.43 or below; "urgent" was 0.53-0.54 with full air
+  // under a ceiling and 0.74 or more from 12 air down, 0.96-1.00 for lava, fire and low air. Probe again whenever the
+  // model changes (G7).
+  instinct: { enabled: true, intent: '', lowAir: 6, reaskMs: 1500, actThreshold: 0.4, urgentThreshold: 0.6, maxCallsPerMinute: 90 },
   combat: { attackPlayers: false, avoidNeutral: true, retreatHealth: 6 },
   chat: { triage: true, commandsFrom: [], replyInChat: true },
   // Thresholds set from the M5 probe of the pinned model (PLAN M5): clear commands scored 1.00 while ambiguous,
@@ -171,6 +192,9 @@ export class PolicyStore {
     if (source !== 'llm' && parsed.data.chat?.commandsFrom !== undefined) {
       return { ok: false, errors: ['chat.commandsFrom can only be set by the LLM (set-policy)'] };
     }
+    if (source !== 'llm' && parsed.data.instinct?.intent !== undefined) {
+      return { ok: false, errors: ['instinct.intent can only be set by the LLM (set-policy)'] };
+    }
 
     const next = clone(this.current);
     for (const [group, fields] of Object.entries(parsed.data) as [keyof Policy, Record<string, unknown> | undefined][]) {
@@ -185,7 +209,7 @@ export class PolicyStore {
     }
 
     if (leafCount(parsed.data) === 0) {
-      return { ok: false, errors: ['no policy fields given; groups are reflexes and combat (see get-policy)'] };
+      return { ok: false, errors: ['no policy fields given; groups are reflexes, instinct, combat, chat and decisions (see get-policy)'] };
     }
 
     if (next.decisions.cautiousThreshold > next.decisions.actThreshold) {
@@ -219,15 +243,17 @@ export class PolicyStore {
 }
 
 export function describePolicy(policy: Policy): string {
-  const { reflexes: r, combat: c, chat, decisions: d } = policy;
+  const { reflexes: r, instinct: i, combat: c, chat, decisions: d } = policy;
   const onOff = (enabled: boolean) => (enabled ? 'on' : 'off');
   return [
     'Reflexes (critical ones keep running even during your commands; routine ones yield to them):',
     `- creeperEvade: ${onOff(r.creeperEvade.enabled)} (critical; run from a creeper about to explode)`,
-    `- hazardEscape: ${onOff(r.hazardEscape.enabled)}, lowAir ${r.hazardEscape.lowAir} (critical; leave fire, lava or deep water)`,
     `- lowHealthRetreat: ${onOff(r.lowHealthRetreat.enabled)}, health below ${r.lowHealthRetreat.health} (or at/below combat retreatHealth ${c.retreatHealth}) with hostiles within ${r.lowHealthRetreat.radius} (critical)`,
     `- selfDefense: ${onOff(r.selfDefense.enabled)}, stance ${r.selfDefense.stance} (routine; fight back or flee when a mob hits the bot; never against players)`,
     `- autoEat: ${onOff(r.autoEat.enabled)}, food below ${r.autoEat.food} (routine; only with no hostiles within 8 blocks)`,
+    'Instinct (the decision model chooses what to do about fire, lava and water; without a decision the bot does not act and leaves it to you):',
+    `- enabled: ${onOff(i.enabled)}, lowAir ${i.lowAir}, re-ask every ${i.reaskMs} ms, actThreshold ${i.actThreshold}, urgentThreshold ${i.urgentThreshold} (urgent actions may interrupt your commands), maxCallsPerMinute ${i.maxCallsPerMinute}`,
+    `- intent: ${i.intent ? JSON.stringify(i.intent) : 'none (set instinct.intent to tell the instinct what you are doing, e.g. diving on purpose)'}`,
     'Combat:',
     `- attackPlayers: ${c.attackPlayers}`,
     `- avoidNeutral: ${c.avoidNeutral}`,

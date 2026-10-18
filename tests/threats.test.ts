@@ -206,7 +206,7 @@ test('low air is detected at 6 bubbles or fewer', (t) => {
 
   const boundary = assessThreats(world({ selfMetadata: [0, 90] }).bot);
   t.is(boundary.air, 6);
-  t.true(boundary.lowAir, '6 bubbles is low (hazard-escape triggers at air <= 6)');
+  t.true(boundary.lowAir, '6 bubbles is low (the default instinct.lowAir is 6: air <= 6 is a cue)');
 
   const full = assessThreats(world({ selfMetadata: [0, 300] }).bot);
   t.is(full.air, 20);

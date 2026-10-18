@@ -527,3 +527,85 @@ test('a replacement started while the bot leaves the game is refused and leaves 
   if (!result.ok) t.regex(result.error, /left the game/);
   t.is(tasks.currentTask(), null, 'no phantom running task');
 });
+
+// ---- M8: hold() (E-011 F-003) ---------------------------------------------------------------------------------------
+// Expected from the contract: hold(reason) pauses the current task as a manual command would ("waiting for resume-task
+// or cancel-task"), stops the body only when the task was driving it, gives up the task's lease (so it does not come
+// back by itself when whoever holds the body lets go), and resume-task brings it back.
+
+test('hold pauses a driving task: the body is stopped, the lease released, and resume brings it back', async (t) => {
+  const { tasks, arbiter, bot, events, types } = setup();
+  await tasks.start('demo', {});
+  t.is(arbiter.holder()?.holder, 'task t1 demo');
+  bot.clearControlStates.resetHistory();
+  bot.pathfinder.setGoal.resetHistory();
+
+  const held = tasks.hold('paused by the instinct (ask_llm): on fire');
+
+  t.true(held.ok);
+  if (held.ok) t.is(held.task.status, 'paused');
+  const reason = 'paused by the instinct (ask_llm): on fire (waiting for resume-task or cancel-task)';
+  t.is(tasks.currentTask()?.status, 'paused');
+  t.is(tasks.currentTask()?.pauseReason, reason);
+  const last = events.query({ limit: 100 }).events.at(-1)!;
+  t.is(last.type, 'task_paused');
+  t.is(last.message, `t1 demo: ${reason}`);
+  t.true(bot.clearControlStates.called, 'the body is stopped');
+  t.true(bot.pathfinder.setGoal.calledWith(null), 'the pathfinder goal is cleared');
+  t.is(arbiter.holder(), null, 'the task no longer holds the body');
+
+  const resumed = tasks.resume('t1');
+  t.true(resumed.ok);
+  t.is(tasks.currentTask()?.status, 'running');
+  t.is(arbiter.holder()?.holder, 'task t1 demo');
+  t.deepEqual(types().slice(-2), ['task_paused', 'task_resumed']);
+  await tasks.cancelAll('test finished');
+});
+
+test('hold on a task paused under a reflex leaves the body alone, and the task does not resume when the reflex ends', async (t) => {
+  const { tasks, arbiter, bot, types } = setup();
+  await tasks.start('demo', {});
+  const reflex = await arbiter.acquire({ holder: 'instinct swim_up', priority: PRIORITY.ROUTINE_REFLEX });
+  t.true(reflex.ok);
+  t.is(tasks.currentTask()?.pauseReason, 'paused by instinct swim_up');
+  const refused = tasks.resume();
+  t.false(refused.ok, 'before hold, the task waits to resume on its own');
+  if (!refused.ok) t.regex(refused.error, /will resume on its own/);
+  bot.clearControlStates.resetHistory();
+  bot.pathfinder.setGoal.resetHistory();
+
+  const held = tasks.hold('paused by the instinct (suspend_task): under water');
+
+  t.true(held.ok);
+  t.is(tasks.currentTask()?.pauseReason, 'paused by the instinct (suspend_task): under water (waiting for resume-task or cancel-task)');
+  t.true(bot.clearControlStates.notCalled, 'the task was not driving, so it does not stop the body');
+  t.true(bot.pathfinder.setGoal.notCalled);
+  t.is(arbiter.holder()?.holder, 'instinct swim_up', 'whoever holds the body keeps it');
+
+  const resumedBefore = types().filter(type => type === 'task_resumed').length;
+  if (reflex.ok) reflex.lease.release();
+  t.is(tasks.currentTask()?.status, 'paused', 'still paused after the holder lets go');
+  t.is(types().filter(type => type === 'task_resumed').length, resumedBefore, 'no task_resumed');
+  t.is(arbiter.holder(), null, 'nobody holds the body');
+
+  t.true(tasks.resume().ok, 'resume-task brings it back');
+  t.is(tasks.currentTask()?.status, 'running');
+  t.is(arbiter.holder()?.holder, 'task t1 demo');
+  await tasks.cancelAll('test finished');
+});
+
+test('hold without a task is an error; a held task can still be cancelled', async (t) => {
+  const { tasks, arbiter, types } = setup();
+  const none = tasks.hold('paused by the instinct (ask_llm): on fire');
+  t.false(none.ok);
+  if (!none.ok) t.is(none.error, 'There is no running task');
+  t.deepEqual(types(), []);
+
+  await tasks.start('demo', {});
+  t.true(tasks.hold('paused by the instinct (ask_llm): on fire').ok);
+  const cancelled = await tasks.cancel(undefined, 'cancelled by cancel-task');
+  t.true(cancelled.ok);
+  t.is(tasks.currentTask(), null);
+  t.is(arbiter.holder(), null);
+  t.deepEqual(types().slice(-2), ['task_paused', 'task_cancelled']);
+});

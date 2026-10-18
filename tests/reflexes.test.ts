@@ -13,7 +13,7 @@ import {
   ReflexDefinition, ReflexEngine, ReflexEngineOptions, ReflexName, ReflexRunContext, TriggerContext, TriggerResult
 } from '../src/autopilot/reflex-engine.js';
 import type { CombatJudgment, CombatSituation } from '../src/decisions/decision-hooks.js';
-import { REFLEXES, nearestWater, runAway } from '../src/autopilot/reflexes.js';
+import { REFLEXES, runAway } from '../src/autopilot/reflexes.js';
 import { engage } from '../src/autopilot/combat.js';
 import { Policy, PolicyStore, PolicyUpdate } from '../src/autopilot/policy.js';
 import { BehaviorDefinition, TaskManager, delay } from '../src/autopilot/task-manager.js';
@@ -273,7 +273,6 @@ function hitBy(engine: ReflexEngine, attacker: FakeEntity, type = 'mob_attack'):
 
 const POLICY_KEY: Record<ReflexName, keyof Policy['reflexes']> = {
   'creeper-evade': 'creeperEvade',
-  'hazard-escape': 'hazardEscape',
   'low-health-retreat': 'lowHealthRetreat',
   'self-defense': 'selfDefense',
   'auto-eat': 'autoEat'
@@ -445,19 +444,19 @@ test.serial('a disabled reflex is not evaluated at all, and set-policy changes t
 test.serial('a reflex running longer than maxDurationMs is cancelled with a timeout event and releases the body', async (t) => {
   const clock = useClock(t);
   const world = createWorld();
-  const hazard = scripted('hazard-escape', PRIORITY.CRITICAL_REFLEX, { maxDurationMs: 3000 });
-  const { engine, holder, lastReflexEvent } = createEngine(t, world, [hazard.definition]);
+  const creeper = scripted('creeper-evade', PRIORITY.CRITICAL_REFLEX, { maxDurationMs: 3000 });
+  const { engine, holder, lastReflexEvent } = createEngine(t, world, [creeper.definition]);
 
   engine.tick();
   await clock.tickAsync(2950);
-  t.false(hazard.signals[0].aborted, 'still allowed to run before its limit');
-  t.deepEqual(holder(), { holder: 'reflex hazard-escape', priority: PRIORITY.CRITICAL_REFLEX });
+  t.false(creeper.signals[0].aborted, 'still allowed to run before its limit');
+  t.deepEqual(holder(), { holder: 'reflex creeper-evade', priority: PRIORITY.CRITICAL_REFLEX });
 
   await clock.tickAsync(100);
-  t.true(hazard.signals[0].aborted, 'the action is cancelled at the limit');
+  t.true(creeper.signals[0].aborted, 'the action is cancelled at the limit');
   t.is(holder(), null, 'the lease is released');
-  const event = lastReflexEvent('hazard-escape') ?? '';
-  t.regex(event, resultFormat('hazard-escape'));
+  const event = lastReflexEvent('creeper-evade') ?? '';
+  t.regex(event, resultFormat('creeper-evade'));
   t.regex(event, / → [^→]*time(d)? ?out/i, 'the event result says it timed out');
   // G4: the reflex still owned the body, so the engine stops it.
   t.true(world.bot.clearControlStates.called, 'control states are cleared');
@@ -509,9 +508,9 @@ test.serial('a higher reflex interrupts a lower running one, which is reported a
 test.serial('a same-priority, higher-ranked critical reflex takes over without the paused task resuming in between', async (t) => {
   const clock = useClock(t);
   const world = createWorld();
-  const hazard = scripted('hazard-escape', PRIORITY.CRITICAL_REFLEX, { result: null });
+  const creeper = scripted('creeper-evade', PRIORITY.CRITICAL_REFLEX, { result: null });
   const retreat = scripted('low-health-retreat', PRIORITY.CRITICAL_REFLEX, { result: null });
-  const harness = createEngine(t, world, [hazard.definition, retreat.definition]);
+  const harness = createEngine(t, world, [creeper.definition, retreat.definition]);
   const { engine, holder, lastReflexEvent, taskEvents } = harness;
   const tasks = createTasks(t, world, harness);
 
@@ -522,19 +521,19 @@ test.serial('a same-priority, higher-ranked critical reflex takes over without t
   engine.tick();
   t.is(tasks.currentTask()?.status, 'paused');
 
-  hazard.result = { fire: 'standing in lava' };
+  creeper.result = { fire: 'creeper about to explode' };
   await clock.tickAsync(TICK);
   engine.tick();
 
-  t.deepEqual(holder(), { holder: 'reflex hazard-escape', priority: PRIORITY.CRITICAL_REFLEX });
+  t.deepEqual(holder(), { holder: 'reflex creeper-evade', priority: PRIORITY.CRITICAL_REFLEX });
   t.true(retreat.signals[0].aborted);
-  t.regex(lastReflexEvent('low-health-retreat') ?? '', / → [^→]*interrupted by hazard-escape/);
+  t.regex(lastReflexEvent('low-health-retreat') ?? '', / → [^→]*interrupted by creeper-evade/);
   t.deepEqual(taskEvents(), ['task_started', 'task_paused'], 'no task_resumed / task_paused flicker during the handover');
   t.is(tasks.currentTask()?.status, 'paused');
 
   retreat.result = null;
-  hazard.result = null;
-  hazard.finish('out of the lava');
+  creeper.result = null;
+  creeper.finish('moved away');
   await clock.tickAsync(0);
 
   t.deepEqual(taskEvents(), ['task_started', 'task_paused', 'task_resumed']);
@@ -701,26 +700,26 @@ test.serial('ticks do nothing while the bot is dead, and the engine follows phys
 test.serial('a death event aborts the running reflex and releases the body; stop() unsubscribes', async (t) => {
   useClock(t);
   const world = createWorld();
-  const hazard = scripted('hazard-escape', PRIORITY.CRITICAL_REFLEX);
-  const { engine, holder, lastReflexEvent } = createEngine(t, world, [hazard.definition]);
+  const creeper = scripted('creeper-evade', PRIORITY.CRITICAL_REFLEX);
+  const { engine, holder, lastReflexEvent } = createEngine(t, world, [creeper.definition]);
   engine.start();
   world.bot.emit('physicsTick');
-  t.true(hazard.run.calledOnce);
+  t.true(creeper.run.calledOnce);
 
   world.bot.health = 0;
   world.bot.emit('death');
 
-  t.true(hazard.signals[0].aborted);
+  t.true(creeper.signals[0].aborted);
   t.is(holder(), null);
-  const event = lastReflexEvent('hazard-escape') ?? '';
-  t.regex(event, resultFormat('hazard-escape'));
+  const event = lastReflexEvent('creeper-evade') ?? '';
+  t.regex(event, resultFormat('creeper-evade'));
   t.regex(event, / → [^→]*interrupted/);
 
   world.bot.health = 20;
   engine.stop();
-  const evaluations = hazard.trigger.callCount;
+  const evaluations = creeper.trigger.callCount;
   world.bot.emit('physicsTick');
-  t.is(hazard.trigger.callCount, evaluations, 'a stopped engine ignores physicsTick');
+  t.is(creeper.trigger.callCount, evaluations, 'a stopped engine ignores physicsTick');
 });
 
 test.serial('a note result writes a reflex event without taking the body', async (t) => {
@@ -765,7 +764,6 @@ test.serial('I6: every reflex trigger answers synchronously inside the tick', as
   const zombieNear = mob('zombie', 2);
   const scenarios: { name: ReflexName; world: World; before?: (engine: ReflexEngine) => void }[] = [
     { name: 'creeper-evade', world: createWorld({ entities: [ignitedCreeper(4)] }) },
-    { name: 'hazard-escape', world: createWorld({ blocks: { '0,64,0': 'lava' } }) },
     { name: 'low-health-retreat', world: createWorld({ health: 5, entities: [mob('zombie', 10)] }) },
     { name: 'self-defense', world: createWorld({ entities: [zombieNear] }), before: engine => hitBy(engine, zombieNear) },
     { name: 'auto-eat', world: createWorld({ food: 10, inventory: [item('bread')] }) }
@@ -858,97 +856,6 @@ test.serial('creeper-evade turned off with set-policy does not trigger', async (
   t.is(holder(), null);
   t.deepEqual(reflexEvents(), []);
   t.falsy(world.controls.forward);
-});
-
-// ---- hazard-escape ---------------------------------------------------------------------------------------------
-
-test.serial('hazard-escape: standing in lava → heads for a nearby safe block and ends once out', async (t) => {
-  const clock = useClock(t);
-  const pool = (x: number, y: number, z: number) => (y === 64 && Math.abs(x) <= 1 && Math.abs(z) <= 1 ? 'lava' : undefined);
-  const world = createWorld({ terrain: pool, selfMetadata: [ON_FIRE] });
-  const { engine, holder, lastReflexEvent } = createEngine(t, world);
-
-  engine.tick();
-  t.deepEqual(holder(), { holder: 'reflex hazard-escape', priority: PRIORITY.CRITICAL_REFLEX });
-  // The pathfinder cannot plan out of a lava pool, so the reflex steers out itself: it faces a safe block next to the
-  // pool and moves forward while jumping.
-  t.is(world.pathfinder.goal, null, 'no pathfinder goal inside the lava');
-  t.true(world.controls.forward, 'moves forward');
-  t.true(world.controls.jump, 'keeps jumping to climb out');
-  const yaw = world.self.yaw as number;
-  const facing = new Vec3(-Math.sin(yaw), 0, -Math.cos(yaw));
-  // Two and a half blocks along the facing direction is past the 3x3 pool, whichever edge it heads for.
-  const exit = world.self.position.plus(facing.scaled(2.5)).floored();
-  t.not(world.blockName(exit.x, exit.y, exit.z), 'lava', `it faces out of the pool (towards ${exit})`);
-
-  // The bot gets out and the flames go out.
-  world.self.position = new Vec3(exit.x + 0.5, exit.y, exit.z + 0.5);
-  world.self.metadata[0] = 0;
-  await clock.tickAsync(200);
-
-  t.is(holder(), null);
-  const event = lastReflexEvent('hazard-escape') ?? '';
-  t.regex(event, resultFormat('hazard-escape'));
-  t.notRegex(event, /interrupted|time(d)? ?out|fail/i);
-  t.is(world.pathfinder.goal, null, 'the engine clears the goal when the reflex ends (G4)');
-});
-
-test.serial('hazard-escape: air at 6 bubbles or less with the head under water → swims up; 7 bubbles does not trigger', async (t) => {
-  const clock = useClock(t);
-  const water = { '0,64,0': 'water', '0,65,0': 'water' };
-
-  const enough = createWorld({ blocks: water, selfMetadata: [0, 7 * 15] });
-  const calm = createEngine(t, enough);
-  calm.engine.tick();
-  t.is(calm.holder(), null, '7 bubbles is not low air');
-
-  const low = createWorld({ blocks: water, selfMetadata: [0, 6 * 15] });
-  const { engine, holder, lastReflexEvent } = createEngine(t, low);
-  engine.tick();
-  t.deepEqual(holder(), { holder: 'reflex hazard-escape', priority: PRIORITY.CRITICAL_REFLEX });
-  t.true(low.bot.setControlState.calledWith('jump', true), 'swims up');
-
-  low.self.metadata[1] = 300;
-  await clock.tickAsync(200);
-  t.is(holder(), null, 'ends once the air is back');
-  t.regex(lastReflexEvent('hazard-escape') ?? '', resultFormat('hazard-escape'));
-});
-
-test.serial('hazard-escape: on fire next to fire with water 3 blocks away → goes into the water and ends once the fire is out', async (t) => {
-  const clock = useClock(t);
-  const world = createWorld({ blocks: { '0,64,0': 'fire', '3,64,0': 'water', '3,63,0': 'water' }, selfMetadata: [ON_FIRE] });
-  const { engine, holder, lastReflexEvent } = createEngine(t, world);
-
-  engine.tick();
-  t.deepEqual(holder(), { holder: 'reflex hazard-escape', priority: PRIORITY.CRITICAL_REFLEX });
-  const goal = world.pathfinder.goal as { x: number; y: number; z: number } | null;
-  t.truthy(goal);
-  if (!goal) return;
-  t.is(world.blockName(goal.x, goal.y, goal.z), 'water', 'it heads for the water');
-
-  world.self.position = new Vec3(3.5, 64, 0.5);
-  world.self.metadata[0] = 0;
-  await clock.tickAsync(200);
-
-  t.is(holder(), null);
-  const event = lastReflexEvent('hazard-escape') ?? '';
-  t.regex(event, resultFormat('hazard-escape'));
-  t.notRegex(event, /interrupted|time(d)? ?out|fail/i);
-});
-
-test.serial('hazard-escape: on fire standing in fire without water nearby → heads for a block that is not burning', async (t) => {
-  useClock(t);
-  const world = createWorld({ blocks: { '0,64,0': 'fire' }, selfMetadata: [ON_FIRE] });
-  const { engine, holder } = createEngine(t, world);
-
-  engine.tick();
-
-  t.deepEqual(holder(), { holder: 'reflex hazard-escape', priority: PRIORITY.CRITICAL_REFLEX });
-  const goal = world.pathfinder.goal as { x: number; y: number; z: number } | null;
-  t.truthy(goal);
-  if (!goal) return;
-  t.false(['fire', 'lava'].includes(world.blockName(goal.x, goal.y, goal.z)), 'the goal is not fire');
-  t.false(['fire', 'lava', 'air'].includes(world.blockName(goal.x, goal.y - 1, goal.z)), 'the goal has solid, safe ground');
 });
 
 // ---- low-health-retreat ----------------------------------------------------------------------------------------
@@ -1230,7 +1137,7 @@ test.serial('self-defense and auto-eat both triggered → only self-defense runs
   t.false(world.bot.equip.getCalls().some(call => (call.args[0] as FakeItem | undefined)?.name === 'bread'), 'the bread stays in the bag');
 });
 
-// ---- review fixes: running away, hazard-escape, retreat threshold, self-defense rules, respawn -------------------
+// ---- review fixes: running away, retreat threshold, self-defense rules, respawn -------------------
 
 /** The collision boxes of a block's default state, as prismarine-block reports them in `Block.shapes`. */
 function defaultShapes(name: string): number[][] {
@@ -1477,162 +1384,6 @@ test.serial('runAway on open ground clears a leftover pathfinder goal and sprint
   await running;
 });
 
-// -- fix 4: nearestWater ---------------------------------------------------------------------------------------------
-
-test.serial('nearestWater: finds the nearest water within 8 blocks with a bounded scan, without findBlock', async (t) => {
-  useClock(t);
-  const at = (blocks: Record<string, string>) => {
-    const world = createWorld({ blocks });
-    const findBlock = sinon.spy(world.bot, 'findBlock');
-    const blockAt = sinon.spy(world.bot, 'blockAt');
-    const water = nearestWater(world.bot as never);
-    t.true(findBlock.notCalled, 'no findBlock (it scans whole chunk sections)');
-    t.true(blockAt.callCount <= 17 * 17 * 4, `a bounded scan (${blockAt.callCount} lookups)`);
-    return water ? water.toArray() : null;
-  };
-
-  t.deepEqual(at({ '8,64,0': 'water' }), [8, 64, 0], 'water 8 blocks away');
-  t.is(at({ '9,64,0': 'water' }), null, 'water 9 blocks away is too far');
-  t.is(at({ '6,64,6': 'water' }), null, 'water 8.5 blocks away diagonally is too far');
-  t.deepEqual(at({ '5,64,0': 'water', '-3,63,0': 'water' }), [-3, 63, 0], 'the nearer of two');
-  t.is(at({}), null, 'no water');
-});
-
-test.serial('nearestWater: the result is reused for 1 s while the bot stays on the same block', async (t) => {
-  const clock = useClock(t);
-  const world = createWorld({ blocks: { '6,64,0': 'water' } });
-  const blockAt = sinon.spy(world.bot, 'blockAt');
-
-  t.deepEqual(nearestWater(world.bot as never)?.toArray(), [6, 64, 0]);
-  const scan = blockAt.callCount;
-  t.true(scan > 0);
-
-  await clock.tickAsync(TICK);
-  world.self.position = new Vec3(0.8, 64, 0.2);
-  t.deepEqual(nearestWater(world.bot as never)?.toArray(), [6, 64, 0]);
-  t.is(blockAt.callCount, scan, 'no lookups on the next tick on the same block');
-
-  world.self.position = new Vec3(1.5, 64, 0.5);
-  t.deepEqual(nearestWater(world.bot as never)?.toArray(), [6, 64, 0]);
-  t.true(blockAt.callCount > scan, 'another block is scanned again');
-  const moved = blockAt.callCount;
-
-  await clock.tickAsync(500);
-  nearestWater(world.bot as never);
-  t.is(blockAt.callCount, moved, 'still cached within the second');
-  await clock.tickAsync(600);
-  nearestWater(world.bot as never);
-  t.true(blockAt.callCount > moved, 'scanned again after 1 s');
-});
-
-test.serial('hazard-escape: burning on safe ground without water nearby does not trigger, and does not rescan for water every tick', async (t) => {
-  const clock = useClock(t);
-  const world = createWorld({ selfMetadata: [ON_FIRE] });
-  const findBlock = sinon.spy(world.bot, 'findBlock');
-  const blockAt = sinon.spy(world.bot, 'blockAt');
-  const { engine, holder } = createEngine(t, world);
-
-  engine.tick();
-  t.is(holder(), null, 'nothing to do without water');
-  const first = blockAt.callCount;
-  for (let i = 0; i < 10; i++) {
-    await clock.tickAsync(TICK);
-    engine.tick();
-  }
-  const later = blockAt.callCount - first;
-  t.true(later < first, `10 more ticks use fewer lookups (${later}) than the first tick's scan (${first})`);
-  t.true(findBlock.notCalled);
-  t.is(holder(), null);
-});
-
-// -- fix 5: hazard-escape --------------------------------------------------------------------------------------------
-
-test.serial('hazard-escape in lava steers by itself the whole time: never a pathfinder goal, forward and jump held', async (t) => {
-  const clock = useClock(t);
-  const pool = (x: number, y: number, z: number) => (y === 64 && Math.abs(x) <= 1 && Math.abs(z) <= 1 ? 'lava' : undefined);
-  const world = createWorld({ terrain: pool, selfMetadata: [ON_FIRE] });
-  const { engine, holder } = createEngine(t, world);
-
-  engine.tick();
-  // The bot does not get out in this fake world: one second of steering.
-  for (let i = 0; i < 20; i++) {
-    await clock.tickAsync(TICK);
-    t.true(world.controls.forward && world.controls.jump, `forward and jump held after ${(i + 1) * TICK} ms`);
-  }
-  t.deepEqual(holder(), { holder: 'reflex hazard-escape', priority: PRIORITY.CRITICAL_REFLEX });
-  t.true(world.pathfinder.setGoal.getCalls().every(call => call.args[0] === null), 'no pathfinder goal is ever set in the lava');
-  t.is(world.pathfinder.goal, null);
-  const look = firstLook(world)!;
-  const exit = world.self.position.plus(look.scaled(2.5)).floored();
-  t.not(world.blockName(exit.x, exit.y, exit.z), 'lava', 'it faces out of the pool');
-});
-
-test.serial('hazard-escape: on fire with the water out of reach → tries a safe spot once, then ends with a result before its 5 s limit', async (t) => {
-  const clock = useClock(t);
-  // Standing in fire; the water 4 blocks away cannot be reached (nothing moves the bot in this fake world).
-  const world = createWorld({ blocks: { '0,64,0': 'fire', '4,64,0': 'water', '4,63,0': 'water' }, selfMetadata: [ON_FIRE] });
-  const { engine, holder, reflexEvents } = createEngine(t, world);
-
-  engine.tick();
-  t.deepEqual(holder(), { holder: 'reflex hazard-escape', priority: PRIORITY.CRITICAL_REFLEX });
-  await clock.tickAsync(4700);
-
-  t.is(holder(), null, 'the body is free before the 5 s limit');
-  const results = reflexEvents().filter(message => resultFormat('hazard-escape').test(message));
-  t.is(results.length, 1);
-  t.notRegex(results[0] ?? '', /time(d)? ?out|interrupted| → failed/i, 'a result, not a timeout');
-  const targets = world.pathfinder.setGoal.getCalls().map(call => call.args[0] as { x: number; y: number; z: number } | null).filter(goal => goal !== null);
-  t.is(targets.length, 2, 'the water, then one safe spot');
-  const [water, spot] = targets;
-  if (water) t.is(world.blockName(water.x, water.y, water.z), 'water', 'first the water');
-  if (spot) {
-    t.false(['fire', 'lava', 'water'].includes(world.blockName(spot.x, spot.y, spot.z)), 'then a spot that is not burning');
-    t.false(['fire', 'lava', 'air', 'water'].includes(world.blockName(spot.x, spot.y - 1, spot.z)), 'on solid, safe ground');
-  }
-});
-
-test.serial('hazard-escape: standing in fire with no water and no way out → gives up with a result before its 5 s limit', async (t) => {
-  const clock = useClock(t);
-  const world = createWorld({ blocks: { '0,64,0': 'fire' }, selfMetadata: [ON_FIRE] });
-  const { engine, holder, reflexEvents } = createEngine(t, world);
-
-  engine.tick();
-  t.deepEqual(holder(), { holder: 'reflex hazard-escape', priority: PRIORITY.CRITICAL_REFLEX });
-  await clock.tickAsync(4700);
-
-  t.is(holder(), null);
-  const results = reflexEvents().filter(message => resultFormat('hazard-escape').test(message));
-  t.is(results.length, 1);
-  t.notRegex(results[0] ?? '', /time(d)? ?out|interrupted| → failed/i);
-});
-
-const WATER_LIKE_HEADS: { label: string; blocks: Record<string, string>; waterlogged?: string[] }[] = [
-  { label: 'kelp', blocks: { '0,64,0': 'kelp_plant', '0,65,0': 'kelp_plant' } },
-  { label: 'seagrass', blocks: { '0,64,0': 'water', '0,65,0': 'seagrass' } },
-  { label: 'a bubble column', blocks: { '0,64,0': 'bubble_column', '0,65,0': 'bubble_column' } },
-  { label: 'a waterlogged ladder', blocks: { '0,64,0': 'water', '0,65,0': 'ladder' }, waterlogged: ['0,65,0'] }
-];
-
-for (const { label, blocks, waterlogged } of WATER_LIKE_HEADS) {
-  test.serial(`hazard-escape: low air with the head in ${label} counts as under water → swims up`, async (t) => {
-    const clock = useClock(t);
-    const world = createWorld({ blocks, selfMetadata: [0, 6 * 15] });
-    useRealBlocks(world, waterlogged);
-    const { engine, holder, lastReflexEvent } = createEngine(t, world);
-
-    engine.tick();
-    t.deepEqual(holder(), { holder: 'reflex hazard-escape', priority: PRIORITY.CRITICAL_REFLEX });
-    t.true(world.bot.setControlState.calledWith('jump', true), 'swims up');
-
-    world.self.metadata[1] = 300;
-    await clock.tickAsync(200);
-    t.is(holder(), null, 'ends once the air is back');
-    const event = lastReflexEvent('hazard-escape') ?? '';
-    t.regex(event, resultFormat('hazard-escape'));
-    t.notRegex(event, /time(d)? ?out|interrupted|fail/i);
-  });
-}
-
 // -- fix 6: low-health-retreat threshold -----------------------------------------------------------------------------
 
 test.serial('low-health-retreat also starts at combat.retreatHealth, where fights disengage, when that is above its own threshold', async (t) => {
@@ -1736,31 +1487,33 @@ test.serial('self-defense, stance auto: a neutral attacker that may be fought (a
 test.serial('after a death, the next spawn clears the stale burning flag and refills the air; other spawns leave the metadata alone', async (t) => {
   const clock = useClock(t);
   const INVISIBLE = 0x20;
-  // Burning with water nearby: hazard-escape would run on these values.
-  const world = createWorld({ blocks: { '3,64,0': 'water', '3,63,0': 'water' }, selfMetadata: [ON_FIRE | INVISIBLE, 30] });
-  const { engine, holder } = createEngine(t, world);
+  // Burning with little air: values the server would not resend after a respawn, and that the instinct reads.
+  const world = createWorld({ selfMetadata: [ON_FIRE | INVISIBLE, 30] });
+  const { engine } = createEngine(t, world);
   engine.start();
 
   world.bot.emit('spawn');
   t.deepEqual(world.self.metadata, [ON_FIRE | INVISIBLE, 30], 'a spawn without a death changes nothing');
-  world.bot.emit('physicsTick');
-  t.deepEqual(holder(), { holder: 'reflex hazard-escape', priority: PRIORITY.CRITICAL_REFLEX }, 'burning: hazard-escape runs');
 
   world.bot.health = 0;
   world.bot.emit('death');
-  t.is(holder(), null);
+  t.deepEqual(world.self.metadata, [ON_FIRE | INVISIBLE, 30], 'the death itself leaves the metadata alone');
   await clock.tickAsync(1100);
   world.bot.health = 20;
   world.bot.emit('spawn');
 
   t.is(world.self.metadata[0], INVISIBLE, 'the burning bit is cleared; the other flags stay');
   t.is(world.self.metadata[1], 300, 'full air');
-  world.bot.emit('physicsTick');
-  t.is(holder(), null, 'the stale values no longer trigger hazard-escape');
 
   // A later spawn (a dimension change) without a new death leaves fresh values alone.
   world.self.metadata[0] = ON_FIRE;
   world.self.metadata[1] = 45;
+  world.bot.emit('spawn');
+  t.deepEqual(world.self.metadata, [ON_FIRE, 45]);
+
+  // A stopped engine no longer touches the metadata, even after another death.
+  engine.stop();
+  world.bot.emit('death');
   world.bot.emit('spawn');
   t.deepEqual(world.self.metadata, [ON_FIRE, 45]);
 });
@@ -1787,40 +1540,6 @@ test.serial('self-defense ignores a hit from the mob the bot is already fighting
   hitBy(engine, wolf);
   engine.tick();
   t.deepEqual(holder(), { holder: 'reflex self-defense', priority: PRIORITY.ROUTINE_REFLEX }, 'once that fight is over it reacts again');
-});
-
-// Final review: water that could not be reached is not tried again for a while, so hazard-escape does not keep
-// interrupting everything while the fire burns out.
-test.serial('hazard-escape gives up on unreachable water once and does not fire again for it', async (t) => {
-  const clock = useClock(t);
-  const world = createWorld({ blocks: { '4,63,0': 'water' }, selfMetadata: [0x01] });
-  const { startGame, holder, reflexEvents } = createEngine(t, world);
-  startGame();
-
-  await clock.tickAsync(TICK);
-  t.deepEqual(holder(), { holder: 'reflex hazard-escape', priority: PRIORITY.CRITICAL_REFLEX });
-  // The fake pathfinder never moves the bot, so the water stays out of reach.
-  await clock.tickAsync(3000);
-  t.is(holder(), null);
-  await clock.tickAsync(5000);
-  const runs = reflexEvents().filter(message => message.startsWith('hazard-escape:'));
-  t.is(runs.length, 1, runs.join('\n'));
-  t.regex(runs[0], /could not reach water; still burning/);
-});
-
-// Final review: surfacing after running out of air reports that, not "put the fire out".
-test.serial('hazard-escape reports air recovered after swimming up', async (t) => {
-  const clock = useClock(t);
-  let headBlock = 'water';
-  const world = createWorld({ terrain: (x, y, z) => (x === 0 && z === 0 && y === 64 ? 'water' : x === 0 && z === 0 && y === 65 ? headBlock : undefined), selfMetadata: [0, 5 * 15] });
-  const { engine, holder, lastReflexEvent } = createEngine(t, world);
-
-  engine.tick();
-  t.deepEqual(holder(), { holder: 'reflex hazard-escape', priority: PRIORITY.CRITICAL_REFLEX });
-  headBlock = 'air';
-  await clock.tickAsync(200);
-  t.is(holder(), null);
-  t.regex(lastReflexEvent('hazard-escape') ?? '', /running out of air .* → air recovered/);
 });
 
 // ---- M5: self-defense 'auto' stance with the combat judge (F-013, F-016; I1, I5, I6) ------------------------------
@@ -2099,7 +1818,6 @@ test.serial('I6: no reflex trigger calls the combat judge; only self-defense\'s 
   const zombieNear = mob('zombie', 2);
   const scenarios: { name: ReflexName; world: World; before?: (engine: ReflexEngine) => void }[] = [
     { name: 'creeper-evade', world: createWorld({ entities: [ignitedCreeper(4)] }) },
-    { name: 'hazard-escape', world: createWorld({ blocks: { '0,64,0': 'lava' } }) },
     { name: 'low-health-retreat', world: createWorld({ health: 5, entities: [mob('zombie', 10)] }) },
     { name: 'self-defense', world: createWorld({ entities: [zombieNear] }), before: engine => hitBy(engine, zombieNear) },
     { name: 'auto-eat', world: createWorld({ food: 10, inventory: [item('bread')] }) }
@@ -2162,19 +1880,19 @@ function createWiredEngine(t: ExecutionContext, world: World, reflexes: ReflexDe
 test.serial('M7: death while a critical reflex has the task paused → onDeath runs before the reflex lets go; the task is cancelled and never resumes', async (t) => {
   const clock = useClock(t);
   const world = createWorld();
-  const hazard = scripted('hazard-escape', PRIORITY.CRITICAL_REFLEX, { result: null });
-  const { engine, tasks, holder, taskEvents, taskMessages, onDeath, seen } = createWiredEngine(t, world, [hazard.definition]);
+  const creeper = scripted('creeper-evade', PRIORITY.CRITICAL_REFLEX, { result: null });
+  const { engine, tasks, holder, taskEvents, taskMessages, onDeath, seen } = createWiredEngine(t, world, [creeper.definition]);
   engine.start();
   t.true((await tasks.start('idle', {})).ok);
 
-  hazard.result = { fire: 'running out of air (3 left)' };
+  creeper.result = { fire: 'creeper about to explode' };
   world.bot.emit('physicsTick');
   t.is(tasks.currentTask()?.status, 'paused');
-  t.deepEqual(holder(), { holder: 'reflex hazard-escape', priority: PRIORITY.CRITICAL_REFLEX });
+  t.deepEqual(holder(), { holder: 'reflex creeper-evade', priority: PRIORITY.CRITICAL_REFLEX });
 
   let abortedAtDeath: boolean | undefined;
   onDeath.callsFake(() => {
-    abortedAtDeath = hazard.signals[0].aborted;
+    abortedAtDeath = creeper.signals[0].aborted;
     seen.push({ holder: holder()?.holder ?? null, task: tasks.currentTask()?.status ?? null });
     void tasks.cancelAll('the bot died');
   });
@@ -2182,16 +1900,16 @@ test.serial('M7: death while a critical reflex has the task paused → onDeath r
   world.bot.emit('death');
 
   t.true(onDeath.calledOnce);
-  t.deepEqual(seen, [{ holder: 'reflex hazard-escape', task: 'paused' }], 'the reflex still held the body and the task was still paused');
+  t.deepEqual(seen, [{ holder: 'reflex creeper-evade', task: 'paused' }], 'the reflex still held the body and the task was still paused');
   t.false(abortedAtDeath, 'onDeath ran before the reflex was aborted');
-  t.true(hazard.signals[0].aborted, 'then the reflex is aborted');
+  t.true(creeper.signals[0].aborted, 'then the reflex is aborted');
   t.is(holder(), null);
   t.deepEqual(taskEvents(), ['task_started', 'task_paused', 'task_cancelled'], 'cancelled at once, with no task_resumed in between');
   t.is(taskMessages().at(-1), 'task_cancelled t1 idle: cancelled (the bot died)');
 
   // Respawn: nothing comes back.
   await clock.tickAsync(1500);
-  hazard.result = null;
+  creeper.result = null;
   world.bot.health = 20;
   world.bot.emit('spawn');
   for (let i = 0; i < 5; i++) {
@@ -2206,8 +1924,8 @@ test.serial('M7: death while a critical reflex has the task paused → onDeath r
 test.serial('M7: death with no reflex running cancels the running task (the bot died)', async (t) => {
   useClock(t);
   const world = createWorld();
-  const hazard = scripted('hazard-escape', PRIORITY.CRITICAL_REFLEX, { result: null });
-  const { engine, tasks, holder, taskMessages } = createWiredEngine(t, world, [hazard.definition]);
+  const creeper = scripted('creeper-evade', PRIORITY.CRITICAL_REFLEX, { result: null });
+  const { engine, tasks, holder, taskMessages } = createWiredEngine(t, world, [creeper.definition]);
   engine.start();
   t.true((await tasks.start('idle', {})).ok);
 

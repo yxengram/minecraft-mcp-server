@@ -388,13 +388,88 @@ test.serial('the rate limit follows decisions.maxCallsPerMinute', async t => {
   t.is(fetch.callCount, 4);
 });
 
+// ---- M8: the instinct's own budget (E-011, F-015) -----------------------------------------------------------------
+// budget 'instinct' counts against instinct.maxCallsPerMinute in a window of its own; every other call keeps using
+// decisions.maxCallsPerMinute. Neither window counts the other's calls.
+
+test.serial('with the decisions budget used up, an instinct call still goes out', async t => {
+  useClock(t);
+  const store = new PolicyStore();
+  t.true(store.update({ decisions: { maxCallsPerMinute: 2 } }, 'llm').ok);
+  const { client, fetch } = makeClient({ key: FAKE_KEY, impl: okFetch, store });
+  for (let i = 0; i < 2; i++) t.true((await client.decide(STATE, QUESTIONS)).ok);
+  assertFailure(t, await client.decide(STATE, QUESTIONS), 'rate_limited');
+  t.is(fetch.callCount, 2);
+
+  const instinct = await client.decide(STATE, QUESTIONS, { budget: 'instinct' });
+  t.true(instinct.ok, JSON.stringify(instinct));
+  t.is(fetch.callCount, 3, 'the instinct call reached fetch');
+  assertFailure(t, await client.decide(STATE, QUESTIONS, { budget: 'decisions' }), 'rate_limited');
+  t.is(fetch.callCount, 3, 'an explicit decisions budget is still limited');
+});
+
+test.serial('with the instinct budget used up, an instinct call is rate_limited without a request, while other calls still go out', async t => {
+  const clock = useClock(t);
+  const store = new PolicyStore();
+  t.true(store.update({ instinct: { maxCallsPerMinute: 1 } }, 'llm').ok);
+  const { client, fetch } = makeClient({ key: FAKE_KEY, impl: okFetch, store });
+  t.true((await client.decide(STATE, QUESTIONS, { budget: 'instinct' })).ok);
+  t.is(fetch.callCount, 1);
+
+  const limited = await client.decide(STATE, QUESTIONS, { budget: 'instinct' });
+  assertFailure(t, limited, 'rate_limited');
+  if (!limited.ok) t.regex(limited.message, /instinct/, `the message says which budget: ${limited.message}`);
+  if (!limited.ok) t.regex(limited.message, /\b1\b/, 'and its limit');
+  t.is(fetch.callCount, 1, 'the rejected call must not reach fetch');
+
+  t.true((await client.decide(STATE, QUESTIONS)).ok, 'a default-budget call still goes out');
+  t.is(fetch.callCount, 2);
+
+  await clock.tickAsync(MINUTE + 1);
+  t.true((await client.decide(STATE, QUESTIONS, { budget: 'instinct' })).ok, 'a minute later the instinct may ask again');
+  t.is(fetch.callCount, 3);
+});
+
+test.serial('the instinct budget follows instinct.maxCallsPerMinute, 90 by default', async t => {
+  useClock(t);
+  const { client, fetch } = makeClient({ key: FAKE_KEY, impl: okFetch });
+  for (let i = 0; i < 90; i++) t.true((await client.decide(STATE, QUESTIONS, { budget: 'instinct' })).ok, `instinct call ${i + 1}`);
+  assertFailure(t, await client.decide(STATE, QUESTIONS, { budget: 'instinct' }), 'rate_limited');
+  t.is(fetch.callCount, 90);
+});
+
+test.serial('status counts instinct calls apart: instinctCallsLastMinute only counts instinct calls, callsLastMinute only the others', async t => {
+  const clock = useClock(t);
+  const { client } = makeClient({ key: FAKE_KEY, impl: okFetch });
+  t.like(client.status(), { callsLastMinute: 0, instinctCallsLastMinute: 0 });
+  for (let i = 0; i < 3; i++) await client.decide(STATE, QUESTIONS, { budget: 'instinct' });
+  t.like(client.status(), { callsLastMinute: 0, instinctCallsLastMinute: 3 });
+  await client.decide(STATE, QUESTIONS);
+  await client.decide(STATE, QUESTIONS);
+  t.like(client.status(), { callsLastMinute: 2, instinctCallsLastMinute: 3 });
+  await clock.tickAsync(MINUTE + 1);
+  t.like(client.status(), { callsLastMinute: 0, instinctCallsLastMinute: 0 });
+});
+
+test('an instinct call without a key, or with decisions turned off, is disabled and makes no request', async t => {
+  const none = makeClient({ key: undefined, impl: okFetch });
+  assertFailure(t, await none.client.decide(STATE, QUESTIONS, { budget: 'instinct' }), 'disabled');
+  t.true(none.fetch.notCalled);
+  t.is(none.client.status().instinctCallsLastMinute, 0, 'a refused call is not counted');
+
+  const off = makeClient({ key: FAKE_KEY, impl: okFetch });
+  t.true(off.store.update({ decisions: { enabled: false } }, 'llm').ok);
+  assertFailure(t, await off.client.decide(STATE, QUESTIONS, { budget: 'instinct' }), 'disabled');
+  t.true(off.fetch.notCalled);
+});
+
 // ---- status ------------------------------------------------------------------------------------------------------
 
 test('status reports an unconfigured client without a key', t => {
   for (const key of [undefined, '   ']) {
     const { client } = makeClient({ key, impl: okFetch });
     t.deepEqual(client.status(), {
-      configured: false, enabled: true, model: DEFAULT_DECISION_MODEL, callsLastMinute: 0, callsLastHour: 0
+      configured: false, enabled: true, model: DEFAULT_DECISION_MODEL, callsLastMinute: 0, callsLastHour: 0, instinctCallsLastMinute: 0
     });
   }
 });

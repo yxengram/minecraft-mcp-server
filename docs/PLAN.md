@@ -15,7 +15,7 @@
 | M5 | 决策式战斗判断 + 阈值探测：自卫的 auto 姿态使用决策模型；所有阈值有观察依据 | M4 | verified（探测、单元测试与实机验收通过，2026-10-17） |
 | M6 | 情景测试 + 共享场地辅助 + 最终文档：用数据比较三种配置 | M1～M5 | verified（情景测试两轮、实机测试与文档完成，2026-10-17） |
 | M7 | 长线实测修复（2026-10-18 拆分后）：死亡时取消任务、采集跳过泡水的方块、移动工具核对是否到达 | M6；10 天生存测试中发现的问题（2026-10-17） | verified（单元测试与实机验收通过，2026-10-18） |
-| M8 | 本能核心与危险类宏：注意力门、菜单、本能引擎；水、岩浆、火由决策模型选择小脑宏处理 | M7；设计 v0.4 获用户确认（2026-10-18） | 计划（设计已确认；契约 F-036～F-041、E-011 已写） |
+| M8 | 本能核心与危险类宏：注意力门、菜单、本能引擎；水、岩浆、火由决策模型选择小脑宏处理 | M7；设计 v0.4 获用户确认（2026-10-18） | verified（单元测试、阈值探测与实机验收通过，2026-10-18） |
 | M9 | 战斗、苦力怕、低血量、进食迁入本能；删除反射引擎与 CombatJudge | M8 | 计划 |
 | M10 | 文档收尾与长线验收：情景对比、README/AGENTS、10 天生存测试 | M9 | 计划 |
 
@@ -131,6 +131,7 @@
 | 本步不做 | 战斗、苦力怕、低血量、进食（仍由现有反射处理，M9 迁移） |
 | 验收 | 单元测试：门只在信号出现时请求、在途只有一个、离线不动身体；菜单只含可行选项；阈值以下不执行；紧急才打断手动命令。实机：fire、两个溺水情景在 instinct 配置下通过；无 key 时只有 instinct 事件 |
 | 恢复 | 独立提交；回退即恢复 hazard-escape 反射 |
+| 状态与证据 | verified；见进展记录 2026-10-18 M8 实现 |
 
 ## M9：战斗与其余本能
 
@@ -179,7 +180,7 @@
 | Q7 | 用户是否接受把聊天与游戏状态摘要发送给 OpenRouter？**已解决**：接受 | M4 | 用户答复（2026-10-16） | — | — |
 | Q8 | 关键反射与日常反射的划分是否合适（自卫目前是日常反射，可被 LLM 命令打断）。**被设计 v0.4 草案取代**（2026-10-18）：改为由决策模型判断是否紧急（BLUEPRINT I5） | M3 | 情景测试与用户体验 | — | — |
 | Q11 | 决策延迟能否赶上苦力怕引信（约 1.5 秒；M5 实测中位 0.64 秒、最大 1.07 秒） | M9 | creeper-ambush 情景（instinct 配置） | M9 实机验收 | 把“苦力怕靠近”信号提前（不回退到代码映射） |
-| Q12 | 本能问题的阈值（actThreshold、urgentThreshold）、复问间隔与调用额度（本能单独额度，暂定 90 次/分钟，优先于聊天筛选；BLUEPRINT I4） | M8 | 探测样例 + 情景测试 | M8 实机验收 | — |
+| Q12 | 本能问题的阈值（actThreshold、urgentThreshold）、复问间隔与调用额度（本能单独额度，暂定 90 次/分钟，优先于聊天筛选；BLUEPRINT I4）。**阈值已解决**（2026-10-18 M8 探测：0.4 / 0.6）；复问间隔 1.5 秒与额度 90 次/分钟在情景测试中够用，长线测试中再观察 | M8 | 探测样例 + 情景测试 | M10 生存测试 | — |
 | Q13 | 设计 v0.4 的公开接口变化（策略字段、instinct 取代 reflex 事件）是否接受。**已解决**（2026-10-18）：用户确认 v0.4 草案 | M8 | 用户确认 | — | — |
 | Q9 | 本地测试时如何安全地提供 API key。**已解决**（2026-10-17）：用户把 key 存在仓库外、权限 600 的 `~/.minecraft-mcp-server/openrouter-key`；测试命令用 `OPENROUTER_API_KEY="$(cat …)"` 交给进程，代理不读取、不打印内容；代码仍只读环境变量（F-015 不变）；实机脚本经 MCP stdio 传输时需显式传入该变量（传输默认只继承白名单变量） | M4 | 与用户确认 | — | — |
 | Q10 | collect-block 打断当前任务时应替换（取消）还是暂停？**已解决**：替换，并在结果中说明被取消的任务 | M2 | 用户答复（2026-10-16） | — | — |
@@ -414,4 +415,69 @@
     - 有 key 第一轮：27 步 ok，1 步失败——“follow and flee” 中 flee 任务在离助手 4 格处卡住（“cannot get further away … stuck at 4.0 blocks”）。M7 没有改动 flee；有 key 第二轮 28 步全部 ok。记为偶发，可能与场地中 bot 的位置有关（之前的 6 轮都通过）。
   - 情景测试没有重新运行：M7 没有改动反射与情景；溺水情景随 M8 一起加入。
 - 文件状态：M7 的改动为 `verified`。
+
+### 2026-10-18 M8 实现：本能核心与危险类宏
+
+- 用户确认设计 v0.4（2026-10-18：“v0.4 草案可以”），先完成 M7 实机验收再开始 M8。
+- **新增**：
+  - `src/autopilot/hazards.ts`（F-036）；
+  - `src/autopilot/instinct/attention.ts`、`affordances.ts`、`macros.ts`、`instinct-engine.ts`（F-037～F-040）；
+  - `tests/instinct.test.ts`（F-041）；
+  - `tests/hazards.test.ts`：从 reflexes.test.ts 移来的 nearestWater 测试，另加一个“走不到的水 15 秒内跳过”的测试。
+- **改动**（E-011）：
+  - reflexes.ts：删除 hazard-escape；
+  - policy.ts：删除 reflexes.hazardEscape，新增 instinct 分组；
+  - openrouter-client.ts：本能使用独立额度；
+  - task-manager.ts：新增 hold；
+  - autopilot.ts：接入本能引擎；
+  - policy-tools.ts：get-policy 显示本能状态，set-policy 接受 instinct；
+  - test-scenarios.mjs：配置改为 llm-only / no-key / instinct，加入 drowning-pocket 与 drowning-dig；
+  - README、AGENTS（应急手段加上关闭本能）。
+- **测试**：
+  - 现有测试的改写由一个子代理完成，删除的 14 个 hazard-escape 测试由 tests/instinct.test.ts 的宏与信号测试重新覆盖；
+  - 实现中测试发现一个问题并已修正：本能选 ask_llm 时先停止动作、后挂起任务，会让任务恢复一瞬间（出现 task_resumed），可能重新走进危险；现在先挂起任务，再停止动作。
+- **阈值探测**（2026-10-18，会话临时脚本，不入库）：
+  - 方法：用固定模型 `perplexity/pplx-decider-v1.2-20261016` 与上线代码相同的问题（instinctQuestions）和 state 格式，对 13 种手工构造的局面各请求 2 次。
+  - 结果：13 种局面都选中预期的选项；两次请求的概率完全相同；延迟 615–983 毫秒，中位约 635 毫秒。
+  - 被选中选项的概率：
+    - 头顶封闭、满氧、有气穴：swim_to_air 0.57；
+    - 5 格氧：swim_to_air 0.61；
+    - 只能挖：dig_up 0.74；
+    - 没有可行动作、有任务：suspend_task 0.47；
+    - 开放水域 4 格氧：swim_up 0.98；
+    - 岩浆：leave_lava 0.99；
+    - 着火且 3 格外有水：go_to_water 0.87；
+    - 着火、周围没有水：none 0.45 / ask_llm 0.43；
+    - intent 声明故意潜水、18 格氧：continue 0.77；
+    - 故意潜水但只剩 3 格氧：swim_to_air 0.72；
+    - 正在执行的动作：continue 0.81；
+    - 游向气穴失败后：dig_up 0.72。
+  - urgent 的概率：满氧或 15 格氧在天花板下 0.53–0.54；12 格氧及以下 0.74 起；岩浆、着火、开放水域低氧 0.96–1.00；故意潜水且满氧 0.05。
+  - 据此设定 instinct.actThreshold 为 0.4（最低的正确选择 0.47，第二名最高 0.43）、urgentThreshold 为 0.6（氧气还多时 LLM 的命令优先）。
+  - Q12 的阈值部分据此解决；复问间隔与额度仍按暂定值，见下面的实机结果。
+- **实际执行的检查**：
+  - `tsc --noEmit` 通过；`npm run lint` 无错误；`npm test` 819 个测试通过。
+  - `npm run test:scenarios -- 63320 --allow-world-changes`（有 key，第 1 轮，构建早于最后两处小改动：离线记录只保留当前危险期、get-policy 区分“没有 key”与“决策已关闭”）：instinct 配置 7 个情景全部通过。
+
+| 情景 | llm-only | no-key | instinct |
+|---|---|---|---|
+| zombie-wave | 通过：10 s，血量 18.1 | 通过：33 s，血量 11.2 | 通过：15 s，血量 14.7 |
+| creeper-ambush | **失败**：4.0 格，血量 10.7 | 通过：8.0 格，血量 20 | 通过：8.0 格，血量 20 |
+| hunger | **失败**：没有进食 | 通过：0.5 s 内 | 通过：0.5 s 内 |
+| fire | **失败**：14.8 s 后才不再受火焰伤害 | **失败**（设计如此：没有本能）：14.7 s | 通过：2.2 s |
+| drowning-pocket | **失败**：淹死 | **失败**（设计如此）：氧气 0，血量 4.5 | 通过：3.0 s 后游到气穴，氧气 19，血量 20 |
+| drowning-dig | **失败**：氧气 0，血量 4.5 | **失败**（设计如此）：氧气 0，血量 4.3 | 通过：4.5 s 后挖开 1 格出水，氧气 16，血量 20 |
+| chat-triage | 通过：按规则 0.1 s | 通过：按规则 0.1 s | 通过：决策模型 0.7 s |
+
+- 观察：
+  - 与 M6 的 reflexes 基线相比，fire 由 1.8 s 变为 2.2 s，多出的是一次决策（约 0.6 秒）。
+  - 溺水情景在 M7 之前的反射版中会淹死。M7 拆分前，wip 分支的反射版调试结果为：游到气穴约 3 秒，挖开天花板约 3.7 秒。
+  - creeper、低血量、自卫、进食仍由反射处理，所以 no-key 配置下这些情景照常通过。
+- **第 2 轮情景测试**（有 key，当前构建）：instinct 配置 7 个情景全部通过。
+  - fire：2.0 s；drowning-pocket：3.0 s 游到气穴，氧气 19，血量 20；drowning-dig：4.5 s 挖开出水，氧气 16，血量 20；其余与第 1 轮相当。
+  - llm-only 与第 1 轮相同。
+  - no-key 中 zombie-wave 这一轮失败（60 秒内 0/3，血量 5.7，低血量撤退超时）；第 1 轮通过（33 s）。这一路径由自卫与低血量撤退反射驱动，M8 没有改动，期间也没有 instinct 事件。M6 中同一配置用时 51–53 s，已接近 60 秒上限；no-key 不是必须通过的配置。记为偶发，M9 把战斗迁入本能时一并观察。
+- **全量实机测试**（当前构建）：`npm run test:live:world -- 63320 --allow-world-changes` 无 key 一轮、有 key 一轮，均为 28 步全部 ok，61 个工具全覆盖。
+- **无 key 的专项检查**（会话临时脚本）：bot 在头顶封闭的水池中，8 秒内没有任何动作，只出现一条 instinct 事件：“instinct offline (disabled: no OpenRouter API key is configured (OPENROUTER_API_KEY)): under water with a stone ceiling 2 block(s) above the head, 20 air left; the bot does not act on its own, decide what to do”。
+- 文件状态：F-036～F-041 与 E-011 的改动为 `verified`。
 
