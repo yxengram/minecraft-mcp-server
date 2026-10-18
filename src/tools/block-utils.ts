@@ -2,6 +2,7 @@ import mineflayer from 'mineflayer';
 import pathfinderPkg from 'mineflayer-pathfinder';
 const { goals } = pathfinderPkg;
 import { Vec3 } from 'vec3';
+import { gotoWithTimeout } from './movement-utils.js';
 
 type Block = NonNullable<ReturnType<mineflayer.Bot['blockAt']>>;
 
@@ -85,15 +86,36 @@ export async function digBlockAt(bot: mineflayer.Bot, pos: Vec3, shouldStop?: ()
   return 'dug';
 }
 
+// The server accepts a placement from about 4.5 blocks between the eyes and the clicked face.
+export const PLACE_REACH = 4.5;
+const APPROACH_TIMEOUT_MS = 20000;
+const EYE_HEIGHT = 1.62;
+
+/**
+ * Walks to a spot from which a block can be placed at `pos` (E-013): within reach of a face of a neighbouring block,
+ * with a clear line of sight to it, and not standing in `pos` (or with the head in it). "Within 3 blocks of the
+ * target" is not that: for a roof edge no floor spot qualifies, so the pathfinder climbed onto the roof or dug through
+ * a wall; and "within 2 blocks of the reference" can be the target cell itself. Does nothing when the bot can already
+ * place from where it stands.
+ */
+export async function approachToPlace(bot: mineflayer.Bot, pos: Vec3, reference: Block | null): Promise<void> {
+  const eyes = bot.entity.position.offset(0, EYE_HEIGHT, 0);
+  const inReach = reference && eyes.distanceTo(reference.position.offset(0.5, 0.5, 0.5)) <= PLACE_REACH;
+  if (inReach && bot.canSeeBlock(reference) && !overlapsBot(bot, pos)) return;
+  // faces and facing are optional at runtime (all faces, any facing); the type marks them required.
+  const options = { range: PLACE_REACH, LOS: true } as unknown as ConstructorParameters<typeof goals.GoalPlaceBlock>[2];
+  // Bounded: an unreachable spot must fail this placement, not hang the tool (fill-region has no other limit per block).
+  await gotoWithTimeout(bot, new goals.GoalPlaceBlock(pos, bot.world, options), APPROACH_TIMEOUT_MS);
+}
+
 export async function placeBlockAt(bot: mineflayer.Bot, pos: Vec3): Promise<boolean> {
   for (const offset of NEIGHBOR_OFFSETS) {
     const reference = bot.blockAt(pos.plus(offset));
     if (isAir(reference) || isLiquid(reference)) continue;
 
     try {
-      if (bot.entity.position.distanceTo(pos) > 4) {
-        await bot.pathfinder.goto(new goals.GoalNear(pos.x, pos.y, pos.z, 3));
-      }
+      await approachToPlace(bot, pos, reference);
+      if (overlapsBot(bot, pos)) return false;
       await bot.lookAt(pos.offset(0.5, 0.5, 0.5), true);
       await bot.placeBlock(reference!, offset.scaled(-1));
       return true;

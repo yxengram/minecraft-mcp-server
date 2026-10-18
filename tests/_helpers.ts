@@ -63,7 +63,15 @@ export function createFakeWorld(initial: Record<string, string>, botPosition = n
     lookAt: sinon.stub().resolves(),
     placeBlock: sinon.stub(),
     findBlocks: sinon.stub(),
-    inventory: { items: (): { name: string; count: number; type: number }[] => [] }
+    inventory: { items: (): { name: string; count: number; type: number }[] => [] },
+    // For pathfinder goals that read the world (GoalPlaceBlock, E-013): full cubes for every non-air block.
+    world: {
+      getBlock: (pos: Vec3) => {
+        const name = blocks.get(key(pos)) ?? 'air';
+        return { name, position: pos.floored(), shapes: name === 'air' ? [] : [[0, 0, 0, 1, 1, 1]] };
+      },
+      raycast: () => null
+    }
   };
 
   bot.placeBlock.callsFake(async (reference: { position: Vec3 }, face: Vec3) => {

@@ -20,7 +20,7 @@ export function registerFurnaceTools(factory: ToolFactory, getBot: () => minefla
       fuelItem: z.string().trim().min(1).describe("Name of fuel item"),
       fuelCount: z.number().int().positive().optional().describe("Amount of fuel to use (default: 1)"),
       takeOutput: z.boolean().optional().describe("Whether to take output when ready (default: true)"),
-      timeoutMs: z.number().int().positive().optional().describe("Timeout waiting for output in ms (default: 60000)")
+      timeoutMs: z.number().int().positive().optional().describe("How long to wait for the whole batch in ms (default: 10 s per item plus 10 s)")
     },
     async ({
       x,
@@ -31,7 +31,7 @@ export function registerFurnaceTools(factory: ToolFactory, getBot: () => minefla
       fuelItem,
       fuelCount = 1,
       takeOutput = true,
-      timeoutMs = 60000
+      timeoutMs
     }: {
       x: number;
       y: number;
@@ -55,12 +55,15 @@ export function registerFurnaceTools(factory: ToolFactory, getBot: () => minefla
       }
 
       const items = bot.inventory.items();
-      const input = items.find((item) => item.name.includes(inputItem.toLowerCase()));
+      // An exact name first: "sand" must not pick red_sand (E-013).
+      const match = (wanted: string) =>
+        items.find((item) => item.name === wanted.toLowerCase()) ?? items.find((item) => item.name.includes(wanted.toLowerCase()));
+      const input = match(inputItem);
       if (!input) {
         return factory.createResponse(`Couldn't find any item matching '${inputItem}' in inventory`);
       }
 
-      const fuel = items.find((item) => item.name.includes(fuelItem.toLowerCase()));
+      const fuel = match(fuelItem);
       if (!fuel) {
         return factory.createResponse(`Couldn't find any fuel item matching '${fuelItem}' in inventory`);
       }
@@ -97,13 +100,27 @@ export function registerFurnaceTools(factory: ToolFactory, getBot: () => minefla
           );
         }
 
-        const output = await waitForOutput(furnace, timeoutMs);
-        if (!output) {
-          return factory.createResponse(`No output after ${timeoutMs}ms`);
+        // Take the output as it comes until the batch is done (E-013); taking only the first item left the rest in the
+        // furnace, where it also blocked the next batch.
+        const waitMs = timeoutMs ?? resolvedInputCount * 10000 + 10000;
+        const deadline = Date.now() + waitMs;
+        let taken = 0;
+        let outputName = '';
+        while (Date.now() < deadline) {
+          const output = await waitForOutput(furnace, deadline - Date.now());
+          if (!output) break;
+          const item = await furnace.takeOutput();
+          if (!item) break;
+          taken += item.count;
+          outputName = item.name;
+          // Furnace recipes give one item per input: done once the whole batch is out.
+          if (taken >= resolvedInputCount || (!furnace.inputItem() && !furnace.outputItem())) break;
         }
-
-        const taken = await furnace.takeOutput();
-        return factory.createResponse(`Smelted ${taken.count} ${taken.name}`);
+        if (taken === 0) {
+          return factory.createResponse(`No output after ${waitMs}ms`);
+        }
+        const left = furnace.inputItem()?.count ?? 0;
+        return factory.createResponse(`Smelted ${taken} ${outputName}${left ? `; ${left} ${input.name} still in the furnace (stopped after ${waitMs}ms)` : ''}`);
       } finally {
         cleanup();
       }

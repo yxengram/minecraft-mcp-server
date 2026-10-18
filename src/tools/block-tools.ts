@@ -10,6 +10,7 @@ import { coerceCoordinates } from './coordinate-utils.js';
 import { blockDetails, faceName } from './block-details.js';
 import { describeEntity, entityDetails } from './entity-utils.js';
 import { compassDirection } from './terrain-utils.js';
+import { approachToPlace, overlapsBot } from './block-utils.js';
 
 type FaceDirection = 'up' | 'down' | 'north' | 'south' | 'east' | 'west';
 const MAX_FIND_BLOCKS_COUNT = 256;
@@ -63,14 +64,21 @@ export function registerBlockTools(factory: ToolFactory, getBot: () => mineflaye
         }
       }
 
+      let lastError = '';
       for (const face of possibleFaces) {
         const referencePos = placePos.plus(face.vector);
         const referenceBlock = bot.blockAt(referencePos);
 
         if (referenceBlock && referenceBlock.name !== 'air') {
-          if (!bot.canSeeBlock(referenceBlock)) {
-            const goal = new goals.GoalNear(referencePos.x, referencePos.y, referencePos.z, 2);
-            await bot.pathfinder.goto(goal);
+          try {
+            // A spot within reach that can see a face to click, never inside the target (E-013).
+            await approachToPlace(bot, placePos, referenceBlock);
+          } catch (moveError) {
+            lastError = `could not get to a spot to place from: ${moveError instanceof Error ? moveError.message : moveError}`;
+            continue;
+          }
+          if (overlapsBot(bot, placePos)) {
+            return factory.createResponse(`You can't place a block where you're standing or one block above`);
           }
 
           await bot.lookAt(placePos, true);
@@ -80,12 +88,13 @@ export function registerBlockTools(factory: ToolFactory, getBot: () => mineflaye
             return factory.createResponse(`Placed block at (${x}, ${y}, ${z}) using ${face.direction} face`);
           } catch (placeError) {
             log('warn', `Failed to place using ${face.direction} face: ${placeError}`);
+            lastError = placeError instanceof Error ? placeError.message : String(placeError);
             continue;
           }
         }
       }
 
-      return factory.createResponse(`Failed to place block at (${x}, ${y}, ${z}): No suitable reference block found`);
+      return factory.createResponse(`Failed to place block at (${x}, ${y}, ${z}): No suitable reference block found${lastError ? ` (last error: ${lastError})` : ''}`);
     }
   );
 

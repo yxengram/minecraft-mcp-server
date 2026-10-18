@@ -7,6 +7,7 @@ import { componentToText } from './text-component.js';
 import type { MessageKind } from './message-store.js';
 import { serverRegistryName, trackServerRegistries } from './server-registries.js';
 import { describeOffset } from './tools/terrain-utils.js';
+import { configureMovements, installDoorHelper } from './tools/movement-utils.js';
 
 const SUPPORTED_MINECRAFT_VERSION = '26.1.2';
 
@@ -111,7 +112,9 @@ export class BotConnection {
 
       const mcData = minecraftData(bot.version);
       const defaultMove = new Movements(bot, mcData);
+      configureMovements(defaultMove as never);
       bot.pathfinder.setMovements(defaultMove);
+      installDoorHelper(bot);
 
       bot.chat('LLM-powered bot ready to receive instructions!');
       this.callbacks.onBotReady?.(bot);
