@@ -1081,6 +1081,7 @@ src/main.ts（现有，改动）--创建并注册--> src/autopilot/autopilot.ts�
 | E-009 | `scripts/test-live-world.mjs` | M1～M4、M6（均已完成） | 覆盖 7 个新工具（start-task、list-tasks、resume-task、cancel-task、get-policy、set-policy、list-decision-models），以及“任务中调用移动工具 → 中断报告 → resume-task”流程；M6 改为使用 `scripts/lib/live-arena.mjs` | 已有的全部检查步骤与防护 | 实机连续两轮全部通过 |
 | E-010 | `README.md` | 规划阶段、M6（均已完成） | 规划阶段：增加一小节说明 Autopilot 处于设计阶段并链接本蓝图。M6：替换为实际使用说明（任务、策略、决策模型的隐私与费用说明） | 现有内容 | 人工阅读 |
 | E-011 | M8 对已实现的 Autopilot 文件的改动（设计 v0.4） | M8 | **F-001 autopilot.ts**：在反射引擎之后创建并启动 InstinctEngine，断线时停止。顺序保证反射引擎的死亡回调先运行：任务先被取消，再中止宏。**F-003 task-manager.ts**：新增 hold(reason)，把当前任务挂起为“等待 resume-task 或 cancel-task”（与手动暂停相同）；任务正在驾驶时先停止身体。**F-013 reflexes.ts**：删除 hazard-escape，危险判断移到 F-036。**F-014 policy.ts**：删除 reflexes.hazardEscape；新增 instinct 分组：enabled（默认 true）、intent（默认空，最长 300 字符，只有来源 llm 能设置）、lowAir（6）、reaskMs（1500）、actThreshold、urgentThreshold、maxCallsPerMinute（90）。**F-015 openrouter-client.ts**：decide 增加 budget 选项；'instinct' 使用独立的调用窗口与 instinct.maxCallsPerMinute，其他调用仍用 decisions.maxCallsPerMinute。**F-018 policy-tools.ts**：get-policy 显示本能状态（在线或离线及原因、正在执行的动作、最近一次判断）；set-policy 接受 instinct 分组。**F-032 test-scenarios.mjs**：配置改为 llm-only（反射与本能都关闭）、no-key（无 key：反射开启，本能离线）、instinct（有 key，必须全部通过）；加入 drowning-pocket、drowning-dig | 其余反射（creeper-evade、low-health-retreat、self-defense、auto-eat）、任务、聊天筛选与聊天命令、CombatJudge 在 M8 不变 | tests/instinct.test.ts；现有测试按新字段调整；情景测试 |
+| E-013 | M11：生存测试中发现的四个工具问题（BLUEPRINT H 节） | M11 | **`src/bot-connection.ts`**：寻路器的 Movements 设置 canOpenDoors = true（能开门通过）；新增“建筑方块”排除规则，寻路时不挖木板、玻璃、门、活板门、床、箱子、工作台、熔炉、火把、栅栏、楼梯、台阶、羊毛、砖等人工方块（exclusionAreasBreak 返回 100，等于不可破坏），自然方块照常可挖。**`src/tools/block-utils.ts`**：新增 approachToPlace(bot, pos)：用 mineflayer-pathfinder 的 GoalPlaceBlock（距离 4.5 内、对参照面有视线、不站在目标格里）走到能放的位置；placeBlockAt（fill-region 使用）改用它，不再用“目标 3 格内”（屋顶边角从室内够不到 3 格，寻路器只好上屋顶或挖墙）。**`src/tools/block-tools.ts`**：place-block 看不到参照方块时也改用 approachToPlace，不再走到“参照方块 2 格内”（可能正是目标格）；放置前再次检查 bot 不在目标格及其上一格。**`src/tools/furnace-tools.ts`**：smelt-item 在 takeOutput 为 true 时，持续取出产物，直到投入的物品全部烧完或超时；返回取出的总数与剩余数量；熔炉里已有的同种产物也一并取出；默认超时改为每件 10 秒再加 10 秒；物品名优先精确匹配（"sand" 不再选中 red_sand） | 工具名、参数与成功时文字的开头不变；dig-block 等手动工具仍可挖任何方块（排除规则只作用于寻路器） | 单元测试；实机：bot 从屋外经门进屋、从屋内出门，墙不被挖；室内 fill-region 补屋顶边角，bot 不上屋顶；place-block 填一格深的坑；smelt-item 一次烧出 4 块玻璃 |
 
 ## G. 跨模块约定
 
@@ -1162,7 +1163,7 @@ done / failed / cancelled 为终态，不能再改变
 
 ## H. 远期设想（不在本版本范围）
 
-- **M10 生存测试中发现、尚未处理的工具问题**（详见 PLAN M10）：
+- **M10 生存测试中发现的工具问题**（详见 PLAN M10；M11 修复，见 E-013）：
   - mineflayer 寻路器不会开门，离开或进入房屋时会挖穿自家墙壁。可以考虑让寻路器能开门，或不挖指定的方块。
   - place-block 在看不到参照方块时，会走到“参照方块 2 格内”。这个位置可能正是要放方块的格子，于是放置失败，报告为 No suitable reference block found。
   - smelt-item 只取出第一件产物，其余留在熔炉里，并挡住下一次投料。
