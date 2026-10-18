@@ -1,6 +1,6 @@
 # 代理协作规则
 
-本仓库的 MCP 服务器（`src/`、`tests/`、`scripts/`）已经实现并通过测试，包括 **Autopilot 子系统**（M1～M6 全部完成并通过实机验收）。设计阶段用过的 `blueprint/` 占位目录已在 M6 删除；完整契约保留在 `docs/BLUEPRINT.md`。
+本仓库的 MCP 服务器（`src/`、`tests/`、`scripts/`）已经实现并通过测试，包括 **Autopilot 子系统**（M1～M9 完成并通过实机验收；M8 起本能由决策模型承担，代码只做“小脑”，见 `docs/BLUEPRINT.md` I 节）。设计阶段用过的 `blueprint/` 占位目录已在 M6 删除；完整契约保留在 `docs/BLUEPRINT.md`。
 
 ## 阅读顺序
 
