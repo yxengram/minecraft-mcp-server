@@ -14,7 +14,7 @@
 | M4 | OpenRouter 客户端 + 模型目录 + 聊天筛选与聊天命令：对 bot 说的话以 chat_request 交给 LLM；LLM 授权过的玩家可以直接下命令（默认无人授权） | M3；OpenRouter API key（开始前通知用户并给出提供步骤） | verified（单元测试与实机验收通过，2026-10-17） |
 | M5 | 决策式战斗判断 + 阈值探测：自卫的 auto 姿态使用决策模型；所有阈值有观察依据 | M4 | verified（探测、单元测试与实机验收通过，2026-10-17） |
 | M6 | 情景测试 + 共享场地辅助 + 最终文档：用数据比较三种配置 | M1～M5 | verified（情景测试两轮、实机测试与文档完成，2026-10-17） |
-| M7 | 长线实测修复（2026-10-18 拆分后）：死亡时取消任务、采集跳过泡水的方块、移动工具核对是否到达 | M6；10 天生存测试中发现的问题（2026-10-17） | implemented-unverified（单元测试通过；实机检查待测试世界重新开放） |
+| M7 | 长线实测修复（2026-10-18 拆分后）：死亡时取消任务、采集跳过泡水的方块、移动工具核对是否到达 | M6；10 天生存测试中发现的问题（2026-10-17） | verified（单元测试与实机验收通过，2026-10-18） |
 | M8 | 本能核心与危险类宏：注意力门、菜单、本能引擎；水、岩浆、火由决策模型选择小脑宏处理 | M7；设计 v0.4 获用户确认（2026-10-18） | 计划（设计已确认；契约 F-036～F-041、E-011 已写） |
 | M9 | 战斗、苦力怕、低血量、进食迁入本能；删除反射引擎与 CombatJudge | M8 | 计划 |
 | M10 | 文档收尾与长线验收：情景对比、README/AGENTS、10 天生存测试 | M9 | 计划 |
@@ -117,7 +117,7 @@
 | 本步不做 | 溺水逃生、反射与任务的拉扯（改由 M8 的本能处理；已写的动作代码保存在本地分支 `wip/m8-water-escape`）；全局寻路代价调整 |
 | 验收 | 单元测试覆盖每项修复（死亡顺序、泡水方块被跳过、未到达时报错）；实机：任务中死亡 → task_cancelled（the bot died）且复活后没有 task_resumed；泡水的原木被跳过、干的被挖；移动进封闭的屏障箱 → 报告未到达；全量实机测试（有 key 与无 key）通过 |
 | 恢复 | 独立提交 |
-| 状态与证据 | implemented-unverified；见进展记录 2026-10-18 |
+| 状态与证据 | verified；见进展记录 2026-10-18 M7 实机验收 |
 
 ---
 
@@ -401,3 +401,17 @@
   - 最初的“最近空气”搜索选中了墙外的空气，bot 朝墙游；改为穿过水与可通过方块的连通搜索后，3 秒内游到气穴（“swam to an air pocket”）。
   - 进入出口那一列后，原先在氧气充足时就判定“air recovered”而提前结束；改为头顶封闭过就持续上浮直到头出水。
   - 无气穴、带石镐时，沉到水底后向上挖开 1 格（“dug up through 1 block(s) and got to air”，3.7 秒）。
+
+### 2026-10-18 M7 实机验收
+
+- 实际执行的检查（2026-10-18，测试世界 63320，提交 d4a44f8 的构建）：
+  - M7 专项检查（会话临时脚本，不入库；无 key）：4 项全部通过。
+    - 泡水的原木被跳过，干的被挖：collect-block 返回 “Mined 1 of 1 oak_log; inventory gained 1 item(s); skipped 1 unreachable or unsafe block(s)”，泡水的原木仍在原处。
+    - 跟随任务中执行 /kill：事件依次为 task_started、task_cancelled（“cancelled (the bot died)”）；复活后没有 task_resumed，list-tasks 显示没有当前任务。
+    - 移动工具核对到达：目标在场地地板下 6 格时，寻路器没有移动 bot 就结束了；move-to-position 返回 “Did not reach (…): stopped at (…), 6.0 blocks from the target: the pathfinder found no way closer”（修复前会报告成功）。目标在封闭屏障箱内或半空中时，寻路器自己报错（“Took to long to decide path to goal!”），结果同样是错误，没有经过新的核对。
+  - `npm run test:live:world -- 63320 --allow-world-changes`：
+    - 无 key 一轮：28 步全部 ok，61 个工具全覆盖。
+    - 有 key 第一轮：27 步 ok，1 步失败——“follow and flee” 中 flee 任务在离助手 4 格处卡住（“cannot get further away … stuck at 4.0 blocks”）。M7 没有改动 flee；有 key 第二轮 28 步全部 ok。记为偶发，可能与场地中 bot 的位置有关（之前的 6 轮都通过）。
+  - 情景测试没有重新运行：M7 没有改动反射与情景；溺水情景随 M8 一起加入。
+- 文件状态：M7 的改动为 `verified`。
+
