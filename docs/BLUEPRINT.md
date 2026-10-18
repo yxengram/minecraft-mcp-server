@@ -8,7 +8,7 @@
 
 | 项目 | 内容 |
 |---|---|
-| 设计版本 | v0.3（2026-10-16）：按用户对未决问题的答复修订，变更见 docs/PLAN.md。**v0.4 草案（2026-10-18，待用户确认）**：本能改由决策模型承担、代码只做“小脑”，见 I 节；确认并实现前，A～H 节仍描述现有代码 |
+| 设计版本 | v0.3（2026-10-16）：按用户对未决问题的答复修订，变更见 docs/PLAN.md。**v0.4（2026-10-18，用户已确认）**：本能改由决策模型承担、代码只做“小脑”，见 I 节；分 M8～M10 实现，实现前 A～H 节仍描述现有代码 |
 | 目标版本 | Autopilot v1：阶段一到四（任务与行为、反射与策略、决策模型、情景测试） |
 | 当前阶段 | M1～M6 全部实现并通过实机验收（M1～M3 2026-10-16，M4～M6 2026-10-17） |
 | 状态标记 | **已确认**：用户已同意，或已用一手资料/实机核实。**暂定**：设计者提出的合理默认值，可在实现时调整，需记录。**待验证**：依赖实测结果，验证前不能当作事实 |
@@ -838,6 +838,153 @@ src/main.ts（现有，改动）--创建并注册--> src/autopilot/autopilot.ts�
 - **验收**：正常：重构后 test-live-world 连续两轮全部通过。 边界或失败：bot 登录时在半空 → 不会摔死；场地已存在 → 被清空后重建。 位置：scripts/test-live-world.mjs 实机运行（人工）（计划，未执行）
 - **实现说明（M6）**：导出 parseLiveArgs、createArena（MCP 客户端、call/cmd/waitFor/expect 等辅助、step 与诊断、setup/cleanup/close）、ARENA_Y、ARENA_RADIUS、SetupFailed、sleep、responseText；服务器所需的环境变量（如 OPENROUTER_API_KEY）经 serverEnv 显式传入（stdio 传输只继承白名单变量）。test-live-world 已改为使用它，重构后全量实机测试通过。
 
+### F1-g 本能（M8 起，设计 v0.4）
+
+> 设计依据见 I 节（用户已确认，2026-10-18）。M8 只覆盖水、岩浆、火三类危险；战斗、苦力怕、低血量与进食在 M9 迁入。
+
+### F-036 · `src/autopilot/hazards.ts`
+
+- **模块**：M-INS 本能　**里程碑**：M8　**状态**：placeholder　**设计**：已确定：从 reflexes.ts 与 wip/m8-water-escape 移入的只读判断
+- **职责**：只读的环境判断：
+  - 危险方块（岩浆、火、仙人掌等）；头是否在水中；是否在岩浆中；是否着火；是否接触火源。
+  - 最近的水：8 格内，按所站方块缓存 1 秒，刚走不到的水 15 秒内忽略。
+  - 最近的安全落脚点：5 格内，不在火或岩浆旁。
+  - 头顶一列是开放的水还是封闭的天花板（向上 8 格）。
+  - 能游过去的气穴：穿过水与可通过方块的连通搜索，8 格内，身体与头都在空气中，脚下是水或实心方块。
+  - 天花板能否安全挖开：可挖、不是会掉落的方块，上方不是岩浆或会掉落的方块。
+- **不负责**：不移动、不决定做什么、不联网。
+- **输入**：来源：src/autopilot/instinct/attention.ts、affordances.ts、macros.ts、src/autopilot/reflexes.ts。内容：bot。限制：只做内存计算，可以在每刻调用。
+- **输出**：布尔值、坐标或 null。成功含义：气穴必须真的能从 bot 所在位置游到（墙另一边的空气不算）。
+- **依赖**：src/tools/terrain-utils.ts（isPassable、isWaterLike）。外部：mineflayer（blockAt、entity metadata）。
+- **状态与副作用**：状态：水的搜索缓存（WeakMap，按 bot）。副作用：无。
+- **关键约束**：未加载的方块按“开放”处理（向上游总比原地不动好）；扫描范围固定，不调用 mineflayer 的整区块搜索。
+- **验收**：tests/instinct.test.ts：
+  - 气穴在墙外 → null；气穴在同一水体的边上 → 返回该位置。
+  - 头顶 2 格是石头 → 返回天花板；头顶一直是水直到空气 → 开放。
+  - 天花板是沙子，或上方是岩浆 → 不能挖。
+
+### F-037 · `src/autopilot/instinct/attention.ts`
+
+- **模块**：M-INS 本能　**里程碑**：M8　**状态**：placeholder　**设计**：暂定：信号与复问间隔，M8 实测后调整
+- **职责**：每刻（内存计算）列出当前的提示信号，并决定这一刻是否需要向本能引擎请求一次判断。M8 的信号：
+  - in_lava：身在岩浆中。
+  - trapped_underwater：头在水中，头顶封闭。
+  - low_air：头在水中，头顶开放，氧气 ≤ instinct.lowAir。
+  - on_fire：着火。
+
+  每个信号带一句说明，例如 “under water, stone ceiling 2 blocks up, 14 air left”。
+- **不负责**：不联网、不选择行为、不动身体。
+- **输入**：bot、当前策略、当前时间；本能引擎通知“已发出请求”“宏已结束”。
+- **输出**：信号列表，以及是否应当请求。请求的条件：
+  - 出现了上一次请求时没有的信号；
+  - 信号持续，且距上次请求已过 instinct.reaskMs（默认 1500 毫秒）；
+  - 宏结束或失败后信号仍在。
+
+  信号全部消失时一段“危险期”结束，状态清零。
+- **使用方**：src/autopilot/instinct/instinct-engine.ts。
+- **依赖**：src/autopilot/hazards.ts、src/tools/gamestate-tools.ts（airLevel）。
+- **关键约束**：没有信号时永远不请求（零费用）；评估不等待网络或磁盘（I6）。
+- **验收**：tests/instinct.test.ts：
+  - 没有信号 → 不请求。
+  - 新信号 → 立即请求一次，之后 1.5 秒内不再请求；信号持续 1.5 秒 → 复问。
+  - 新增另一种信号 → 立即请求。
+  - 宏结束且信号仍在 → 立即请求。
+  - 信号消失后再次出现 → 立即请求。
+
+### F-038 · `src/autopilot/instinct/affordances.ts`
+
+- **模块**：M-INS 本能　**里程碑**：M8　**状态**：placeholder　**设计**：暂定
+- **职责**：根据信号和局势生成菜单。每个选项有固定的 id、一句给决策模型看的说明，以及执行时用的宏与参数。只列出当前可行的动作选项：
+  - swim_up：头顶开放。
+  - swim_to_air：有能游到的气穴；说明里写方向与距离。
+  - dig_up：头顶封闭且能安全挖开；说明里写方块与手中可用的工具。
+  - leave_lava：在岩浆中，且附近有安全落脚点。
+  - go_to_water：着火，且 8 格内有水。
+  - step_off_fire：接触火源，且附近有安全落脚点。
+
+  另有固定选项：
+  - continue：继续 bot 当前在做的事，包括正在执行的本能动作。
+  - suspend_task：只在有任务时出现，暂停任务并交给 LLM。
+  - ask_llm：不动身体，交给 LLM；有任务时任务保持暂停。
+  - none：G7 要求的“都不合适”。
+- **不负责**：不选择、不执行。
+- **输入**：bot、信号列表、是否有任务。
+- **输出**：选项列表（顺序固定：动作选项在前）。
+- **使用方**：src/autopilot/instinct/instinct-engine.ts。
+- **依赖**：src/autopilot/hazards.ts、src/autopilot/instinct/macros.ts（宏名）、src/tools/block-utils.ts（最佳工具）。
+- **关键约束**：安全过滤在这里完成：M8 的菜单不含攻击类选项；M9 起攻击选项必须经过 checkTarget（I1）。坐标只出现在参数里，说明文字用相对方向与距离。
+- **验收**：tests/instinct.test.ts：气穴在墙外 → 没有 swim_to_air；天花板是沙子 → 没有 dig_up；没有任务 → 没有 suspend_task；固定选项始终存在。
+
+### F-039 · `src/autopilot/instinct/macros.ts`
+
+- **模块**：M-INS 本能　**里程碑**：M8　**状态**：placeholder　**设计**：已确定：动作代码来自 hazard-escape 与 wip/m8-water-escape（实机调试过）
+- **职责**：小脑宏，执行被选中的动作，直到完成、失败或被取消：
+  - swim_up：保持上浮，直到头出水（最长 15 秒）。
+  - swim_to_air：手动转向气穴，前进加上浮；4 秒没有靠近就失败（寻路器无法规划水中的向上移动）。
+  - dig_up：先沉到水底；天花板在眼睛 4 格内时换上最好的工具向上挖，挖开后上浮，直到头出水（最长 15 秒）。
+  - leave_lava：朝安全落脚点冲刺并持续跳跃（最长 8 秒）。
+  - go_to_water：用寻路走进最近的水；2 秒没有进展就失败（最长 10 秒）。
+  - step_off_fire：走到安全落脚点（最长 10 秒）。
+- **不负责**：不判断该做哪一个；完成后不自行改做别的事（I2 边界原则）。
+- **输入**：bot、参数（来自菜单）、取消信号。
+- **输出**：完成时返回结果文字（例如 “dug up through 1 block(s) and got to air”）；无法完成时抛出带原因的错误。
+- **使用方**：src/autopilot/instinct/instinct-engine.ts。
+- **依赖**：src/autopilot/hazards.ts、src/tools/block-utils.ts（equipBestTool）、mineflayer-pathfinder（go_to_water、step_off_fire）。
+- **状态与副作用**：副作用：移动、挖掘、切换手中工具。
+- **关键约束**：只在持有租约时运行（由本能引擎保证）；取消信号一到就停止发出动作，并停止挖掘。
+- **验收**：tests/instinct.test.ts（模拟世界）：swim_to_air 朝气穴转向、不设寻路目标；dig_up 只在着地且够得着时挖；取消后不再挖。实机：drowning-pocket、drowning-dig、fire 情景。
+
+### F-040 · `src/autopilot/instinct/instinct-engine.ts`
+
+- **模块**：M-INS 本能　**里程碑**：M8　**状态**：placeholder　**设计**：暂定：问题措辞与阈值，M8 探测后设定
+- **职责**：
+  - **请求**：订阅每刻，交给注意力门判断；需要时（且没有在途请求）构建 state 与问题，经决策客户端发出一次请求，使用本能额度。
+  - **state**：
+    - 局势：血量、饥饿、氧气、着火、在岩浆中、头在水中及头顶情况；
+    - 信号说明；
+    - bot 正在做的事：任务与步骤、LLM 的手动命令、正在执行的本能动作；
+    - 上一次本能动作的结果；
+    - LLM 意图（instinct.intent）。
+  - **问题**：action（choice，选项为菜单）；urgent（noul：是否紧急到可以打断 LLM 自己的命令）。
+  - **执行规则**：
+    - 所选动作的概率 ≥ instinct.actThreshold 才执行。
+    - urgent ≥ instinct.urgentThreshold 时以 30 级取得身体，否则以 15 级。LLM 的手动命令持有身体而不紧急时不执行，只写事件。
+    - 选中正在执行的同一动作：继续，不重启。选中另一个动作：直接交接租约。
+    - suspend_task、ask_llm：停止正在执行的本能动作，把任务挂起，等 LLM 用 resume-task 或 cancel-task 决定。
+    - continue、none、低于阈值：不做任何改变。
+  - 写 instinct 事件，管理宏的最长时长。
+- **不负责**：不做运动控制（交给宏）；不修改策略。
+- **输入**：bot、仲裁器、任务管理器、策略、决策客户端、事件存储。
+- **输出**：instinct 事件：
+  - 判断：信号、所选项与概率、是否紧急、模型、延迟、采取的行动；同一危险期内连续相同的判断只写一次。
+  - 宏结束：动作名、结果（done、failed、timeout、interrupted）、耗时。
+  - 离线：“instinct offline (<原因>)” 与信号；每个危险期、每种原因一次。
+
+  另提供状态给 get-policy：在线或离线及原因、正在执行的动作、最近一次判断。
+- **使用方**：src/autopilot/autopilot.ts（创建、启动、停止）、src/tools/policy-tools.ts（状态）。
+- **依赖**：attention.ts、affordances.ts、macros.ts、src/autopilot/action-arbiter.ts、src/autopilot/task-manager.ts（hold）、src/decisions/openrouter-client.ts、src/event-store.ts。
+- **状态与副作用**：状态：在途请求、正在执行的宏及其租约与计时器、最近一次判断、离线原因（内存）。副作用：经宏驱动 bot；联网（经客户端，可能产生费用）。
+- **关键约束**：
+  - 以下情况都不动身体（用户决定：没有本能时交给 LLM）：没有 key；decisions.enabled 或 instinct.enabled 为 false；超时；出错；超出额度。
+  - 答复到达时 bot 已经换了（重连），或信号已全部消失：只记录，不执行。
+  - bot 死亡时中止宏（interrupted: the bot died）。
+  - 持有者名称为 `instinct <动作>`。宏结束时，只在租约仍有效时停止身体，然后释放（G4）。
+- **失败处理**：宏抛错 → 结束为 failed，释放租约，写事件，并请注意力门复问。构建菜单或请求时出错 → 记一次日志，本刻跳过。
+- **验收**：tests/instinct.test.ts（模拟决策）：
+  - 选中 swim_to_air 且概率达标 → 以 15 级取得身体执行；urgent 达标 → 30 级。
+  - LLM 命令持有身体：不紧急 → 不动；紧急 → 打断命令。
+  - 没有 key → 不动身体，写一次 offline 事件。
+  - ask_llm → 任务挂起，宏结束后也不恢复；suspend_task 同理。
+  - 选中 continue → 正在执行的宏继续；同一动作再次被选中 → 不重启。
+  - 答复在信号消失后才到 → 不执行。
+  - 死亡 → 宏中止，任务被取消且不恢复。
+
+### F-041 · `tests/instinct.test.ts`
+
+- **模块**：M-VER 验证　**里程碑**：M8　**状态**：placeholder
+- **职责**：按 F-036～F-040 的验收条目验证 hazards、注意力门、菜单、宏与本能引擎；决策客户端用模拟替身，不联网。
+- **依赖**：ava、sinon、tests/_helpers.ts。
+
 ## F2. 现有文件的计划改动
 
 以下文件已经实现并通过测试，**不创建占位副本**。实现对应里程碑时在原文件上修改，并保持现有测试通过。
@@ -854,6 +1001,7 @@ src/main.ts（现有，改动）--创建并注册--> src/autopilot/autopilot.ts�
 | E-008 | `package.json` | 规划阶段、M6（均已完成） | 规划阶段：ava `files` 限定为 `tests/**/*.test.ts`，防止 `blueprint/` 中的占位文件被当作测试运行。M6：增加 `test:scenarios` 脚本 | 其他脚本与依赖 | 规划阶段：`npm test` 仍为 273 个测试通过（已执行） |
 | E-009 | `scripts/test-live-world.mjs` | M1～M4、M6（均已完成） | 覆盖 7 个新工具（start-task、list-tasks、resume-task、cancel-task、get-policy、set-policy、list-decision-models），以及“任务中调用移动工具 → 中断报告 → resume-task”流程；M6 改为使用 `scripts/lib/live-arena.mjs` | 已有的全部检查步骤与防护 | 实机连续两轮全部通过 |
 | E-010 | `README.md` | 规划阶段、M6（均已完成） | 规划阶段：增加一小节说明 Autopilot 处于设计阶段并链接本蓝图。M6：替换为实际使用说明（任务、策略、决策模型的隐私与费用说明） | 现有内容 | 人工阅读 |
+| E-011 | M8 对已实现的 Autopilot 文件的改动（设计 v0.4） | M8 | **F-001 autopilot.ts**：在反射引擎之后创建并启动 InstinctEngine，断线时停止。顺序保证反射引擎的死亡回调先运行：任务先被取消，再中止宏。**F-003 task-manager.ts**：新增 hold(reason)，把当前任务挂起为“等待 resume-task 或 cancel-task”（与手动暂停相同）；任务正在驾驶时先停止身体。**F-013 reflexes.ts**：删除 hazard-escape，危险判断移到 F-036。**F-014 policy.ts**：删除 reflexes.hazardEscape；新增 instinct 分组：enabled（默认 true）、intent（默认空，最长 300 字符，只有来源 llm 能设置）、lowAir（6）、reaskMs（1500）、actThreshold、urgentThreshold、maxCallsPerMinute（90）。**F-015 openrouter-client.ts**：decide 增加 budget 选项；'instinct' 使用独立的调用窗口与 instinct.maxCallsPerMinute，其他调用仍用 decisions.maxCallsPerMinute。**F-018 policy-tools.ts**：get-policy 显示本能状态（在线或离线及原因、正在执行的动作、最近一次判断）；set-policy 接受 instinct 分组。**F-032 test-scenarios.mjs**：配置改为 llm-only（反射与本能都关闭）、no-key（无 key：反射开启，本能离线）、instinct（有 key，必须全部通过）；加入 drowning-pocket、drowning-dig | 其余反射（creeper-evade、low-health-retreat、self-defense、auto-eat）、任务、聊天筛选与聊天命令、CombatJudge 在 M8 不变 | tests/instinct.test.ts；现有测试按新字段调整；情景测试 |
 
 ## G. 跨模块约定
 
@@ -935,9 +1083,9 @@ done / failed / cancelled 为终态，不能再改变
 
 分支挖矿、按蓝图建造、农田循环、箱子整理、远程武器与盾牌、多 bot 协作、策略与任务跨重启保存、把更多日常判断（例如“背包满了先回家还是丢弃杂物”）交给决策模型。实现前需要单独规划。
 
-## I. 设计 v0.4 草案：决策模型承担本能，代码只做“小脑”（2026-10-18，待用户确认）
+## I. 设计 v0.4：决策模型承担本能，代码只做“小脑”（2026-10-18，用户已确认）
 
-> 本节是**草案**。用户确认后才会改写 A～H 节中受影响的契约并开始实现（PLAN M8～M10）。在此之前，现有代码与 A～H 节保持一致。
+> 用户已确认本节（2026-10-18：“v0.4 草案可以”）。逐文件契约在 F1-g；A～H 节中受影响的部分随 M8～M10 的实现逐步改写，M10 合并。
 
 ### I1. 动因与用户决定
 
@@ -972,6 +1120,8 @@ done / failed / cancelled 为终态，不能再改变
 LLM 下达的任务与宏（follow、guard、gather 等）是被命令去做的事；宏内部的判断只服务于这件事（例如 guard 攻击靠近的敌对生物、gather 跳过泡水的方块），不算映射。
 
 ### I3. 结构
+
+> 逐文件契约见 F1-g（F-036～F-041）与 E-011；实现中确定的细节以 F1-g 为准。
 
 | 模块 | 文件（暂定） | 职责 | 不负责 |
 |---|---|---|---|
