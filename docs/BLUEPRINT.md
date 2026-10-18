@@ -1000,6 +1000,67 @@ src/main.ts（现有，改动）--创建并注册--> src/autopilot/autopilot.ts�
 - **职责**：按 F-036～F-040 的验收条目验证 hazards、注意力门、菜单、宏与本能引擎；决策客户端用模拟替身，不联网。
 - **依赖**：ava、sinon、tests/_helpers.ts。
 
+### F1-h 本能的其余部分（M9，设计 v0.4）
+
+> M9 把苦力怕、低血量、被攻击与饥饿也交给本能，删除反射引擎（F-012）、反射定义（F-013）与 CombatJudge（F-016 第 3 类）。下面只写相对 F-036～F-040 的变化；其余契约不变。
+
+### F-042 · `src/autopilot/instinct/motor.ts`
+
+- **模块**：M-INS 本能　**里程碑**：M9　**状态**：placeholder　**设计**：已确定：从 reflexes.ts 移来的、已实机验证的运动代码
+- **职责**：宏共用的运动代码：
+  - runAway：第一刻就用按键冲刺离开一组位置，检查前方两格（含对角线两侧）是否安全：不进岩浆、火、仙人掌、蜘蛛网，不跳上 1.5 格高的栅栏或墙，落差不超过 3。没有安全方向或卡住 1 秒时，改由寻路器接手 2 秒。
+  - bestFood：挑最好的安全食物，不吃腐肉、蜘蛛眼、毒马铃薯、河豚、生鸡肉、紫颂果、金苹果、附魔金苹果、金胡萝卜、迷之炖菜。
+  - eat：吃完换回原来手持的物品；被取消时立即停止进食。
+  - holdGround：原地不动，目标进入攻击距离时才出手，不追击、不逃跑；目标离开 16 格或消失时结束。
+- **不负责**：不判断做什么。
+- **依赖**：src/autopilot/hazards.ts、src/autopilot/combat.ts、src/autopilot/task-manager.ts（delay）、minecraft-data。
+- **验收**：tests/motor.test.ts（从 reflexes.test.ts 移来，断言不变）：逃跑不进岩浆、不跳下高处、不撞栅栏和蜘蛛网，卡住时交给寻路器；进食避开有害食物，被取消时停止并换回原物品；holdGround 不追击。
+
+### F-036～F-040 的 M9 变化
+
+- **F-037 注意力门**：
+  - **新信号**：
+    - creeper_swelling：7 格内有正在膨胀或已点燃的苦力怕。
+    - creeper_near：10 格内有苦力怕，但没在膨胀。目的是提前问，给决策留出时间（Q11）。
+    - attacked：3 秒内被实体攻击过（来自 E-005 的受伤信息）。如果 bot 已经在和这个攻击者战斗（例如守卫任务正在打它），这不是新的危险，不算信号。
+    - low_health：血量低于 instinct.lowHealth（默认 6），或不高于 combat.retreatHealth，且 instinct.hostileRadius（默认 16）格内有敌对生物。
+    - hungry：饥饿值低于 instinct.food（默认 14），且身上有能吃的安全食物。
+  - **复问间隔按信号分别计算**：hungry 每 20 秒复问一次，其余按 instinct.reaskMs。
+  - **询问时给出原因**：new（出现了上一次请求没有的信号）、reask、action_ended。
+  - **危险期在本能动作执行期间不结束**：即使信号暂时消失（例如本能的战斗动作让 attacked 不再算信号），也要等动作结束、信号仍然没有时才结束。这样 earlier_dangers 记下的是动作的真实结果。
+- **F-038 菜单**：
+  - **新动作选项**：
+    - run_from_creeper：冲刺到离苦力怕 8 格以外。
+    - flee：跑到 16 格内没有攻击者和敌对生物为止。
+    - fight：用最好的武器打攻击者，或最近的合法敌对生物；血量 ≤ combat.retreatHealth 时脱离。
+    - hold：原地防守。
+    - eat：吃最好的安全食物。
+  - **安全过滤（I1）**：
+    - fight 与 hold 只针对 checkTarget 合法的目标。
+    - 规则固定为 attackPlayers: false，策略打开 attackPlayers 也不行，与原来的自卫一样，本能永远不攻击玩家。
+    - 被驯服的动物永远不打；avoidNeutral 开启时也不打中立生物。
+    - 这几种情况下菜单只有 flee 与固定选项。
+- **F-039 宏**：
+  - 新增 run_from_creeper（最长 4 秒）、flee（最长 10 秒）、fight（最长 20 秒，调用 combat.engage）、hold（最长 20 秒）、eat（最长 5 秒）。
+  - 宏的上下文增加实体 id 与当前策略。
+- **F-040 本能引擎**：
+  - **新信号可以顶替在途请求**：信号原因为 new 时，即使已有请求在途也立即再发一个，只有最新一个请求的答复能执行。被顶替的答复只记录（事件里写 superseded），不执行。这样一次“被攻击”的请求不会挡住刚点燃的苦力怕。reask 与 action_ended 仍然等在途请求结束。
+  - **受伤信息**：noteDamage 接收受伤信息（攻击者 id、伤害类型、时间），供 attacked 信号使用。
+  - **复活清理**：从反射引擎移来。死亡后复活时，清除 bot 自己残留的着火位，并把氧气重置为 300；否则本能会对已经不存在的着火和缺氧继续提问。
+  - **死亡顺序**：新增可选回调 onDeath。死亡时在自己的处理里先调用它，再中止宏；src/autopilot/autopilot.ts 用它取消任务（the bot died）。不再依赖监听器的注册顺序。
+  - **计时统计**：记录每刻评估的耗时（平均、最大），get-policy 显示，作为 I6 的证据。
+- **F-012 反射引擎、F-013 反射定义、F-025 反射测试**：在 M9 删除。保留的行为由 F-042 与本能承接；死亡与复活由 F-040 承接。
+- **F-016 决策钩子**：删除 CombatJudge（第 3 类战斗判断），以及策略中的 decisions.combatThreshold；聊天筛选与聊天命令不变。
+- **E-012**：M9 对已实现文件的其他改动：
+  - action-arbiter.ts：PRIORITY 改名为 URGENT_INSTINCT 30、MANUAL 20、INSTINCT 15、TASK 10；抢占者类型改为 'instinct' | 'manual'。这是单独一步的机械改名。
+  - policy.ts：删除 reflexes 分组与 decisions.combatThreshold；instinct 分组增加 lowHealth（6）、hostileRadius（16）、food（14）。
+  - policy-tools.ts：删除反射相关的显示与字段。
+  - autopilot.ts：删除 ReflexEngine 与 CombatJudge，noteDamage 转给本能。
+  - tool-factory.ts：只改注释。
+  - task-tools.ts：resume-task 的说明改为“被本能暂停的任务会自动恢复”。
+  - test-scenarios.mjs：llm-only 改为关闭本能；新增 intent-dive 情景。
+  - README、AGENTS。
+
 ## F2. 现有文件的计划改动
 
 以下文件已经实现并通过测试，**不创建占位副本**。实现对应里程碑时在原文件上修改，并保持现有测试通过。
