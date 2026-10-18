@@ -39,6 +39,8 @@ type Outcome = 'done' | 'failed' | 'timeout' | 'interrupted';
 interface Running {
   option: MenuOption;
   reason: string;
+  /** The latest answer said the task should not carry on afterwards: hold it for the LLM when the action ends. */
+  holdTaskAfter: boolean;
   started: number;
   controller: AbortController;
   lease: Lease;
@@ -47,6 +49,18 @@ interface Running {
 }
 
 class InstinctAbort extends Error {}
+
+// Earlier dangers the model is told about, so it can see that a task keeps leading the bot back into the same one
+// (the day-2 loop: escape, the task resumes, back into the water) and choose suspend_task. A fact, not a rule.
+const HISTORY_MS = 120_000;
+const HISTORY_LIMIT = 5;
+
+interface PastDanger {
+  endedAt: number;
+  kinds: string;
+  result: string;
+  task: string | null;
+}
 
 const ACTION_INSTRUCTIONS =
   'You are the instinct of a Minecraft bot that an AI player controls. The bot senses the danger described in ' +
@@ -59,8 +73,16 @@ const URGENT_INSTRUCTIONS =
   'player is running? Low air under water, a ceiling over the water, standing in lava and burning are serious; plenty ' +
   'of air with an open way up is not.';
 
-export function instinctQuestions(menu: MenuOption[]): Record<string, DecisionQuestion> {
-  return {
+const RESUME_INSTRUCTIONS =
+  'Once the bot is out of this danger, should the task in doing_now carry on by itself? Answer false when ' +
+  'earlier_dangers shows that this task keeps leading the bot back into the same kind of danger, so the AI player ' +
+  'should decide first.';
+// Below this, the task is held for the LLM once the action ends. The M8 probe: 0.20-0.26 when the task had led the bot
+// back into the same danger before, 0.88-0.95 the first time.
+export const RESUME_THRESHOLD = 0.5;
+
+export function instinctQuestions(menu: MenuOption[], { hasTask = false } = {}): Record<string, DecisionQuestion> {
+  const questions: Record<string, DecisionQuestion> = {
     action: { type: 'choice', instructions: ACTION_INSTRUCTIONS, criteria: Object.fromEntries(menu.map(option => [option.id, option.text])) },
     urgent: {
       type: 'noul',
@@ -68,6 +90,14 @@ export function instinctQuestions(menu: MenuOption[]): Record<string, DecisionQu
       criteria: { true: 'the bot could die or lose a lot of health within seconds unless it acts now', false: 'the bot can safely wait for the AI player' }
     }
   };
+  if (hasTask) {
+    questions.resume_task = {
+      type: 'noul',
+      instructions: RESUME_INSTRUCTIONS,
+      criteria: { true: 'the task can safely carry on afterwards', false: 'the task should stay paused for the AI player' }
+    };
+  }
+  return questions;
 }
 
 export class InstinctEngine {
@@ -82,9 +112,13 @@ export class InstinctEngine {
   private lastResult: string | null = null;
   // Repeats of the same decision within one danger episode are written once.
   private lastLogged: { episode: number; key: string } | null = null;
+  private history: PastDanger[] = [];
+  // The current danger episode: what it is about, how many times the model was asked, and the last action's result.
+  private episodeInfo = { kinds: '', rounds: 0, result: null as string | null };
   private readonly onTick = () => this.tick();
   private readonly onDeath = () => {
     if (this.running) this.finish(this.running, 'interrupted', 'the bot died');
+    if (this.attention.inEpisode()) this.endEpisode(Date.now(), 'the bot died');
     this.attention.reset();
   };
 
@@ -132,16 +166,36 @@ export class InstinctEngine {
       this.options.log?.('warn', `Instinct could not read the situation: ${error}`);
       return;
     }
-    if (!this.attention.shouldAsk(cues, now, policy.instinct.reaskMs) || this.inFlight) return;
+    const wasInEpisode = this.attention.inEpisode();
+    const episode = this.attention.episode;
+    const ask = this.attention.shouldAsk(cues, now, policy.instinct.reaskMs);
+    if (wasInEpisode && !this.attention.inEpisode()) this.endEpisode(now);
+    if (this.attention.episode !== episode) this.episodeInfo = { kinds: '', rounds: 0, result: null };
+    if (!ask || this.inFlight) return;
     this.ask(cues, policy, now);
+  }
+
+  /** Remembers how a danger episode ended, for the next ones. */
+  private endEpisode(now: number, ending?: string): void {
+    const task = this.options.tasks.currentTask();
+    this.history.push({
+      endedAt: now,
+      kinds: this.episodeInfo.kinds || 'danger',
+      result: ending ?? this.episodeInfo.result ?? 'no instinct action',
+      task: task ? `${task.id} ${task.behavior} (${task.status})` : null
+    });
+    this.history = this.history.filter(past => now - past.endedAt <= HISTORY_MS).slice(-HISTORY_LIMIT);
   }
 
   private ask(cues: Cue[], policy: Policy, now: number): void {
     const { bot } = this.options;
     let menu: MenuOption[];
     let state: Record<string, unknown>;
+    const hasTask = this.options.tasks.currentTask() !== null;
+    this.episodeInfo.rounds++;
+    this.episodeInfo.kinds = [...new Set(cues.map(cue => cue.kind))].join(', ');
     try {
-      menu = buildMenu(bot, cues, { hasTask: this.options.tasks.currentTask() !== null });
+      menu = buildMenu(bot, cues, { hasTask });
       state = this.state(cues, policy);
     } catch (error) {
       this.options.log?.('warn', `Instinct could not build its menu: ${error}`);
@@ -150,7 +204,7 @@ export class InstinctEngine {
     this.attention.noteAsked(cues, now);
     this.inFlight = true;
     const episode = this.attention.episode;
-    this.options.decide(state, instinctQuestions(menu))
+    this.options.decide(state, instinctQuestions(menu, { hasTask }))
       .then(result => this.handle(result, menu, cues, episode))
       .catch(error => this.options.log?.('warn', `Instinct decision failed: ${error}`))
       .finally(() => {
@@ -181,8 +235,18 @@ export class InstinctEngine {
       doing_now: doing.length > 0 ? doing.join('; ') : 'nothing',
       instinct_action_running: run ? `${run.option.id} for ${((Date.now() - run.started) / 1000).toFixed(1)}s` : 'none',
       last_instinct_result: this.lastResult ?? 'none',
+      times_asked_about_this_danger: this.episodeInfo.rounds,
+      earlier_dangers: this.earlierDangers(),
       ai_player_intent: policy.instinct.intent || 'none given'
     };
+  }
+
+  private earlierDangers(): string[] | 'none' {
+    const now = Date.now();
+    const recent = this.history.filter(past => now - past.endedAt <= HISTORY_MS);
+    if (recent.length === 0) return 'none';
+    return recent.map(past =>
+      `${Math.round((now - past.endedAt) / 1000)}s ago: ${past.kinds}, ended with ${past.result}${past.task ? `; task ${past.task} afterwards` : ''}`);
   }
 
   private handle(result: DecisionResult, menu: MenuOption[], cues: Cue[], episode: number): void {
@@ -201,12 +265,15 @@ export class InstinctEngine {
     const policy = this.options.getPolicy().instinct;
     const action = result.answers.action;
     const urgentAnswer = result.answers.urgent;
+    const resumeAnswer = result.answers.resume_task;
+    const holdTaskAfter = resumeAnswer?.type === 'noul' && resumeAnswer.noul < RESUME_THRESHOLD;
     if (action?.type !== 'choice') return;
     const choice = action.choice as OptionId;
     const p = action.probabilities[choice] ?? action.confidence;
     const urgentP = urgentAnswer?.type === 'noul' ? urgentAnswer.noul : 0;
     const urgent = urgentP >= policy.urgentThreshold;
-    const summary = `${choice} p=${p.toFixed(2)}, urgent p=${urgentP.toFixed(2)} (${result.model}; ${result.latencyMs}ms)`;
+    const resumeText = resumeAnswer?.type === 'noul' ? `, resume task p=${resumeAnswer.noul.toFixed(2)}` : '';
+    const summary = `${choice} p=${p.toFixed(2)}, urgent p=${urgentP.toFixed(2)}${resumeText} (${result.model}; ${result.latencyMs}ms)`;
 
     let taken: string;
     // The danger may be over by the time the answer arrives (e.g. the bot surfaced): record it, do nothing.
@@ -216,7 +283,7 @@ export class InstinctEngine {
       taken = `not confident enough (below ${policy.actThreshold}); no change`;
     } else {
       const option = menu.find(entry => entry.id === choice);
-      taken = this.act(option, choice, urgent, dangers);
+      taken = this.act(option, choice, urgent, dangers, holdTaskAfter);
     }
     this.lastDecision = `${dangers} → ${summary} → ${taken}`;
     const key = `${choice}|${taken}`;
@@ -226,12 +293,16 @@ export class InstinctEngine {
     }
   }
 
-  private act(option: MenuOption | undefined, choice: OptionId, urgent: boolean, reason: string): string {
+  private act(option: MenuOption | undefined, choice: OptionId, urgent: boolean, reason: string, holdTaskAfter: boolean): string {
+    const after = holdTaskAfter && this.options.tasks.currentTask() ? '; the task will wait for the AI player afterwards' : '';
     if (option?.macro) {
-      if (this.running?.option.id === option.id) return `kept ${option.id} running`;
+      if (this.running?.option.id === option.id) {
+        this.running.holdTaskAfter = holdTaskAfter;
+        return `kept ${option.id} running${after}`;
+      }
       const holder = this.options.arbiter.holder();
       if (holder?.priority === PRIORITY.MANUAL && !urgent) return 'not interrupting the AI player\'s command (not urgent)';
-      return this.launch(option, urgent ? PRIORITY.CRITICAL_REFLEX : PRIORITY.ROUTINE_REFLEX, reason);
+      return this.launch(option, urgent ? PRIORITY.CRITICAL_REFLEX : PRIORITY.ROUTINE_REFLEX, reason, holdTaskAfter) + after;
     }
     if (choice === 'suspend_task' || choice === 'ask_llm') {
       // Hold the task before stopping the action: releasing the action's lease first would hand the body back to the
@@ -244,7 +315,7 @@ export class InstinctEngine {
     return 'no change';
   }
 
-  private launch(option: MenuOption, priority: typeof PRIORITY.CRITICAL_REFLEX | typeof PRIORITY.ROUTINE_REFLEX, reason: string): string {
+  private launch(option: MenuOption, priority: typeof PRIORITY.CRITICAL_REFLEX | typeof PRIORITY.ROUTINE_REFLEX, reason: string, holdTaskAfter: boolean): string {
     const { arbiter, bot } = this.options;
     const macro = MACROS[option.macro!];
     const previous = this.running;
@@ -264,6 +335,7 @@ export class InstinctEngine {
     const running: Running = {
       option,
       reason,
+      holdTaskAfter,
       started: Date.now(),
       controller,
       lease,
@@ -289,6 +361,13 @@ export class InstinctEngine {
     run.finished = true;
     clearTimeout(run.timer);
     run.controller.abort(new InstinctAbort(text));
+    // Hold the task before letting go of the body, so it does not resume for a moment and walk back into the danger.
+    let held = '';
+    const task = this.options.tasks.currentTask();
+    if (run.holdTaskAfter && outcome !== 'interrupted' && task) {
+      this.options.tasks.hold(`held by the instinct after ${run.option.id}: the task kept leading the bot back into this danger`);
+      held = `; task ${task.id} held for the AI player`;
+    }
     if (run.lease.isActive() && !keepBody) {
       try {
         stopPathfinder(this.options.bot);
@@ -302,7 +381,8 @@ export class InstinctEngine {
     if (this.running === run) this.running = null;
     const seconds = ((Date.now() - run.started) / 1000).toFixed(1);
     this.lastResult = `${run.option.id} → ${outcome}: ${text}`;
-    this.options.events.addEvent('instinct', `${run.option.id} → ${outcome === 'done' ? text : `${outcome}: ${text}`} (${seconds}s)`);
+    this.episodeInfo.result = this.lastResult;
+    this.options.events.addEvent('instinct', `${run.option.id} → ${outcome === 'done' ? text : `${outcome}: ${text}`} (${seconds}s)${held}`);
     if (reask) this.attention.noteActionEnded();
   }
 }

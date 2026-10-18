@@ -956,13 +956,16 @@ src/main.ts（现有，改动）--创建并注册--> src/autopilot/autopilot.ts�
     - 信号说明；
     - bot 正在做的事：任务与步骤、LLM 的手动命令、正在执行的本能动作；
     - 上一次本能动作的结果；
-    - LLM 意图（instinct.intent）。
-  - **问题**：action（choice，选项为菜单）；urgent（noul：是否紧急到可以打断 LLM 自己的命令）。
+    - LLM 意图（instinct.intent）；
+    - 这次危险已经问过几次（times_asked_about_this_danger）；
+    - 最近 2 分钟内的前几次危险（earlier_dangers，最多 5 条）：多久以前、什么危险、怎样结束、当时的任务及其状态。这是代码报告的事实，让模型看出“任务一次次把 bot 带回同一种危险”（第 2 天的循环）。
+  - **问题**：action（choice，选项为菜单）；urgent（noul：是否紧急到可以打断 LLM 自己的命令）；有任务时再问 resume_task（noul：脱离危险后任务能否自己继续）。
   - **执行规则**：
     - 所选动作的概率 ≥ instinct.actThreshold 才执行。
     - urgent ≥ instinct.urgentThreshold 时以 30 级取得身体，否则以 15 级。LLM 的手动命令持有身体而不紧急时不执行，只写事件。
     - 选中正在执行的同一动作：继续，不重启。选中另一个动作：直接交接租约。
-    - suspend_task、ask_llm：停止正在执行的本能动作，把任务挂起，等 LLM 用 resume-task 或 cancel-task 决定。
+    - suspend_task、ask_llm：先把任务挂起，再停止正在执行的本能动作（反过来会让任务恢复一瞬间），等 LLM 用 resume-task 或 cancel-task 决定。
+    - resume_task < 0.5（命名常量 RESUME_THRESHOLD，依据 M8 探测）：动作结束（完成、失败或超时）时，先把任务挂起再释放身体，任务不会自动恢复。
     - continue、none、低于阈值：不做任何改变。
   - 写 instinct 事件，管理宏的最长时长。
 - **不负责**：不做运动控制（交给宏）；不修改策略。
@@ -1191,7 +1194,8 @@ LLM 下达的任务与宏（follow、guard、gather 等）是被命令去做的�
   - 菜单在有任务时始终包含 `suspend_task`：暂停任务、停下身体并交给 LLM。
   - 本能选 `ask_llm` 时，被暂停的任务同样保持暂停，与手动暂停一样，直到 LLM 调用 resume-task 或 cancel-task；之后不会自动恢复。
   - 这两条防止第 2 天的含水层循环再次出现：任务恢复 → 又走进水里 → 本能触发 → `continue` → 再次恢复，直到淹死。
-  - 宏失败、或同一信号连续两轮都没有解决时，下一轮的 state 会写明这一点。代码不自动让任务失败，由模型选择 `suspend_task`、`ask_llm` 或其他选项。
+  - 宏失败时，下一轮的 state 写明上一次动作的结果；state 还写明这次危险已经问过几次，以及最近 2 分钟内的前几次危险怎样结束、当时的任务是否继续了。
+  - 代码不自动让任务失败。模型可以选择 `suspend_task`、`ask_llm` 或其他选项，也可以在 resume_task 问题上回答“否”：先脱险，之后任务等 LLM 决定（M8 探测：任务第二、三次把 bot 带回水下时，模型仍然先选择逃生，但 resume_task 只有 0.20–0.26）。
 - **没有本能时**（没有 key、decisions.enabled 为 false、超时或出错）：
   - 不动身体；
   - 每个信号写一条 instinct 事件（信号、局势摘要、“instinct offline: <原因>”），LLM 可以用 `wait-for-event {types: ["instinct", ...]}` 被唤醒；

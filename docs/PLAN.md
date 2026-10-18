@@ -481,3 +481,17 @@
 - **无 key 的专项检查**（会话临时脚本）：bot 在头顶封闭的水池中，8 秒内没有任何动作，只出现一条 instinct 事件：“instinct offline (disabled: no OpenRouter API key is configured (OPENROUTER_API_KEY)): under water with a stone ceiling 2 block(s) above the head, 20 air left; the bot does not act on its own, decide what to do”。
 - 文件状态：F-036～F-041 与 E-011 的改动为 `verified`。
 
+### 2026-10-18 M8 补充：防止“脱险 → 任务恢复 → 又回到危险”的循环
+
+- **问题**（复核时发现）：设计 I5 依靠模型选择 suspend_task 来打断第 2 天的循环，但模型看不到之前的危险，每次下水都是一段新的危险期。
+- **第一步**：state 增加 times_asked_about_this_danger 与 earlier_dangers（最近 2 分钟内的前几次危险、怎样结束、当时的任务状态）。用探测脚本加入 3 个循环局面（任务第二、三次把 bot 带回水下，其中一个只剩 6 格氧），每个请求 1 次：模型仍然选择 swim_to_air（0.55–0.60），suspend_task 只有 0.04–0.06。结论：此刻先逃生是对的，循环出在逃生后任务自动恢复，而原来的菜单没法表达“先逃生，再让任务停下”。
+- **改法**：有任务时在同一个请求里再问一个 noul 问题 resume_task（脱离危险后任务能否自己继续）。
+  - 探测结果：循环局面 0.20–0.26；第一次遇到的局面 0.88–0.95（A、B、D、M）。
+  - 据此 RESUME_THRESHOLD 定为 0.5。低于它时，动作结束后先挂起任务再释放身体，任务等 LLM 决定。
+  - 同一轮探测中其他局面的选择与第一次探测相同，概率变化不超过 0.07（state 多了两个字段）。
+- **实际执行的检查**：
+  - `tsc --noEmit` 通过；`npm run lint` 无错误；`npm test` 821 个测试通过。
+  - 新增测试：earlier_dangers 与轮次计数；resume_task 低时脱险后任务被挂起，没有任何 task_resumed。
+  - 情景（有 key，当前构建）：drowning-pocket 3.5 s 游到气穴；drowning-dig 4.5 s 挖开出水，均通过。
+- **还没有实机验证完整循环**：在测试场地里重现“任务反复走进含水层”比较难。这部分留给 M10 的生存测试观察。
+

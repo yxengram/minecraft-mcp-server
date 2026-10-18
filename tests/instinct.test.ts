@@ -209,6 +209,8 @@ test('instinctQuestions: action is a choice over the menu (with none), urgent is
   t.is(questions.action.type, 'choice');
   t.deepEqual(Object.keys(questions.action.criteria as Record<string, string>), ['swim_to_air', 'dig_up', 'continue', 'ask_llm', 'none']);
   t.is(questions.urgent.type, 'noul');
+  t.false('resume_task' in questions, 'no task: nothing to resume');
+  t.is(instinctQuestions([], { hasTask: true }).resume_task.type, 'noul');
 });
 
 // ---- F-039 macros -------------------------------------------------------------------------------------------------
@@ -364,12 +366,13 @@ test('buildMenu: burning on safe ground with no water around offers only the fix
 
 // ---- F-040 instinct engine ----------------------------------------------------------------------------------------
 
-function answer(choice: string, p: number, urgent = 0.1): DecisionResult {
+function answer(choice: string, p: number, urgent = 0.1, resume = 0.9): DecisionResult {
   return {
     ok: true,
     answers: {
       action: { type: 'choice', choice, confidence: p, probabilities: { [choice]: p } },
-      urgent: { type: 'noul', noul: urgent }
+      urgent: { type: 'noul', noul: urgent },
+      resume_task: { type: 'noul', noul: resume }
     },
     model: 'test/model',
     latencyMs: 600
@@ -430,7 +433,8 @@ test.serial('trapped under water: a confident swim_to_air runs at 15 and pauses 
     t.deepEqual(holder(), { holder: 'instinct swim_to_air', priority });
     t.is(tasks.currentTask()?.status, 'paused');
     t.deepEqual(taskEvents(), ['task_started', 'task_paused']);
-    t.regex(messages()[0], new RegExp(`^under water .* → swim_to_air p=0\\.90, urgent p=${urgent.toFixed(2)} \\(test/model; 600ms\\) → started swim_to_air${urgent >= 0.6 ? ' \\(urgent\\)' : ''}$`));
+    t.regex(messages()[0], new RegExp(`^under water .* → swim_to_air p=0\\.90, urgent p=${urgent.toFixed(2)}, resume task p=0\\.90 \\(test/model; 600ms\\) → started swim_to_air${urgent >= 0.6 ? ' \\(urgent\\)' : ''}$`));
+    t.deepEqual(Object.keys(decide.firstCall.args[1] as object), ['action', 'urgent', 'resume_task'], 'with a task, the model is asked whether it may carry on');
     engine.stop('next case');
     await tasks.cancelAll('next case');
   }
@@ -581,6 +585,61 @@ test.serial('when the action finishes it reports the result, gives the body back
   engine.tick();
   await clock.tickAsync(0);
   t.true(decide.calledTwice);
+});
+
+test.serial('earlier dangers under the same task are reported to the model (the escape → resume → back in loop), with the rounds asked', async (t) => {
+  const clock = useClock(t);
+  const world = createWorld({ terrain: pool({ pocket: true }), position: new Vec3(0.5, 64.2, 0.5) });
+  const decide = sinon.stub().resolves(answer('swim_to_air', 0.9));
+  const { engine, tasks } = createEngine(t, world, decide);
+  t.true((await tasks.start('idle', {})).ok);
+  const state = (call: number) => decide.getCall(call).args[0] as Record<string, unknown>;
+
+  engine.tick();
+  await clock.tickAsync(0);
+  t.is(state(0).earlier_dangers, 'none');
+  t.is(state(0).times_asked_about_this_danger, 1);
+
+  // Escapes; the task resumes; out of the water the episode ends.
+  world.self.position = new Vec3(3.5, 65.4, 0.5);
+  await clock.tickAsync(100);
+  world.self.position = new Vec3(10.5, 70, 10.5);
+  engine.tick();
+  await clock.tickAsync(20000);
+
+  // The task leads it back under the ceiling.
+  world.self.position = new Vec3(0.5, 64.2, 0.5);
+  engine.tick();
+  await clock.tickAsync(0);
+  const earlier = state(1).earlier_dangers as string[];
+  t.is(earlier.length, 1);
+  t.regex(earlier[0], /^20s ago: trapped_underwater, ended with swim_to_air → done: swam to the air pocket .*; task t1 idle \(running\) afterwards$/);
+  t.is(state(1).times_asked_about_this_danger, 1);
+
+  await clock.tickAsync(1500);
+  engine.tick();
+  await clock.tickAsync(0);
+  t.is(state(2).times_asked_about_this_danger, 2, 'rounds within the same danger are counted');
+});
+
+test.serial('the model says the task should not carry on (it keeps leading the bot back): after the escape the task is held, never resumed', async (t) => {
+  const clock = useClock(t);
+  const world = createWorld({ terrain: pool({ pocket: true }), position: new Vec3(0.5, 64.2, 0.5) });
+  const decide = sinon.stub().resolves(answer('swim_to_air', 0.6, 0.5, 0.2));
+  const { engine, tasks, holder, messages, taskEvents } = createEngine(t, world, decide);
+  t.true((await tasks.start('idle', {})).ok);
+  engine.tick();
+  await clock.tickAsync(0);
+  t.regex(messages()[0], /resume task p=0\.20 .* → started swim_to_air; the task will wait for the AI player afterwards$/);
+
+  world.self.position = new Vec3(3.5, 65.4, 0.5);
+  await clock.tickAsync(100);
+  t.is(holder(), null, 'nobody drives: the task was held before the body was let go');
+  t.is(tasks.currentTask()?.status, 'paused');
+  t.regex(tasks.currentTask()?.pauseReason ?? '', /^held by the instinct after swim_to_air: the task kept leading the bot back into this danger \(waiting for resume-task or cancel-task\)$/);
+  t.regex(messages().at(-1)!, /^swim_to_air → swam to the air pocket .* \(\d+\.\ds\); task t1 held for the AI player$/);
+  await clock.tickAsync(3000);
+  t.deepEqual(taskEvents(), ['task_started', 'task_paused', 'task_paused'], 'no task_resumed at any point');
 });
 
 test.serial('the intent the AI player set is passed to the decision model', async (t) => {
