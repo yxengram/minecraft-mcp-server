@@ -64,7 +64,7 @@ test('interruption reports describe the interrupted task and any wait', async (t
   t.teardown(() => autopilot.tasks.cancelAll('test finished'));
 
   const report = autopilot.describeInterruption(
-    [{ holder: 'task t1 follow', priority: PRIORITY.TASK }, { holder: 'reflex auto-eat', priority: PRIORITY.ROUTINE_REFLEX }],
+    [{ holder: 'task t1 follow', priority: PRIORITY.TASK }, { holder: 'reflex auto-eat', priority: PRIORITY.INSTINCT }],
     { holder: 'reflex creeper-evade', ms: 2400 }
   );
 

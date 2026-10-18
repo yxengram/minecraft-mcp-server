@@ -149,7 +149,7 @@ test.serial('collect-block with an unknown block type leaves a running follow ta
 });
 
 // E-004 / fix 9: the gather task only starts counting its time limit once it runs; collect-block must not wait forever.
-for (const [label, priority] of [['critical reflex', PRIORITY.CRITICAL_REFLEX], ['manual command', PRIORITY.MANUAL]] as const) {
+for (const [label, priority] of [['critical reflex', PRIORITY.URGENT_INSTINCT], ['manual command', PRIORITY.MANUAL]] as const) {
   test.serial(`collect-block gives up after timeoutMs + 5s when a ${label} keeps its task queued`, async (t) => {
     const clock = sinon.useFakeTimers({ now: 1.7e12 });
     t.teardown(() => clock.restore());

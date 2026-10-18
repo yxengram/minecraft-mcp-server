@@ -2,14 +2,14 @@
 // (pathfinder, control states, looking, attacking, using the held item).
 
 export const PRIORITY = {
-  CRITICAL_REFLEX: 30,
+  URGENT_INSTINCT: 30,
   MANUAL: 20,
-  ROUTINE_REFLEX: 15,
+  INSTINCT: 15,
   TASK: 10
 } as const;
 
 export type Priority = typeof PRIORITY[keyof typeof PRIORITY];
-export type PreemptorKind = 'reflex' | 'manual';
+export type PreemptorKind = 'instinct' | 'manual';
 export type LeaseState = 'active' | 'suspended' | 'revoked' | 'released';
 
 export interface HolderInfo {
@@ -42,7 +42,7 @@ export type AcquireResult =
 const DEFAULT_MANUAL_WAIT_MS = 10000;
 
 function kindOf(priority: Priority): PreemptorKind {
-  return priority === PRIORITY.MANUAL ? 'manual' : 'reflex';
+  return priority === PRIORITY.MANUAL ? 'manual' : 'instinct';
 }
 
 class LeaseImpl implements Lease {

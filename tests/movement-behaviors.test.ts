@@ -54,7 +54,7 @@ test.serial('follow stops driving while paused and re-applies its goal when resu
   const { tasks, pathfinder, arbiter } = world({ 5: steve(5) });
   await tasks.start('follow', { entityId: 5 });
 
-  const reflex = await arbiter.acquire({ holder: 'reflex creeper-evade', priority: PRIORITY.CRITICAL_REFLEX });
+  const reflex = await arbiter.acquire({ holder: 'reflex creeper-evade', priority: PRIORITY.URGENT_INSTINCT });
   await clock.tickAsync(1000);
   t.is(pathfinder.goal, null);
   t.true(pathfinder.setGoal.calledOnce);

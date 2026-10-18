@@ -224,7 +224,7 @@ async function eat(bot: mineflayer.Bot, signal: AbortSignal): Promise<string | n
 
 const creeperEvade: ReflexDefinition = {
   name: 'creeper-evade',
-  priority: PRIORITY.CRITICAL_REFLEX,
+  priority: PRIORITY.URGENT_INSTINCT,
   cooldownMs: 500,
   maxDurationMs: 3000,
   enabled: policy => policy.reflexes.creeperEvade.enabled,
@@ -247,7 +247,7 @@ const creeperEvade: ReflexDefinition = {
 
 const lowHealthRetreat: ReflexDefinition = {
   name: 'low-health-retreat',
-  priority: PRIORITY.CRITICAL_REFLEX,
+  priority: PRIORITY.URGENT_INSTINCT,
   cooldownMs: 5000,
   maxDurationMs: 10000,
   enabled: policy => policy.reflexes.lowHealthRetreat.enabled,
@@ -305,7 +305,7 @@ function resolveStance(stance: Stance, health: number | undefined, hostiles: num
 
 const selfDefense: ReflexDefinition = {
   name: 'self-defense',
-  priority: PRIORITY.ROUTINE_REFLEX,
+  priority: PRIORITY.INSTINCT,
   cooldownMs: 2000,
   maxDurationMs: 20000,
   enabled: policy => policy.reflexes.selfDefense.enabled,
@@ -432,7 +432,7 @@ async function holdGround(bot: mineflayer.Bot, attacker: BotEntity, signal: Abor
 
 const autoEat: ReflexDefinition = {
   name: 'auto-eat',
-  priority: PRIORITY.ROUTINE_REFLEX,
+  priority: PRIORITY.INSTINCT,
   cooldownMs: 5000,
   maxDurationMs: 3000,
   enabled: policy => policy.reflexes.autoEat.enabled,

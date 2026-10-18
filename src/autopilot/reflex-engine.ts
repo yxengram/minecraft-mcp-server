@@ -38,8 +38,8 @@ export type TriggerResult = { fire: string } | { note: string } | null;
 
 export interface ReflexDefinition {
   name: ReflexName;
-  /** PRIORITY.CRITICAL_REFLEX (manual commands wait) or PRIORITY.ROUTINE_REFLEX (manual commands interrupt it). */
-  priority: typeof PRIORITY.CRITICAL_REFLEX | typeof PRIORITY.ROUTINE_REFLEX;
+  /** PRIORITY.URGENT_INSTINCT (manual commands wait) or PRIORITY.INSTINCT (manual commands interrupt it). */
+  priority: typeof PRIORITY.URGENT_INSTINCT | typeof PRIORITY.INSTINCT;
   cooldownMs: number;
   maxDurationMs: number;
   enabled(policy: Policy): boolean;

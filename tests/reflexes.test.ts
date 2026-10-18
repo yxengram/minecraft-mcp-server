@@ -360,15 +360,15 @@ const MANUAL = { holder: 'manual move-to-position', priority: PRIORITY.MANUAL };
 test.serial('only the highest-priority triggered reflex runs, holding a "reflex <name>" lease at its own priority', async (t) => {
   const clock = useClock(t);
   const world = createWorld();
-  const creeper = scripted('creeper-evade', PRIORITY.CRITICAL_REFLEX);
-  const eat = scripted('auto-eat', PRIORITY.ROUTINE_REFLEX);
+  const creeper = scripted('creeper-evade', PRIORITY.URGENT_INSTINCT);
+  const eat = scripted('auto-eat', PRIORITY.INSTINCT);
   const { engine, holder } = createEngine(t, world, [creeper.definition, eat.definition]);
 
   engine.tick();
 
   t.true(creeper.run.calledOnce, 'the critical reflex runs');
   t.true(eat.run.notCalled, 'the lower reflex does not run in the same tick');
-  t.deepEqual(holder(), { holder: 'reflex creeper-evade', priority: PRIORITY.CRITICAL_REFLEX });
+  t.deepEqual(holder(), { holder: 'reflex creeper-evade', priority: PRIORITY.URGENT_INSTINCT });
 
   // At most one reflex at a time: the lower one keeps triggering but does not start while the other runs.
   for (let i = 0; i < 5; i++) {
@@ -384,13 +384,13 @@ test.serial('only the highest-priority triggered reflex runs, holding a "reflex 
   engine.tick();
 
   t.true(eat.run.calledOnce, 'the routine reflex runs once the body is free');
-  t.deepEqual(holder(), { holder: 'reflex auto-eat', priority: PRIORITY.ROUTINE_REFLEX });
+  t.deepEqual(holder(), { holder: 'reflex auto-eat', priority: PRIORITY.INSTINCT });
 });
 
 test.serial('after a reflex ends it cools down and does not trigger again until the cooldown is over', async (t) => {
   const clock = useClock(t);
   const world = createWorld();
-  const eat = scripted('auto-eat', PRIORITY.ROUTINE_REFLEX, { cooldownMs: 2000 });
+  const eat = scripted('auto-eat', PRIORITY.INSTINCT, { cooldownMs: 2000 });
   const { engine, holder, lastReflexEvent } = createEngine(t, world, [eat.definition]);
 
   engine.tick();
@@ -414,8 +414,8 @@ test.serial('after a reflex ends it cools down and does not trigger again until 
 test.serial('a disabled reflex is not evaluated at all, and set-policy changes take effect at the next tick', async (t) => {
   const clock = useClock(t);
   const world = createWorld();
-  const creeper = scripted('creeper-evade', PRIORITY.CRITICAL_REFLEX, { result: null });
-  const eat = scripted('auto-eat', PRIORITY.ROUTINE_REFLEX, { cooldownMs: 500 });
+  const creeper = scripted('creeper-evade', PRIORITY.URGENT_INSTINCT, { result: null });
+  const eat = scripted('auto-eat', PRIORITY.INSTINCT, { cooldownMs: 500 });
   const { engine, policy } = createEngine(t, world, [creeper.definition, eat.definition]);
 
   t.true(policy.update({ reflexes: { autoEat: { enabled: false } } }, 'llm').ok);
@@ -444,13 +444,13 @@ test.serial('a disabled reflex is not evaluated at all, and set-policy changes t
 test.serial('a reflex running longer than maxDurationMs is cancelled with a timeout event and releases the body', async (t) => {
   const clock = useClock(t);
   const world = createWorld();
-  const creeper = scripted('creeper-evade', PRIORITY.CRITICAL_REFLEX, { maxDurationMs: 3000 });
+  const creeper = scripted('creeper-evade', PRIORITY.URGENT_INSTINCT, { maxDurationMs: 3000 });
   const { engine, holder, lastReflexEvent } = createEngine(t, world, [creeper.definition]);
 
   engine.tick();
   await clock.tickAsync(2950);
   t.false(creeper.signals[0].aborted, 'still allowed to run before its limit');
-  t.deepEqual(holder(), { holder: 'reflex creeper-evade', priority: PRIORITY.CRITICAL_REFLEX });
+  t.deepEqual(holder(), { holder: 'reflex creeper-evade', priority: PRIORITY.URGENT_INSTINCT });
 
   await clock.tickAsync(100);
   t.true(creeper.signals[0].aborted, 'the action is cancelled at the limit');
@@ -466,7 +466,7 @@ test.serial('a reflex running longer than maxDurationMs is cancelled with a time
 test.serial('a reflex action that throws ends as failed, releases the body and enters its cooldown', async (t) => {
   const clock = useClock(t);
   const world = createWorld();
-  const eat = scripted('auto-eat', PRIORITY.ROUTINE_REFLEX, { cooldownMs: 2000 });
+  const eat = scripted('auto-eat', PRIORITY.INSTINCT, { cooldownMs: 2000 });
   const { engine, holder, lastReflexEvent } = createEngine(t, world, [eat.definition]);
 
   engine.tick();
@@ -486,12 +486,12 @@ test.serial('a reflex action that throws ends as failed, releases the body and e
 test.serial('a higher reflex interrupts a lower running one, which is reported as interrupted by it', async (t) => {
   const clock = useClock(t);
   const world = createWorld();
-  const creeper = scripted('creeper-evade', PRIORITY.CRITICAL_REFLEX, { result: null });
-  const eat = scripted('auto-eat', PRIORITY.ROUTINE_REFLEX);
+  const creeper = scripted('creeper-evade', PRIORITY.URGENT_INSTINCT, { result: null });
+  const eat = scripted('auto-eat', PRIORITY.INSTINCT);
   const { engine, holder, lastReflexEvent } = createEngine(t, world, [creeper.definition, eat.definition]);
 
   engine.tick();
-  t.deepEqual(holder(), { holder: 'reflex auto-eat', priority: PRIORITY.ROUTINE_REFLEX });
+  t.deepEqual(holder(), { holder: 'reflex auto-eat', priority: PRIORITY.INSTINCT });
 
   creeper.result = { fire: 'creeper about to explode' };
   await clock.tickAsync(TICK);
@@ -499,7 +499,7 @@ test.serial('a higher reflex interrupts a lower running one, which is reported a
 
   t.true(eat.signals[0].aborted, 'the lower reflex is told to stop');
   t.true(creeper.run.calledOnce);
-  t.deepEqual(holder(), { holder: 'reflex creeper-evade', priority: PRIORITY.CRITICAL_REFLEX });
+  t.deepEqual(holder(), { holder: 'reflex creeper-evade', priority: PRIORITY.URGENT_INSTINCT });
   const event = lastReflexEvent('auto-eat') ?? '';
   t.regex(event, resultFormat('auto-eat'));
   t.regex(event, / → [^→]*interrupted by creeper-evade/);
@@ -508,8 +508,8 @@ test.serial('a higher reflex interrupts a lower running one, which is reported a
 test.serial('a same-priority, higher-ranked critical reflex takes over without the paused task resuming in between', async (t) => {
   const clock = useClock(t);
   const world = createWorld();
-  const creeper = scripted('creeper-evade', PRIORITY.CRITICAL_REFLEX, { result: null });
-  const retreat = scripted('low-health-retreat', PRIORITY.CRITICAL_REFLEX, { result: null });
+  const creeper = scripted('creeper-evade', PRIORITY.URGENT_INSTINCT, { result: null });
+  const retreat = scripted('low-health-retreat', PRIORITY.URGENT_INSTINCT, { result: null });
   const harness = createEngine(t, world, [creeper.definition, retreat.definition]);
   const { engine, holder, lastReflexEvent, taskEvents } = harness;
   const tasks = createTasks(t, world, harness);
@@ -525,7 +525,7 @@ test.serial('a same-priority, higher-ranked critical reflex takes over without t
   await clock.tickAsync(TICK);
   engine.tick();
 
-  t.deepEqual(holder(), { holder: 'reflex creeper-evade', priority: PRIORITY.CRITICAL_REFLEX });
+  t.deepEqual(holder(), { holder: 'reflex creeper-evade', priority: PRIORITY.URGENT_INSTINCT });
   t.true(retreat.signals[0].aborted);
   t.regex(lastReflexEvent('low-health-retreat') ?? '', / → [^→]*interrupted by creeper-evade/);
   t.deepEqual(taskEvents(), ['task_started', 'task_paused'], 'no task_resumed / task_paused flicker during the handover');
@@ -544,7 +544,7 @@ test.serial('a same-priority, higher-ranked critical reflex takes over without t
 test.serial('a task paused by a reflex resumes by itself when the reflex ends', async (t) => {
   const clock = useClock(t);
   const world = createWorld();
-  const eat = scripted('auto-eat', PRIORITY.ROUTINE_REFLEX, { result: null });
+  const eat = scripted('auto-eat', PRIORITY.INSTINCT, { result: null });
   const harness = createEngine(t, world, [eat.definition]);
   const { engine, events, holder, taskEvents } = harness;
   const tasks = createTasks(t, world, harness);
@@ -554,7 +554,7 @@ test.serial('a task paused by a reflex resumes by itself when the reflex ends', 
   engine.tick();
 
   t.is(tasks.currentTask()?.status, 'paused');
-  t.deepEqual(holder(), { holder: 'reflex auto-eat', priority: PRIORITY.ROUTINE_REFLEX });
+  t.deepEqual(holder(), { holder: 'reflex auto-eat', priority: PRIORITY.INSTINCT });
   const paused = events.query({ types: ['task_paused'], limit: 10 }).events[0]?.message ?? '';
   t.regex(paused, /^t1 idle: paused by reflex auto-eat/, 'G3 task_paused format');
 
@@ -572,7 +572,7 @@ test.serial('a task paused by a reflex resumes by itself when the reflex ends', 
 test.serial('a manual command interrupts a routine reflex at once; the reflex lease is gone and it cools down', async (t) => {
   const clock = useClock(t);
   const world = createWorld();
-  const eat = scripted('auto-eat', PRIORITY.ROUTINE_REFLEX, { cooldownMs: 3000 });
+  const eat = scripted('auto-eat', PRIORITY.INSTINCT, { cooldownMs: 3000 });
   const { engine, arbiter, holder, lastReflexEvent } = createEngine(t, world, [eat.definition]);
 
   engine.tick();
@@ -596,7 +596,7 @@ test.serial('a manual command interrupts a routine reflex at once; the reflex le
 test.serial('a routine reflex cannot take the body from a manual command, and runs once the body is free', async (t) => {
   const clock = useClock(t);
   const world = createWorld();
-  const eat = scripted('auto-eat', PRIORITY.ROUTINE_REFLEX);
+  const eat = scripted('auto-eat', PRIORITY.INSTINCT);
   const { engine, arbiter, holder } = createEngine(t, world, [eat.definition]);
   const manual = await arbiter.acquire(MANUAL);
 
@@ -618,7 +618,7 @@ test.serial('a routine reflex cannot take the body from a manual command, and ru
 test.serial('a manual command waits for a critical reflex and reports the wait', async (t) => {
   const clock = useClock(t);
   const world = createWorld();
-  const creeper = scripted('creeper-evade', PRIORITY.CRITICAL_REFLEX);
+  const creeper = scripted('creeper-evade', PRIORITY.URGENT_INSTINCT);
   const { engine, arbiter, holder, lastReflexEvent } = createEngine(t, world, [creeper.definition]);
 
   engine.tick();
@@ -631,7 +631,7 @@ test.serial('a manual command waits for a critical reflex and reports the wait',
   await clock.tickAsync(500);
   t.is(settled, undefined, 'the manual command is still waiting');
   t.false(creeper.signals[0].aborted, 'the critical reflex keeps running');
-  t.deepEqual(holder(), { holder: 'reflex creeper-evade', priority: PRIORITY.CRITICAL_REFLEX });
+  t.deepEqual(holder(), { holder: 'reflex creeper-evade', priority: PRIORITY.URGENT_INSTINCT });
 
   creeper.result = null;
   creeper.finish('moved 9 blocks away');
@@ -654,9 +654,9 @@ test.serial('a manual command waits for a critical reflex and reports the wait',
 test.serial('a trigger that throws is skipped and logged once; other reflexes and later ticks keep working', async (t) => {
   const clock = useClock(t);
   const world = createWorld();
-  const broken = scripted('creeper-evade', PRIORITY.CRITICAL_REFLEX);
+  const broken = scripted('creeper-evade', PRIORITY.URGENT_INSTINCT);
   broken.throwing = new Error('unreadable metadata');
-  const eat = scripted('auto-eat', PRIORITY.ROUTINE_REFLEX, { cooldownMs: 200 });
+  const eat = scripted('auto-eat', PRIORITY.INSTINCT, { cooldownMs: 200 });
   const { engine, log } = createEngine(t, world, [broken.definition, eat.definition]);
 
   t.notThrows(() => engine.tick());
@@ -682,7 +682,7 @@ test.serial('a trigger that throws is skipped and logged once; other reflexes an
 test.serial('ticks do nothing while the bot is dead, and the engine follows physicsTick once started', async (t) => {
   useClock(t);
   const world = createWorld({ health: 0 });
-  const creeper = scripted('creeper-evade', PRIORITY.CRITICAL_REFLEX);
+  const creeper = scripted('creeper-evade', PRIORITY.URGENT_INSTINCT);
   const { engine, holder, reflexEvents } = createEngine(t, world, [creeper.definition]);
   engine.start();
 
@@ -700,7 +700,7 @@ test.serial('ticks do nothing while the bot is dead, and the engine follows phys
 test.serial('a death event aborts the running reflex and releases the body; stop() unsubscribes', async (t) => {
   useClock(t);
   const world = createWorld();
-  const creeper = scripted('creeper-evade', PRIORITY.CRITICAL_REFLEX);
+  const creeper = scripted('creeper-evade', PRIORITY.URGENT_INSTINCT);
   const { engine, holder, lastReflexEvent } = createEngine(t, world, [creeper.definition]);
   engine.start();
   world.bot.emit('physicsTick');
@@ -725,7 +725,7 @@ test.serial('a death event aborts the running reflex and releases the body; stop
 test.serial('a note result writes a reflex event without taking the body', async (t) => {
   useClock(t);
   const world = createWorld();
-  const defense = scripted('self-defense', PRIORITY.ROUTINE_REFLEX, { result: { note: 'hit by player Steve; not fighting back' } });
+  const defense = scripted('self-defense', PRIORITY.INSTINCT, { result: { note: 'hit by player Steve; not fighting back' } });
   const { engine, holder, stopBody, reflexEvents } = createEngine(t, world, [defense.definition]);
 
   engine.tick();
@@ -741,7 +741,7 @@ test.serial('a note result writes a reflex event without taking the body', async
 test.serial('triggering 4 times within 30 s is reported once', async (t) => {
   const clock = useClock(t);
   const world = createWorld();
-  const eat = scripted('auto-eat', PRIORITY.ROUTINE_REFLEX, { cooldownMs: 1000 });
+  const eat = scripted('auto-eat', PRIORITY.INSTINCT, { cooldownMs: 1000 });
   const { engine, reflexEvents } = createEngine(t, world, [eat.definition]);
 
   for (let i = 0; i < 6; i++) {
@@ -796,7 +796,7 @@ test.serial('creeper-evade: an ignited creeper 4 blocks away → sprinting away 
   startGame();
 
   await clock.tickAsync(TICK);
-  t.deepEqual(holder(), { holder: 'reflex creeper-evade', priority: PRIORITY.CRITICAL_REFLEX });
+  t.deepEqual(holder(), { holder: 'reflex creeper-evade', priority: PRIORITY.URGENT_INSTINCT });
   t.true(world.controls.forward, 'moving forward on the tick it triggered');
   t.true(world.controls.sprint, 'sprinting on the tick it triggered');
   t.true(facing(world, creeper.position) <= -0.7, `looking away from the creeper (cos ${facing(world, creeper.position).toFixed(2)})`);
@@ -892,7 +892,7 @@ test.serial('low-health-retreat: runs away from the hostile until out of range, 
   startGame();
 
   await clock.tickAsync(TICK);
-  t.deepEqual(holder(), { holder: 'reflex low-health-retreat', priority: PRIORITY.CRITICAL_REFLEX });
+  t.deepEqual(holder(), { holder: 'reflex low-health-retreat', priority: PRIORITY.URGENT_INSTINCT });
   t.true(world.controls.forward);
   t.true(facing(world, zombie.position) <= -0.7, 'running away from the zombie');
 
@@ -916,7 +916,7 @@ test.serial('self-defense, stance fight: hit by a zombie → attacks it even at 
 
   hitBy(engine, zombie);
   engine.tick();
-  t.deepEqual(holder(), { holder: 'reflex self-defense', priority: PRIORITY.ROUTINE_REFLEX });
+  t.deepEqual(holder(), { holder: 'reflex self-defense', priority: PRIORITY.INSTINCT });
 
   await clock.tickAsync(300);
   t.true(world.bot.attack.calledWith(sinon.match({ id: zombie.id })), 'fights back');
@@ -938,7 +938,7 @@ test.serial('self-defense, stance flee: hit by a zombie → runs away without at
 
   hitBy(engine, zombie);
   await clock.tickAsync(TICK);
-  t.deepEqual(holder(), { holder: 'reflex self-defense', priority: PRIORITY.ROUTINE_REFLEX });
+  t.deepEqual(holder(), { holder: 'reflex self-defense', priority: PRIORITY.INSTINCT });
 
   await clock.tickAsync(500);
   t.true(world.bot.attack.notCalled, 'never attacks');
@@ -1023,7 +1023,7 @@ test.serial('a manual command interrupting self-defense: the reflex stops drivin
   startGame();
   hitBy(engine, zombie);
   await clock.tickAsync(TICK + 200);
-  t.deepEqual(holder(), { holder: 'reflex self-defense', priority: PRIORITY.ROUTINE_REFLEX });
+  t.deepEqual(holder(), { holder: 'reflex self-defense', priority: PRIORITY.INSTINCT });
 
   const manual = await arbiter.acquire(MANUAL);
   t.true(manual.ok);
@@ -1056,7 +1056,7 @@ test.serial('auto-eat: food 10 with bread and no hostile within 8 → equips the
   const { engine, holder, lastReflexEvent } = createEngine(t, world);
 
   engine.tick();
-  t.deepEqual(holder(), { holder: 'reflex auto-eat', priority: PRIORITY.ROUTINE_REFLEX });
+  t.deepEqual(holder(), { holder: 'reflex auto-eat', priority: PRIORITY.INSTINCT });
   await clock.tickAsync(0);
 
   t.is(world.bot.equip.firstCall?.args[0], bread, 'the bread goes in hand');
@@ -1108,14 +1108,14 @@ test.serial('auto-eat is interrupted by creeper-evade when a creeper ignites dur
   startGame();
 
   await clock.tickAsync(TICK);
-  t.deepEqual(holder(), { holder: 'reflex auto-eat', priority: PRIORITY.ROUTINE_REFLEX });
+  t.deepEqual(holder(), { holder: 'reflex auto-eat', priority: PRIORITY.INSTINCT });
   t.true(world.bot.consume.calledOnce);
 
   const creeper = ignitedCreeper(4);
   world.entities[creeper.id] = creeper;
   await clock.tickAsync(TICK);
 
-  t.deepEqual(holder(), { holder: 'reflex creeper-evade', priority: PRIORITY.CRITICAL_REFLEX });
+  t.deepEqual(holder(), { holder: 'reflex creeper-evade', priority: PRIORITY.URGENT_INSTINCT });
   t.true(world.bot.deactivateItem.called, 'eating is stopped');
   t.regex(lastReflexEvent('auto-eat') ?? '', / → [^→]*interrupted by creeper-evade/);
   t.true(world.controls.forward && world.controls.sprint, 'already running from the creeper');
@@ -1132,7 +1132,7 @@ test.serial('self-defense and auto-eat both triggered → only self-defense runs
   hitBy(engine, skeleton, 'arrow');
   engine.tick();
 
-  t.deepEqual(holder(), { holder: 'reflex self-defense', priority: PRIORITY.ROUTINE_REFLEX });
+  t.deepEqual(holder(), { holder: 'reflex self-defense', priority: PRIORITY.INSTINCT });
   t.true(world.bot.consume.notCalled, 'no eating');
   t.false(world.bot.equip.getCalls().some(call => (call.args[0] as FakeItem | undefined)?.name === 'bread'), 'the bread stays in the bag');
 });
@@ -1202,7 +1202,7 @@ for (const name of ['oak_fence', 'cobblestone_wall', 'oak_fence_gate']) {
     startGame();
 
     await clock.tickAsync(TICK);
-    t.deepEqual(holder(), { holder: 'reflex creeper-evade', priority: PRIORITY.CRITICAL_REFLEX });
+    t.deepEqual(holder(), { holder: 'reflex creeper-evade', priority: PRIORITY.URGENT_INSTINCT });
     t.true(world.controls.forward && world.controls.sprint, 'running on the first tick');
     const look = firstLook(world);
     t.true(cosine(look, WEST) < 0.9, `not straight at the ${name} (cos ${cosine(look, WEST).toFixed(2)})`);
@@ -1227,7 +1227,7 @@ test.serial('creeper-evade: a one-block step straight behind is jumped, but not 
     useRealBlocks(world);
     const { engine, holder } = createEngine(t, world);
     engine.tick();
-    t.deepEqual(holder(), { holder: 'reflex creeper-evade', priority: PRIORITY.CRITICAL_REFLEX }, label);
+    t.deepEqual(holder(), { holder: 'reflex creeper-evade', priority: PRIORITY.URGENT_INSTINCT }, label);
     const look = firstLook(world);
     if (jumpable) {
       t.true(cosine(look, WEST) > 0.99, `${label}: runs straight away over it (cos ${cosine(look, WEST).toFixed(2)})`);
@@ -1281,7 +1281,7 @@ test.serial('creeper-evade: lava next to a diagonal escape route, or on its seco
     useRealBlocks(world);
     const { engine, holder } = createEngine(t, world);
     engine.tick();
-    t.deepEqual(holder(), { holder: 'reflex creeper-evade', priority: PRIORITY.CRITICAL_REFLEX }, label);
+    t.deepEqual(holder(), { holder: 'reflex creeper-evade', priority: PRIORITY.URGENT_INSTINCT }, label);
     const look = firstLook(world);
     t.truthy(look, `${label}: runs by itself (a safe direction exists)`);
     if (!lava) {
@@ -1312,7 +1312,7 @@ for (const { label, terrain } of NO_WAY_OUT) {
     startGame();
 
     await clock.tickAsync(TICK);
-    t.deepEqual(holder(), { holder: 'reflex creeper-evade', priority: PRIORITY.CRITICAL_REFLEX });
+    t.deepEqual(holder(), { holder: 'reflex creeper-evade', priority: PRIORITY.URGENT_INSTINCT });
     t.true(world.bot.look.notCalled, 'no direction of its own');
     const goal = world.pathfinder.goal;
     t.true(goal instanceof goals.GoalXZ, 'the pathfinder gets a GoalXZ');
@@ -1324,7 +1324,7 @@ for (const { label, terrain } of NO_WAY_OUT) {
     // One second of ticks, and past the 1 s stuck check, still before the 3 s limit.
     for (const ms of [1000, 1000]) {
       await clock.tickAsync(ms);
-      t.deepEqual(holder(), { holder: 'reflex creeper-evade', priority: PRIORITY.CRITICAL_REFLEX });
+      t.deepEqual(holder(), { holder: 'reflex creeper-evade', priority: PRIORITY.URGENT_INSTINCT });
       t.is(world.pathfinder.setGoal.callCount, goalsSet, 'the goal is not set again');
       t.is(world.bot.clearControlStates.callCount, clears, 'the pathfinder\'s controls are not cleared every tick');
       t.is(world.pathfinder.goal, goal, 'the same goal stays in place');
@@ -1415,7 +1415,7 @@ for (const stance of ['auto', 'fight'] as const) {
 
     hitBy(engine, golem);
     await clock.tickAsync(TICK);
-    t.deepEqual(holder(), { holder: 'reflex self-defense', priority: PRIORITY.ROUTINE_REFLEX });
+    t.deepEqual(holder(), { holder: 'reflex self-defense', priority: PRIORITY.INSTINCT });
 
     await clock.tickAsync(500);
     t.true(world.bot.attack.notCalled, 'neutral mobs are not attacked by default');
@@ -1434,7 +1434,7 @@ test.serial('self-defense: hit by an iron golem with avoidNeutral off → may fi
 
   hitBy(engine, golem);
   engine.tick();
-  t.deepEqual(holder(), { holder: 'reflex self-defense', priority: PRIORITY.ROUTINE_REFLEX });
+  t.deepEqual(holder(), { holder: 'reflex self-defense', priority: PRIORITY.INSTINCT });
   await clock.tickAsync(300);
   t.true(world.bot.attack.calledWith(sinon.match({ id: golem.id })), 'fights back');
 });
@@ -1539,7 +1539,7 @@ test.serial('self-defense ignores a hit from the mob the bot is already fighting
   await fight;
   hitBy(engine, wolf);
   engine.tick();
-  t.deepEqual(holder(), { holder: 'reflex self-defense', priority: PRIORITY.ROUTINE_REFLEX }, 'once that fight is over it reacts again');
+  t.deepEqual(holder(), { holder: 'reflex self-defense', priority: PRIORITY.INSTINCT }, 'once that fight is over it reacts again');
 });
 
 // ---- M5: self-defense 'auto' stance with the combat judge (F-013, F-016; I1, I5, I6) ------------------------------
@@ -1591,7 +1591,7 @@ test.serial('self-defense, stance auto: fights at once by the rule; a later "fle
 
   hitBy(engine, zombie);
   await clock.tickAsync(TICK);
-  t.deepEqual(holder(), { holder: 'reflex self-defense', priority: PRIORITY.ROUTINE_REFLEX });
+  t.deepEqual(holder(), { holder: 'reflex self-defense', priority: PRIORITY.INSTINCT });
   t.true(judge.calledOnce, 'the judge is asked once, in the background');
   const [attackerId, situation] = judge.firstCall.args;
   t.is(attackerId, zombie.id);
@@ -1647,7 +1647,7 @@ for (const { label, settle } of UNANSWERED) {
 
     hitBy(engine, zombie);
     engine.tick();
-    t.deepEqual(holder(), { holder: 'reflex self-defense', priority: PRIORITY.ROUTINE_REFLEX });
+    t.deepEqual(holder(), { holder: 'reflex self-defense', priority: PRIORITY.INSTINCT });
     t.true(judge.judge.calledOnce);
     await clock.tickAsync(150);
     settle(judge);
@@ -1675,7 +1675,7 @@ test.serial('self-defense, stance auto: an answer that arrives after the reflex 
 
   hitBy(engine, zombie);
   await clock.tickAsync(TICK);
-  t.deepEqual(holder(), { holder: 'reflex self-defense', priority: PRIORITY.ROUTINE_REFLEX });
+  t.deepEqual(holder(), { holder: 'reflex self-defense', priority: PRIORITY.INSTINCT });
   // The fake zombie never gets hurt, so the fight gives up after a while with the zombie still standing next to the bot.
   await clock.tickAsync(11_000);
   t.is(holder(), null, 'the reflex ended');
@@ -1720,7 +1720,7 @@ test.serial('self-defense, stance auto: an answer equal to the rule (fight) does
   t.is(world.pathfinder.stop.callCount, stops, 'the body is not stopped');
   t.is(world.bot.clearControlStates.callCount, clears, 'the controls are not cleared');
   t.false(world.bot.setControlState.calledWith('forward', true), 'does not run');
-  t.deepEqual(holder(), { holder: 'reflex self-defense', priority: PRIORITY.ROUTINE_REFLEX });
+  t.deepEqual(holder(), { holder: 'reflex self-defense', priority: PRIORITY.INSTINCT });
 
   kill(world, zombie);
   await clock.tickAsync(200);
@@ -1738,7 +1738,7 @@ test.serial('self-defense, stance auto: "hold" → does not chase a zombie 6 blo
 
   hitBy(engine, zombie);
   await clock.tickAsync(TICK);
-  t.deepEqual(holder(), { holder: 'reflex self-defense', priority: PRIORITY.ROUTINE_REFLEX });
+  t.deepEqual(holder(), { holder: 'reflex self-defense', priority: PRIORITY.INSTINCT });
   t.true(world.pathfinder.goal instanceof goals.GoalFollow, 'the rule is chasing before the judge answers');
   answer(modelSays('hold'));
   await clock.tickAsync(TICK * 2);
@@ -1754,7 +1754,7 @@ test.serial('self-defense, stance auto: "hold" → does not chase a zombie 6 blo
   t.false(callsSince(world.bot.setControlState, controls).some(call => call.args[1] === true), 'no running or walking');
   t.true(world.self.position.equals(position), 'stands still');
   t.true(world.bot.attack.notCalled, 'out of reach: no attack');
-  t.deepEqual(holder(), { holder: 'reflex self-defense', priority: PRIORITY.ROUTINE_REFLEX }, 'still holding its ground');
+  t.deepEqual(holder(), { holder: 'reflex self-defense', priority: PRIORITY.INSTINCT }, 'still holding its ground');
 
   zombie.position = new Vec3(2.5, 64, 0.5);
   await clock.tickAsync(500);
@@ -1779,7 +1779,7 @@ for (const stance of ['fight', 'flee'] as const) {
 
     hitBy(engine, zombie);
     engine.tick();
-    t.deepEqual(holder(), { holder: 'reflex self-defense', priority: PRIORITY.ROUTINE_REFLEX });
+    t.deepEqual(holder(), { holder: 'reflex self-defense', priority: PRIORITY.INSTINCT });
     await clock.tickAsync(500);
 
     t.true(judge.notCalled);
@@ -1853,7 +1853,7 @@ test.serial('I6: no reflex trigger calls the combat judge; only self-defense\'s 
   t.is(engine.tick(), undefined);
   t.true(judge.calledOnce);
   t.true(trigger.calledBefore(judge), 'the trigger ran first and did not ask');
-  t.deepEqual(holder(), { holder: 'reflex self-defense', priority: PRIORITY.ROUTINE_REFLEX }, 'the rule action started while the judge has not answered');
+  t.deepEqual(holder(), { holder: 'reflex self-defense', priority: PRIORITY.INSTINCT }, 'the rule action started while the judge has not answered');
 });
 
 // ---- M7: death ends the task (F-012, F-001) --------------------------------------------------------------------
@@ -1880,7 +1880,7 @@ function createWiredEngine(t: ExecutionContext, world: World, reflexes: ReflexDe
 test.serial('M7: death while a critical reflex has the task paused → onDeath runs before the reflex lets go; the task is cancelled and never resumes', async (t) => {
   const clock = useClock(t);
   const world = createWorld();
-  const creeper = scripted('creeper-evade', PRIORITY.CRITICAL_REFLEX, { result: null });
+  const creeper = scripted('creeper-evade', PRIORITY.URGENT_INSTINCT, { result: null });
   const { engine, tasks, holder, taskEvents, taskMessages, onDeath, seen } = createWiredEngine(t, world, [creeper.definition]);
   engine.start();
   t.true((await tasks.start('idle', {})).ok);
@@ -1888,7 +1888,7 @@ test.serial('M7: death while a critical reflex has the task paused → onDeath r
   creeper.result = { fire: 'creeper about to explode' };
   world.bot.emit('physicsTick');
   t.is(tasks.currentTask()?.status, 'paused');
-  t.deepEqual(holder(), { holder: 'reflex creeper-evade', priority: PRIORITY.CRITICAL_REFLEX });
+  t.deepEqual(holder(), { holder: 'reflex creeper-evade', priority: PRIORITY.URGENT_INSTINCT });
 
   let abortedAtDeath: boolean | undefined;
   onDeath.callsFake(() => {
@@ -1924,7 +1924,7 @@ test.serial('M7: death while a critical reflex has the task paused → onDeath r
 test.serial('M7: death with no reflex running cancels the running task (the bot died)', async (t) => {
   useClock(t);
   const world = createWorld();
-  const creeper = scripted('creeper-evade', PRIORITY.CRITICAL_REFLEX, { result: null });
+  const creeper = scripted('creeper-evade', PRIORITY.URGENT_INSTINCT, { result: null });
   const { engine, tasks, holder, taskMessages } = createWiredEngine(t, world, [creeper.definition]);
   engine.start();
   t.true((await tasks.start('idle', {})).ok);

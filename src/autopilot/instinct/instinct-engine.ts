@@ -302,7 +302,7 @@ export class InstinctEngine {
       }
       const holder = this.options.arbiter.holder();
       if (holder?.priority === PRIORITY.MANUAL && !urgent) return 'not interrupting the AI player\'s command (not urgent)';
-      return this.launch(option, urgent ? PRIORITY.CRITICAL_REFLEX : PRIORITY.ROUTINE_REFLEX, reason, holdTaskAfter) + after;
+      return this.launch(option, urgent ? PRIORITY.URGENT_INSTINCT : PRIORITY.INSTINCT, reason, holdTaskAfter) + after;
     }
     if (choice === 'suspend_task' || choice === 'ask_llm') {
       // Hold the task before stopping the action: releasing the action's lease first would hand the body back to the
@@ -315,7 +315,7 @@ export class InstinctEngine {
     return 'no change';
   }
 
-  private launch(option: MenuOption, priority: typeof PRIORITY.CRITICAL_REFLEX | typeof PRIORITY.ROUTINE_REFLEX, reason: string, holdTaskAfter: boolean): string {
+  private launch(option: MenuOption, priority: typeof PRIORITY.URGENT_INSTINCT | typeof PRIORITY.INSTINCT, reason: string, holdTaskAfter: boolean): string {
     const { arbiter, bot } = this.options;
     const macro = MACROS[option.macro!];
     const previous = this.running;
@@ -349,7 +349,7 @@ export class InstinctEngine {
         if (controller.signal.aborted) return;
         this.finish(running, 'failed', error instanceof Error ? error.message : String(error));
       });
-    return `started ${option.id}${priority === PRIORITY.CRITICAL_REFLEX ? ' (urgent)' : ''}`;
+    return `started ${option.id}${priority === PRIORITY.URGENT_INSTINCT ? ' (urgent)' : ''}`;
   }
 
   /**

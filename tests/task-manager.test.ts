@@ -133,7 +133,7 @@ test('a reflex pauses the task and it resumes automatically', async (t) => {
   const { tasks, arbiter, types } = setup();
   await tasks.start('demo', {});
 
-  const reflex = await arbiter.acquire({ holder: 'reflex creeper-evade', priority: PRIORITY.CRITICAL_REFLEX });
+  const reflex = await arbiter.acquire({ holder: 'reflex creeper-evade', priority: PRIORITY.URGENT_INSTINCT });
   t.is(tasks.currentTask()?.status, 'paused');
   t.is(tasks.currentTask()?.pauseReason, 'paused by reflex creeper-evade');
   t.false(tasks.resume().ok);
@@ -565,7 +565,7 @@ test('hold pauses a driving task: the body is stopped, the lease released, and r
 test('hold on a task paused under a reflex leaves the body alone, and the task does not resume when the reflex ends', async (t) => {
   const { tasks, arbiter, bot, types } = setup();
   await tasks.start('demo', {});
-  const reflex = await arbiter.acquire({ holder: 'instinct swim_up', priority: PRIORITY.ROUTINE_REFLEX });
+  const reflex = await arbiter.acquire({ holder: 'instinct swim_up', priority: PRIORITY.INSTINCT });
   t.true(reflex.ok);
   t.is(tasks.currentTask()?.pauseReason, 'paused by instinct swim_up');
   const refused = tasks.resume();

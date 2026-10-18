@@ -416,7 +416,7 @@ function createEngine(t: ExecutionContext, world: World, decide: sinon.SinonStub
 
 test.serial('trapped under water: a confident swim_to_air runs at 15 and pauses the task; urgent runs at 30', async (t) => {
   const clock = useClock(t);
-  for (const [urgent, priority] of [[0.2, PRIORITY.ROUTINE_REFLEX], [0.9, PRIORITY.CRITICAL_REFLEX]] as const) {
+  for (const [urgent, priority] of [[0.2, PRIORITY.INSTINCT], [0.9, PRIORITY.URGENT_INSTINCT]] as const) {
     const world = createWorld({ terrain: pool({ pocket: true }) });
     const decide = sinon.stub().resolves(answer('swim_to_air', 0.9, urgent));
     const { engine, tasks, holder, messages, taskEvents } = createEngine(t, world, decide);
@@ -457,7 +457,7 @@ test.serial('a command from the AI player is not interrupted unless the answer i
   await clock.tickAsync(store.get().instinct.reaskMs);
   engine.tick();
   await clock.tickAsync(0);
-  t.deepEqual(holder(), { holder: 'instinct swim_to_air', priority: PRIORITY.CRITICAL_REFLEX }, 'urgent: takes over from the command');
+  t.deepEqual(holder(), { holder: 'instinct swim_to_air', priority: PRIORITY.URGENT_INSTINCT }, 'urgent: takes over from the command');
   if (manual.ok) t.false(manual.lease.isActive());
 });
 

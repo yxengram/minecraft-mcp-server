@@ -17,13 +17,13 @@ test('a reflex preempts a task, which resumes when the reflex releases', async (
   const taskLease = a.acquireOrQueue(task);
   t.true(taskLease.isActive());
 
-  const reflex = await a.acquire(holder('reflex creeper-evade', PRIORITY.CRITICAL_REFLEX));
+  const reflex = await a.acquire(holder('reflex creeper-evade', PRIORITY.URGENT_INSTINCT));
   t.true(reflex.ok);
   t.false(taskLease.isActive());
   t.is(taskLease.state, 'suspended');
-  t.true(task.onSuspend.calledOnceWith(sinon.match({ holder: 'reflex creeper-evade', kind: 'reflex' }), false));
+  t.true(task.onSuspend.calledOnceWith(sinon.match({ holder: 'reflex creeper-evade', kind: 'instinct' }), false));
   t.true(stopBody.calledOnce);
-  t.deepEqual(a.holder(), { holder: 'reflex creeper-evade', priority: PRIORITY.CRITICAL_REFLEX });
+  t.deepEqual(a.holder(), { holder: 'reflex creeper-evade', priority: PRIORITY.URGENT_INSTINCT });
 
   if (reflex.ok) reflex.lease.release();
   t.true(task.onResume.calledOnce);
@@ -53,7 +53,7 @@ test('a manual command preempts a routine reflex and everything the reflex had p
   const { arbiter: a } = arbiter();
   const task = holder('task t1 follow', PRIORITY.TASK);
   const taskLease = a.acquireOrQueue(task);
-  const eat = await a.acquire(holder('reflex auto-eat', PRIORITY.ROUTINE_REFLEX));
+  const eat = await a.acquire(holder('reflex auto-eat', PRIORITY.INSTINCT));
   t.true(eat.ok);
 
   const manual = await a.acquire(holder('manual look-at', PRIORITY.MANUAL));
@@ -69,7 +69,7 @@ test.serial('a manual command waits for a critical reflex and says who it waited
   const clock = sinon.useFakeTimers();
   t.teardown(() => clock.restore());
   const { arbiter: a } = arbiter();
-  const reflex = await a.acquire(holder('reflex creeper-evade', PRIORITY.CRITICAL_REFLEX));
+  const reflex = await a.acquire(holder('reflex creeper-evade', PRIORITY.URGENT_INSTINCT));
 
   const pending = a.acquire(holder('manual move-to-position', PRIORITY.MANUAL));
   await clock.tickAsync(1500);
@@ -79,14 +79,14 @@ test.serial('a manual command waits for a critical reflex and says who it waited
   t.true(manual.ok);
   if (!manual.ok) return;
   t.is(manual.waitedMs, 1500);
-  t.deepEqual(manual.waitedFor, { holder: 'reflex creeper-evade', priority: PRIORITY.CRITICAL_REFLEX });
+  t.deepEqual(manual.waitedFor, { holder: 'reflex creeper-evade', priority: PRIORITY.URGENT_INSTINCT });
 });
 
 test.serial('a manual command gives up after 10 seconds behind a critical reflex', async (t) => {
   const clock = sinon.useFakeTimers();
   t.teardown(() => clock.restore());
   const { arbiter: a } = arbiter();
-  await a.acquire(holder('reflex low-health-retreat', PRIORITY.CRITICAL_REFLEX));
+  await a.acquire(holder('reflex low-health-retreat', PRIORITY.URGENT_INSTINCT));
 
   const pending = a.acquire(holder('manual jump', PRIORITY.MANUAL));
   await clock.tickAsync(10000);
@@ -100,10 +100,10 @@ test.serial('a manual command gives up after 10 seconds behind a critical reflex
 
 test('equal and lower priorities never preempt', async (t) => {
   const { arbiter: a } = arbiter();
-  await a.acquire(holder('reflex creeper-evade', PRIORITY.CRITICAL_REFLEX));
+  await a.acquire(holder('reflex creeper-evade', PRIORITY.URGENT_INSTINCT));
 
-  const routine = await a.acquire(holder('reflex auto-eat', PRIORITY.ROUTINE_REFLEX));
-  const otherCritical = await a.acquire(holder('reflex low-health-retreat', PRIORITY.CRITICAL_REFLEX));
+  const routine = await a.acquire(holder('reflex auto-eat', PRIORITY.INSTINCT));
+  const otherCritical = await a.acquire(holder('reflex low-health-retreat', PRIORITY.URGENT_INSTINCT));
 
   t.false(routine.ok);
   t.false(otherCritical.ok);
@@ -127,7 +127,7 @@ test('releasing is idempotent and releasing a suspended lease removes it from th
   const { arbiter: a } = arbiter();
   const task = holder('task t1 follow', PRIORITY.TASK);
   const taskLease = a.acquireOrQueue(task);
-  const reflex = await a.acquire(holder('reflex creeper-evade', PRIORITY.CRITICAL_REFLEX));
+  const reflex = await a.acquire(holder('reflex creeper-evade', PRIORITY.URGENT_INSTINCT));
 
   taskLease.release();
   taskLease.release();
@@ -158,18 +158,18 @@ test('a reflex handing its own lease to another reflex stops the body once and r
   const { arbiter: a, stopBody } = arbiter();
   const task = holder('task t1 follow', PRIORITY.TASK);
   const taskLease = a.acquireOrQueue(task);
-  const retreat = holder('reflex low-health-retreat', PRIORITY.CRITICAL_REFLEX);
+  const retreat = holder('reflex low-health-retreat', PRIORITY.URGENT_INSTINCT);
   const retreatLease = a.acquireNow(retreat);
   t.truthy(retreatLease);
   t.is(taskLease.state, 'suspended');
   stopBody.resetHistory();
 
-  const evade = holder('reflex creeper-evade', PRIORITY.CRITICAL_REFLEX);
+  const evade = holder('reflex creeper-evade', PRIORITY.URGENT_INSTINCT);
   const evadeLease = a.acquireNow(evade, retreatLease!);
 
   t.truthy(evadeLease, 'handing over its own lease works at equal priority');
   t.true(evadeLease!.isActive());
-  t.deepEqual(a.holder(), { holder: 'reflex creeper-evade', priority: PRIORITY.CRITICAL_REFLEX });
+  t.deepEqual(a.holder(), { holder: 'reflex creeper-evade', priority: PRIORITY.URGENT_INSTINCT });
   t.false(retreatLease!.isActive());
   t.is(retreatLease!.state, 'released');
   t.is(stopBody.callCount, 1, 'a handover is a preemption: the old holder\'s goal and controls are cleared once (G4)');
@@ -194,13 +194,13 @@ test('a critical reflex taking over from a routine one by handover keeps the tas
   const { arbiter: a, stopBody } = arbiter();
   const task = holder('task t1 guard', PRIORITY.TASK);
   const taskLease = a.acquireOrQueue(task);
-  const eat = holder('reflex auto-eat', PRIORITY.ROUTINE_REFLEX);
+  const eat = holder('reflex auto-eat', PRIORITY.INSTINCT);
   const eatLease = a.acquireNow(eat);
   t.truthy(eatLease);
-  t.true(task.onSuspend.calledOnceWith(sinon.match({ holder: 'reflex auto-eat', kind: 'reflex' }), false));
+  t.true(task.onSuspend.calledOnceWith(sinon.match({ holder: 'reflex auto-eat', kind: 'instinct' }), false));
   stopBody.resetHistory();
 
-  const evadeLease = a.acquireNow(holder('reflex creeper-evade', PRIORITY.CRITICAL_REFLEX), eatLease!);
+  const evadeLease = a.acquireNow(holder('reflex creeper-evade', PRIORITY.URGENT_INSTINCT), eatLease!);
 
   t.true(evadeLease?.isActive());
   t.is(a.holder()?.holder, 'reflex creeper-evade');
@@ -217,20 +217,20 @@ test('a critical reflex taking over from a routine one by handover keeps the tas
 
 test('acquireNow returns null without touching the body when an equal or higher priority holds it', async (t) => {
   const { arbiter: a, stopBody } = arbiter();
-  const hazard = holder('reflex low-health-retreat', PRIORITY.CRITICAL_REFLEX);
+  const hazard = holder('reflex low-health-retreat', PRIORITY.URGENT_INSTINCT);
   const hazardLease = a.acquireNow(hazard);
   t.truthy(hazardLease);
   stopBody.resetHistory();
 
-  const eat = holder('reflex auto-eat', PRIORITY.ROUTINE_REFLEX);
-  const evade = holder('reflex creeper-evade', PRIORITY.CRITICAL_REFLEX);
+  const eat = holder('reflex auto-eat', PRIORITY.INSTINCT);
+  const evade = holder('reflex creeper-evade', PRIORITY.URGENT_INSTINCT);
   t.is(a.acquireNow(eat), null, 'a routine reflex cannot take the body from a critical one');
   t.is(a.acquireNow(evade), null, 'equal priority never preempts without handing over its own lease (G1)');
 
   t.false(stopBody.called);
   t.true(hazardLease!.isActive());
   t.false(hazard.onSuspend.called);
-  t.deepEqual(a.holder(), { holder: 'reflex low-health-retreat', priority: PRIORITY.CRITICAL_REFLEX });
+  t.deepEqual(a.holder(), { holder: 'reflex low-health-retreat', priority: PRIORITY.URGENT_INSTINCT });
   hazardLease!.release();
   t.is(a.holder(), null, 'a refused acquireNow leaves nothing queued behind');
 
@@ -238,7 +238,7 @@ test('acquireNow returns null without touching the body when an equal or higher 
   const manual = await a.acquire(holder('manual move-to-position', PRIORITY.MANUAL));
   t.true(manual.ok);
   stopBody.resetHistory();
-  t.is(a.acquireNow(holder('reflex self-defense', PRIORITY.ROUTINE_REFLEX)), null);
+  t.is(a.acquireNow(holder('reflex self-defense', PRIORITY.INSTINCT)), null);
   t.false(stopBody.called);
   if (manual.ok) t.true(manual.lease.isActive());
   t.is(a.holder()?.holder, 'manual move-to-position');
@@ -246,22 +246,22 @@ test('acquireNow returns null without touching the body when an equal or higher 
 
 test('handing over a lease that no longer holds the body does not release the current holder', (t) => {
   const { arbiter: a, stopBody } = arbiter();
-  const eatLease = a.acquireNow(holder('reflex auto-eat', PRIORITY.ROUTINE_REFLEX));
+  const eatLease = a.acquireNow(holder('reflex auto-eat', PRIORITY.INSTINCT));
   t.truthy(eatLease);
-  const hazardLease = a.acquireNow(holder('reflex low-health-retreat', PRIORITY.CRITICAL_REFLEX));
+  const hazardLease = a.acquireNow(holder('reflex low-health-retreat', PRIORITY.URGENT_INSTINCT));
   t.truthy(hazardLease);
   t.is(eatLease!.state, 'suspended');
   stopBody.resetHistory();
 
   // auto-eat's lease is suspended, not current: passing it as `replacing` must not count as a handover.
-  t.is(a.acquireNow(holder('reflex self-defense', PRIORITY.ROUTINE_REFLEX), eatLease!), null);
+  t.is(a.acquireNow(holder('reflex self-defense', PRIORITY.INSTINCT), eatLease!), null);
   t.true(hazardLease!.isActive());
   t.is(a.holder()?.holder, 'reflex low-health-retreat');
   t.false(stopBody.called);
 
   // Nor does a lease that was already released.
   eatLease!.release();
-  t.is(a.acquireNow(holder('reflex creeper-evade', PRIORITY.CRITICAL_REFLEX), eatLease!), null);
+  t.is(a.acquireNow(holder('reflex creeper-evade', PRIORITY.URGENT_INSTINCT), eatLease!), null);
   t.true(hazardLease!.isActive());
   t.false(stopBody.called);
 });
@@ -270,7 +270,7 @@ test.serial('a manual command waiting behind a critical reflex keeps waiting thr
   const clock = sinon.useFakeTimers({ now: 1.7e12 });
   t.teardown(() => clock.restore());
   const { arbiter: a } = arbiter();
-  const retreatLease = a.acquireNow(holder('reflex low-health-retreat', PRIORITY.CRITICAL_REFLEX));
+  const retreatLease = a.acquireNow(holder('reflex low-health-retreat', PRIORITY.URGENT_INSTINCT));
   t.truthy(retreatLease);
 
   const pending = a.acquire(holder('manual move-to-position', PRIORITY.MANUAL));
@@ -278,7 +278,7 @@ test.serial('a manual command waiting behind a critical reflex keeps waiting thr
   void pending.then(() => { settled = true; });
   await clock.tickAsync(500);
 
-  const evadeLease = a.acquireNow(holder('reflex creeper-evade', PRIORITY.CRITICAL_REFLEX), retreatLease!);
+  const evadeLease = a.acquireNow(holder('reflex creeper-evade', PRIORITY.URGENT_INSTINCT), retreatLease!);
   retreatLease!.release();
   await clock.tickAsync(500);
 

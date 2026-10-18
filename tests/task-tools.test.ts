@@ -112,7 +112,7 @@ test.serial('a body tool waits for a critical reflex and says so, or reports bus
   const clock = sinon.useFakeTimers();
   t.teardown(() => clock.restore());
   const { getTool, autopilot } = setup();
-  const reflex = await autopilot.arbiter.acquire({ holder: 'reflex creeper-evade', priority: PRIORITY.CRITICAL_REFLEX });
+  const reflex = await autopilot.arbiter.acquire({ holder: 'reflex creeper-evade', priority: PRIORITY.URGENT_INSTINCT });
 
   const pending = getTool('jump')!.execute({});
   await clock.tickAsync(1500);
@@ -120,7 +120,7 @@ test.serial('a body tool waits for a critical reflex and says so, or reports bus
   const jumped = await pending;
   t.is(jumped.content[1].text, 'Waited 1.5s for reflex creeper-evade to finish before running this command.');
 
-  await autopilot.arbiter.acquire({ holder: 'reflex low-health-retreat', priority: PRIORITY.CRITICAL_REFLEX });
+  await autopilot.arbiter.acquire({ holder: 'reflex low-health-retreat', priority: PRIORITY.URGENT_INSTINCT });
   const busyPending = getTool('jump')!.execute({});
   await clock.tickAsync(10000);
   const busy = await busyPending;
