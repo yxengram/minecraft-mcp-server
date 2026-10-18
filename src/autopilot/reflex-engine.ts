@@ -57,6 +57,8 @@ export interface ReflexEngineOptions {
   /** In priority order, highest first. */
   reflexes: ReflexDefinition[];
   judgeCombat?: ReflexRunContext['judgeCombat'];
+  /** Called first when the bot dies, before the running reflex lets go of the body (so nothing resumes). */
+  onDeath?: () => void;
   log?: (level: string, message: string) => void;
 }
 
@@ -101,6 +103,7 @@ export class ReflexEngine {
   private readonly onTick = () => this.tick();
   private readonly onDeath = () => {
     this.diedSinceSpawn = true;
+    this.notify(() => this.options.onDeath?.());
     this.abortRunning('the bot died');
   };
   // mineflayer keeps the bot's own entity data across a respawn, and the server only sends values that change, so a
@@ -274,6 +277,14 @@ export class ReflexEngine {
     this.options.events.addEvent('reflex', `${run.reflex.name}: ${run.reason} → ${text} (${seconds}s)`);
     this.cooldownUntil.set(run.reflex.name, Date.now() + run.reflex.cooldownMs);
     if (outcome === 'failed') this.options.log?.('warn', `Reflex ${run.reflex.name} ${text}`);
+  }
+
+  private notify(hook: () => void): void {
+    try {
+      hook();
+    } catch (error) {
+      this.options.log?.('warn', `Reflex engine callback failed: ${error}`);
+    }
   }
 
   private noteTrigger(name: ReflexName, now: number): void {

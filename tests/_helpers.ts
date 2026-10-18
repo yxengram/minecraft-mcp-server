@@ -26,6 +26,15 @@ export function createFactory() {
   return { factory, getTool };
 }
 
+/** A pathfinder.goto fake that actually moves the bot to the goal, so tools that check the arrival see it arrive. */
+export function arriveAtGoal(bot: { entity?: { position: Vec3 } }) {
+  return sinon.stub().callsFake(async (goal: { x?: number; y?: number; z?: number }) => {
+    if (bot.entity && typeof goal.x === 'number' && typeof goal.y === 'number' && typeof goal.z === 'number') {
+      bot.entity.position = new Vec3(goal.x, goal.y, goal.z);
+    }
+  });
+}
+
 export function asBot(partial: unknown): () => mineflayer.Bot {
   return () => partial as mineflayer.Bot;
 }

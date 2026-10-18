@@ -418,6 +418,7 @@ src/main.ts（现有，改动）--创建并注册--> src/autopilot/autopilot.ts�
 - **关键约束**：保持现有安全规则：不挖紧邻岩浆的方块；连续 5 次失败中止。暂停时停止挖掘，恢复后重新寻找目标；只停止本任务自己的挖掘，不打断手动命令对其他方块的挖掘。需要走近时，先做岩浆、不可破坏等安全检查，再在时间上限内走过去（collect-block 等待本任务，时间上限必须覆盖行走）；走路途中被寻路顺带挖掉的目标计为已挖。
 - **失败处理**：找不到更多方块、超时、连续失败 → 失败（若一个都没挖到）或以部分结果完成，与现有 collect-block 规则一致。
 - **验收**：正常：附近有 3 根原木，要求 3 → 完成，背包增加 3。 边界或失败：目标旁有岩浆 → 跳过并计入跳过数；现有 tests/gathering-tools.test.ts 全部继续通过。 位置：tests/work-behaviors.test.ts；tests/gathering-tools.test.ts（现有）（计划，未执行）
+- **实现说明（M7）**：跳过任一面紧邻水的目标方块（水下或含水层边上的方块），与岩浆旁的方块一样计入“skipped … unreachable or unsafe block(s)”：挖开它会让水灌进来，或把 bot 带到水下（10 天生存测试第 2 天就是这样淹死的）。由 src/tools/block-utils.ts 的 `digPrecheck(bot, pos, { avoidWater: true })` 判断；dig-block 等手动工具不传该选项，行为不变。寻路途中经过水的代价不变（不在 M7 范围）。
 
 ### F-008 · `src/autopilot/behaviors/hunt.ts`
 
@@ -520,6 +521,7 @@ src/main.ts（现有，改动）--创建并注册--> src/autopilot/autopilot.ts�
 - **失败处理**：反射动作抛错 → 释放租约，写 reflex 事件（失败），进入冷却；触发条件评估抛错 → 跳过该反射本刻的评估并记录一次日志。
 - **验收**：正常：自卫和自动进食同时满足 → 只执行自卫；执行结束后进入冷却。 边界或失败：冷却期内条件再次满足 → 不触发；动作超过最长时长 → 被强制结束，事件结果为超时；执行自动进食时苦力怕开始膨胀 → 自动进食被打断，躲避苦力怕开始执行；手动命令到来时日常反射被打断（结果 interrupted），关键反射继续执行。 位置：tests/reflexes.test.ts（计划，未执行）
 - **实现说明（M3）**：持有者名称为 `reflex <名称>`；同一时刻至多一个反射，排名更高者可打断较低者（同为关键反射时用 `acquireNow` 交接）；日常反射拿不到身体（手动命令或关键反射持有）时静默退避 1 秒；被抢占时立即结束并释放租约，避免仲裁器日后恢复一个无人驱动的租约；结束时只在租约仍有效时先停止身体再释放；bot 死亡时中止当前反射，复活后清除自身残留的着火位与氧气值；30 秒内触发 4 次写一条重复警告事件；记录每刻评估耗时（get-policy 显示）。实测（2026-10-16，实机）：平均 0.05–0.09 毫秒/刻，最大 2.4 毫秒。
+- **实现说明（M7）**：新增可选回调 `onDeath`：bot 死亡时先调用（此时正在执行的反射仍持有身体、被它暂停的任务仍是 paused），再中止反射；src/autopilot/autopilot.ts 用它取消当前任务（原因 “the bot died”），这样任务不会在反射释放身体后被恢复，复活后也不会继续。回调抛错只记日志，不影响引擎。
 
 ### F-013 · `src/autopilot/reflexes.ts`
 
@@ -844,7 +846,7 @@ src/main.ts（现有，改动）--创建并注册--> src/autopilot/autopilot.ts�
 |---|---|---|---|---|---|
 | E-001 | `src/tool-factory.ts` | M1（已实现） | 实现方式：在 `src/tool-factory.ts` 中集中维护身体类工具名单 `BODY_TOOLS`（也可用注册选项 `body` 覆盖），而不是在各工具文件里逐个标记；名单在下列工具之外还包含 equip-item（切换手中物品，符合 G1 的“身体”定义），以及 M2 改为任务之前的 collect-block（M2 起已移出名单，见 E-004）。M3 起另有 `strict` 注册选项：用完整的严格对象模式经 `server.registerTool` 注册，未知的顶层参数被拒绝（set-policy 使用）。`registerTool` 增加“身体类”选项：执行前以手动优先级向仲裁器申请租约（立即抢占任务与日常反射，遇到关键反射时等待最长 10 秒），结束后释放；如果抢占了任务或日常反射，在工具结果末尾附上中断报告（被打断任务的快照，或被打断的反射名称，以及 resume-task / cancel-task 的用法）；等待过关键反射时说明等待了哪个反射多久；超时返回 “Busy: <持有者>” 错误。身体类工具：move-to-position、move-in-direction、look-at、jump、fly-to、dig-block、place-block、activate-block、activate-entity、attack-entity、mount-entity、dismount、sleep、consume、craft-item、smelt-item、container-deposit、container-withdraw、read-container、clear-region、fill-region、dig-tunnel、goto-waypoint | 连接检查、参数校验、错误包装、只读工具的行为 | 现有 `tests/tool-factory.test.ts`；`tests/task-tools.test.ts` 中的租约场景 |
 | E-002 | `src/tools/follow-tools.ts` | M1（已实现） | follow-entity、flee-from 改为通过任务管理器启动 follow / flee 任务（替换当前任务），立即返回并在文字中附上任务 id | 工具名、参数、返回文字的开头（“Following …” / “Fleeing from …”） | 现有 `tests/interaction-tools.test.ts` 中的 follow/flee 场景（按新实现调整断言，不改变对外语义） |
-| E-003 | `src/tools/position-tools.ts` | M1（已实现） | stop-pathfinding 同时取消当前任务（原因 “stopped by stop-pathfinding”）；移动类工具标记为身体类 | stop-pathfinding 的停止语义与现有修复（清除 pathfinder 标志） | 现有 `tests/position-tools.test.ts`、`tests/new-tools.test.ts` |
+| E-003 | `src/tools/position-tools.ts` | M1（已实现）、M7 | stop-pathfinding 同时取消当前任务（原因 “stopped by stop-pathfinding”）；移动类工具标记为身体类。M7：move-to-position 与 `src/tools/waypoint-tools.ts` 的 goto-waypoint 在寻路结束后核对 bot 的实际位置，离目标超过 range + 1 格时返回错误 “Did not reach …: stopped at (x, y, z), N blocks from the target: the pathfinder found no way closer”（寻路器在被围住等情况下会不移动就报告成功）；判断函数为 `src/tools/movement-utils.ts` 的 `arrivalProblem` | stop-pathfinding 的停止语义与现有修复（清除 pathfinder 标志） | 现有 `tests/position-tools.test.ts`、`tests/new-tools.test.ts` |
 | E-004 | `src/tools/gathering-tools.ts` | M2（已实现） | collect-block 改为启动 gather 任务（替换当前任务，并在结果中说明被替换、取消的任务）并等待其结束，同时从身体类工具名单中移除（任务自己以任务级申请租约）；任务被取消时返回错误并附进度。替换而不是暂停已由用户确认（2026-10-16）：M2 之前 collect-block 作为身体类工具会暂停当前任务（可 resume-task 恢复），返回与现在相同格式的文字；采集循环迁移到 `src/autopilot/behaviors/gather.ts` | 工具名、参数、返回文字格式、安全规则 | 现有 `tests/gathering-tools.test.ts` 全部通过 |
 | E-005 | `src/bot-connection.ts` | M1（onBotReady、onBotEnd）、M3（onDamage）、M4（onWhisper），均已实现 | 增加回调：onBotReady(bot)、onBotEnd()、onDamage({attackerId, type, time})（结构化受伤信息，复用现有伤害事件解析） | 现有事件、系统消息、声音、伤害文字描述 | 现有 `tests/perception*.test.ts`；`tests/autopilot.test.ts` |
 | E-006 | `src/config.ts` | M4（已实现） | 新增命令行参数 `--decision-model <id>`。聊天命令授权不提供启动参数（用户决定，只能由 LLM 设置）。API key 不经过此文件 | 现有参数 | 现有 `tests/config.test.ts` 补充新参数场景 |
@@ -932,3 +934,4 @@ done / failed / cancelled 为终态，不能再改变
 ## H. 远期设想（不在本版本范围）
 
 分支挖矿、按蓝图建造、农田循环、箱子整理、远程武器与盾牌、多 bot 协作、策略与任务跨重启保存、把更多日常判断（例如“背包满了先回家还是丢弃杂物”）交给决策模型。实现前需要单独规划。
+

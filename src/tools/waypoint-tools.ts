@@ -5,7 +5,7 @@ const { goals } = pathfinderPkg;
 import { ToolFactory } from '../tool-factory.js';
 import { WaypointStore } from '../waypoint-store.js';
 import { coerceCoordinates } from './coordinate-utils.js';
-import { gotoWithTimeout } from './movement-utils.js';
+import { gotoWithTimeout, arrivalProblem } from './movement-utils.js';
 
 export function registerWaypointTools(factory: ToolFactory, getBot: () => mineflayer.Bot, store: WaypointStore): void {
   factory.registerTool(
@@ -107,6 +107,8 @@ export function registerWaypointTools(factory: ToolFactory, getBot: () => minefl
       }
 
       await gotoWithTimeout(bot, new goals.GoalNear(waypoint.x, waypoint.y, waypoint.z, range), timeoutMs);
+      const problem = arrivalProblem(bot, waypoint, range);
+      if (problem) return factory.createErrorResponse(`Did not reach waypoint '${store.normalizeName(name)}': ${problem}`);
       return factory.createResponse(`Arrived near waypoint '${store.normalizeName(name)}' (${waypoint.x}, ${waypoint.y}, ${waypoint.z})`);
     }
   );

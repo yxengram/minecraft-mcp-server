@@ -6,7 +6,7 @@ import { PRIORITY } from '../src/autopilot/action-arbiter.js';
 import { EventStore } from '../src/event-store.js';
 import { registerTaskTools } from '../src/tools/task-tools.js';
 import { registerPositionTools } from '../src/tools/position-tools.js';
-import { createFactory } from './_helpers.js';
+import { createFactory, arriveAtGoal } from './_helpers.js';
 
 function setup({ bound = true } = {}) {
   const self = { id: 1, position: new Vec3(0, 64, 0) };
@@ -16,6 +16,8 @@ function setup({ bound = true } = {}) {
   };
   pathfinder.setGoal = sinon.spy((goal: unknown) => { pathfinder.goal = goal; });
   const bot = { entity: self, entities: { 1: self, 5: steve }, players: {}, pathfinder, clearControlStates: sinon.stub(), setControlState: sinon.stub() };
+  // The pathfinder really gets the bot there; move-to-position checks the arrival (M7).
+  pathfinder.goto = arriveAtGoal(bot);
   const events = new EventStore();
   const autopilot = new Autopilot({ events });
   if (bound) autopilot.bind(bot as never);

@@ -424,6 +424,23 @@ test.serial('gather skips a block next to lava and counts it as skipped', async 
   t.false(blocks.has('0,64,4'));
 });
 
+test.serial('M7: gather skips a block touching water (submerged or an aquifer wall) and mines a dry one', async (t) => {
+  const clock = fakeTimers();
+  t.teardown(() => clock.restore());
+  const { tasks, bot, blocks } = gatherWorld({ '1,64,0': 'oak_log', '1,65,0': 'water', '0,64,4': 'oak_log' });
+
+  await tasks.start('gather', { blockType: 'oak_log', count: 1 });
+  const end = tasks.waitForEnd('t1');
+  await clock.tickAsync(3000);
+  const final = await end;
+
+  t.is(final.status, 'done');
+  t.regex(final.result ?? '', /^Mined 1 of 1 oak_log; inventory gained 1 item\(s\); skipped 1 unreachable or unsafe block/);
+  t.true(bot.dig.getCalls().every(call => !call.args[0].position.equals(new Vec3(1, 64, 0))), 'the wet log is never dug');
+  t.is(blocks.get('1,64,0'), 'oak_log');
+  t.false(blocks.has('0,64,4'));
+});
+
 test.serial('gather fails when nothing could be mined', async (t) => {
   const clock = fakeTimers();
   t.teardown(() => clock.restore());

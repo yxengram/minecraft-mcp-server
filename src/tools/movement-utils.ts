@@ -10,6 +10,17 @@ export function stopPathfinder(bot: mineflayer.Bot): void {
   bot.pathfinder.setGoal(null);
 }
 
+/**
+ * Why the bot is not where it was sent, or null when it arrived within `range` (plus a block of slack). The
+ * pathfinder can report success without having moved, e.g. when the bot is boxed in (M7).
+ */
+export function arrivalProblem(bot: mineflayer.Bot, target: { x: number; y: number; z: number }, range: number): string | null {
+  const at = bot.entity.position.floored();
+  const distance = Math.hypot(at.x - Math.floor(target.x), at.y - Math.floor(target.y), at.z - Math.floor(target.z));
+  if (distance <= range + 1) return null;
+  return `stopped at (${at.x}, ${at.y}, ${at.z}), ${distance.toFixed(1)} blocks from the target: the pathfinder found no way closer`;
+}
+
 export async function gotoWithTimeout(bot: mineflayer.Bot, goal: Goal, timeoutMs?: number): Promise<void> {
   const gotoPromise = bot.pathfinder.goto(goal);
   if (timeoutMs === undefined) {

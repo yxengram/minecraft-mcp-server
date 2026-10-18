@@ -127,6 +127,8 @@ export class Autopilot {
       events: this.options.events,
       reflexes: REFLEXES,
       judgeCombat: (attackerId, situation) => this.combatJudge.judge(attackerId, situation),
+      // Runs while a reflex may still hold the body, so a paused task cannot resume in between (M7).
+      onDeath: () => void this.tasks.cancelAll('the bot died'),
       log: this.options.log
     });
     this.reflexEngine.start();

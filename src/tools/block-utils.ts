@@ -13,7 +13,7 @@ const NEIGHBOR_OFFSETS = [
   new Vec3(0, 0, 1), new Vec3(0, 0, -1)
 ];
 
-export type DigResult = 'dug' | 'air' | 'unbreakable' | 'lava';
+export type DigResult = 'dug' | 'air' | 'unbreakable' | 'lava' | 'water';
 
 export const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
@@ -23,6 +23,11 @@ export function isAir(block: { name: string } | null | undefined): boolean {
 
 export function isLiquid(block: { name: string } | null | undefined): boolean {
   return Boolean(block && LIQUID_BLOCKS.has(block.name));
+}
+
+/** Water on any face: digging it would flood the hole, or it is under water (submerged stone, aquifer walls). */
+export function hasAdjacentWater(bot: mineflayer.Bot, pos: Vec3): boolean {
+  return NEIGHBOR_OFFSETS.some(offset => bot.blockAt(pos.plus(offset))?.name === 'water');
 }
 
 export function hasAdjacentLava(bot: mineflayer.Bot, pos: Vec3): boolean {
@@ -47,11 +52,12 @@ export class DigInterrupted extends Error {
  * dig then uses a forced look so nothing can run between the last check and the start of digging.
  */
 /** Why a block must not or cannot be dug, checked before walking to it; null when it can be dug. */
-export function digPrecheck(bot: mineflayer.Bot, pos: Vec3): Exclude<DigResult, 'dug'> | null {
+export function digPrecheck(bot: mineflayer.Bot, pos: Vec3, { avoidWater = false } = {}): Exclude<DigResult, 'dug'> | null {
   const block = bot.blockAt(pos);
   if (isAir(block) || isLiquid(block)) return 'air';
   if (!block!.diggable) return 'unbreakable';
   if (hasAdjacentLava(bot, pos)) return 'lava';
+  if (avoidWater && hasAdjacentWater(bot, pos)) return 'water';
   return null;
 }
 

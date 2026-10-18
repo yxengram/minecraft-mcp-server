@@ -5,7 +5,7 @@ const { goals } = pathfinderPkg;
 import { Vec3 } from 'vec3';
 import { ToolFactory } from '../tool-factory.js';
 import { coerceCoordinates } from './coordinate-utils.js';
-import { stopPathfinder } from './movement-utils.js';
+import { stopPathfinder, arrivalProblem } from './movement-utils.js';
 import type { Autopilot } from '../autopilot/autopilot.js';
 
 type Direction = 'forward' | 'back' | 'left' | 'right';
@@ -63,6 +63,8 @@ export function registerPositionTools(factory: ToolFactory, getBot: () => minefl
         } else {
           await gotoPromise;
         }
+        const problem = arrivalProblem(bot, { x, y, z }, range);
+        if (problem) return factory.createErrorResponse(`Did not reach (${x}, ${y}, ${z}): ${problem}`);
         return factory.createResponse(`Successfully moved to position near (${x}, ${y}, ${z})`);
       } catch (error) {
         if (timedOut) {

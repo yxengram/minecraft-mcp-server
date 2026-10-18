@@ -220,7 +220,12 @@ function useClock(t: ExecutionContext) {
   return clock;
 }
 
-function createEngine(t: ExecutionContext, world: World, reflexes: ReflexDefinition[] = REFLEXES, extra: Pick<ReflexEngineOptions, 'judgeCombat'> = {}) {
+function createEngine(
+  t: ExecutionContext,
+  world: World,
+  reflexes: ReflexDefinition[] = REFLEXES,
+  extra: Pick<ReflexEngineOptions, 'judgeCombat' | 'onDeath'> = {}
+) {
   const { bot } = world;
   const events = new EventStore();
   // As in autopilot.ts: the arbiter stops the body whenever it hands it to someone else.
@@ -2131,4 +2136,86 @@ test.serial('I6: no reflex trigger calls the combat judge; only self-defense\'s 
   t.true(judge.calledOnce);
   t.true(trigger.calledBefore(judge), 'the trigger ran first and did not ask');
   t.deepEqual(holder(), { holder: 'reflex self-defense', priority: PRIORITY.ROUTINE_REFLEX }, 'the rule action started while the judge has not answered');
+});
+
+// ---- M7: death ends the task (F-012, F-001) --------------------------------------------------------------------
+// Expected from the M7 contract: the engine's onDeath runs before the running reflex lets go of the body, so a task
+// the reflex paused is cancelled instead of being resumed after the bot died.
+
+/** createEngine plus a real TaskManager, with onDeath wired the way autopilot.ts wires it. */
+function createWiredEngine(t: ExecutionContext, world: World, reflexes: ReflexDefinition[]) {
+  let tasks: TaskManager | null = null;
+  let harness: ReturnType<typeof createEngine> | null = null;
+  // What onDeath saw when it was called: who held the body, whether the reflex was already aborted, the task's status.
+  const seen: { holder: string | null; task: string | null }[] = [];
+  const onDeath = sinon.stub().callsFake(() => {
+    seen.push({ holder: harness?.holder()?.holder ?? null, task: tasks?.currentTask()?.status ?? null });
+    void tasks?.cancelAll('the bot died');
+  });
+  harness = createEngine(t, world, reflexes, { onDeath });
+  tasks = createTasks(t, world, harness);
+  const taskMessages = () => harness!.events.query({ limit: 200 }).events
+    .filter(event => event.type.startsWith('task_')).map(event => `${event.type} ${event.message}`);
+  return { ...harness, tasks, onDeath, seen, taskMessages };
+}
+
+test.serial('M7: death while a critical reflex has the task paused → onDeath runs before the reflex lets go; the task is cancelled and never resumes', async (t) => {
+  const clock = useClock(t);
+  const world = createWorld();
+  const hazard = scripted('hazard-escape', PRIORITY.CRITICAL_REFLEX, { result: null });
+  const { engine, tasks, holder, taskEvents, taskMessages, onDeath, seen } = createWiredEngine(t, world, [hazard.definition]);
+  engine.start();
+  t.true((await tasks.start('idle', {})).ok);
+
+  hazard.result = { fire: 'running out of air (3 left)' };
+  world.bot.emit('physicsTick');
+  t.is(tasks.currentTask()?.status, 'paused');
+  t.deepEqual(holder(), { holder: 'reflex hazard-escape', priority: PRIORITY.CRITICAL_REFLEX });
+
+  let abortedAtDeath: boolean | undefined;
+  onDeath.callsFake(() => {
+    abortedAtDeath = hazard.signals[0].aborted;
+    seen.push({ holder: holder()?.holder ?? null, task: tasks.currentTask()?.status ?? null });
+    void tasks.cancelAll('the bot died');
+  });
+  world.bot.health = 0;
+  world.bot.emit('death');
+
+  t.true(onDeath.calledOnce);
+  t.deepEqual(seen, [{ holder: 'reflex hazard-escape', task: 'paused' }], 'the reflex still held the body and the task was still paused');
+  t.false(abortedAtDeath, 'onDeath ran before the reflex was aborted');
+  t.true(hazard.signals[0].aborted, 'then the reflex is aborted');
+  t.is(holder(), null);
+  t.deepEqual(taskEvents(), ['task_started', 'task_paused', 'task_cancelled'], 'cancelled at once, with no task_resumed in between');
+  t.is(taskMessages().at(-1), 'task_cancelled t1 idle: cancelled (the bot died)');
+
+  // Respawn: nothing comes back.
+  await clock.tickAsync(1500);
+  hazard.result = null;
+  world.bot.health = 20;
+  world.bot.emit('spawn');
+  for (let i = 0; i < 5; i++) {
+    world.bot.emit('physicsTick');
+    await clock.tickAsync(TICK);
+  }
+  t.deepEqual(taskEvents(), ['task_started', 'task_paused', 'task_cancelled'], 'no task_resumed after the respawn');
+  t.is(tasks.currentTask(), null);
+  t.is(holder(), null);
+});
+
+test.serial('M7: death with no reflex running cancels the running task (the bot died)', async (t) => {
+  useClock(t);
+  const world = createWorld();
+  const hazard = scripted('hazard-escape', PRIORITY.CRITICAL_REFLEX, { result: null });
+  const { engine, tasks, holder, taskMessages } = createWiredEngine(t, world, [hazard.definition]);
+  engine.start();
+  t.true((await tasks.start('idle', {})).ok);
+
+  world.bot.health = 0;
+  world.bot.emit('death');
+
+  t.is(tasks.currentTask(), null);
+  t.deepEqual(taskMessages().map(message => message.split(' ')[0]), ['task_started', 'task_cancelled']);
+  t.is(taskMessages().at(-1), 'task_cancelled t1 idle: cancelled (the bot died)');
+  t.is(holder(), null);
 });

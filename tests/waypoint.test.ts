@@ -6,7 +6,7 @@ import path from 'node:path';
 import { Vec3 } from 'vec3';
 import { WaypointStore } from '../src/waypoint-store.js';
 import { registerWaypointTools } from '../src/tools/waypoint-tools.js';
-import { asBot, createFactory } from './_helpers.js';
+import { arriveAtGoal, asBot, createFactory } from './_helpers.js';
 
 function tempFile(): string {
   return path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-waypoints-')), 'nested', 'waypoints.json');
@@ -111,6 +111,8 @@ test('delete-waypoint removes or reports unknown', async (t) => {
 test('goto-waypoint paths to the saved location', async (t) => {
   const { store, bot, getTool } = setup();
   store.set('home', { ...waypoint, x: 5, y: 70, z: 9, dimension: 'overworld' });
+  // The pathfinder really gets the bot there; goto-waypoint checks the arrival (M7).
+  bot.pathfinder.goto.callsFake(arriveAtGoal(bot));
 
   const result = await getTool('goto-waypoint')!.execute({ name: 'home', range: 3 });
 
@@ -120,6 +122,17 @@ test('goto-waypoint paths to the saved location', async (t) => {
   t.is(goal.z, 9);
   t.is(goal.rangeSq, 9);
   t.true(result.content[0].text.includes("Arrived near waypoint 'home'"));
+});
+
+test('M7: goto-waypoint reports an error when the pathfinder finishes without getting the bot there', async (t) => {
+  const { store, bot, getTool } = setup();
+  store.set('home', { ...waypoint, x: 20, y: 70, z: 9, dimension: 'overworld' });
+  bot.pathfinder.goto.resolves();
+
+  const result = await getTool('goto-waypoint')!.execute({ name: 'home', range: 2 });
+
+  t.true(result.isError);
+  t.regex(result.content[0].text, /^Failed: Did not reach waypoint 'home': stopped at \(-?\d+, -?\d+, -?\d+\), [\d.]+ blocks from the target: the pathfinder found no way closer$/);
 });
 
 test('goto-waypoint rejects unknown waypoints and other dimensions', async (t) => {

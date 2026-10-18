@@ -75,7 +75,8 @@ export const gatherBehavior: BehaviorDefinition<GatherParams, BlockInfo> = {
 
       setStep(`digging ${blockInfo.name} at (${target.x}, ${target.y}, ${target.z})`);
       try {
-        let result: DigResult | null = digPrecheck(bot, target);
+        // Blocks touching water are left alone: digging them floods the hole or leads the bot under water (M7).
+        let result: DigResult | null = digPrecheck(bot, target, { avoidWater: true });
         if (!result) {
           // Walk first under the time limit, so a long walk cannot run past it (collect-block waits on this task).
           const block = bot.blockAt(target)!;
