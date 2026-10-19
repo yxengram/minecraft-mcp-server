@@ -1,283 +1,319 @@
-# Minecraft MCP Server
+# Minecraft MCP Server — with Autopilot
 
-<a href="https://github.com/yuniko-software/minecraft-mcp-server/actions">
-  <img alt="CI" src="https://github.com/yuniko-software/minecraft-mcp-server/actions/workflows/build.yml/badge.svg">
-</a>
-<a href="https://github.com/yuniko-software">
-  <img alt="Contribution Welcome" src="https://img.shields.io/badge/Contribution-Welcome-blue">
-</a>
-<a href="https://github.com/yuniko-software/minecraft-mcp-server/releases/latest">
-  <img alt="Latest Release" src="https://img.shields.io/github/v/release/yuniko-software/minecraft-mcp-server?label=Latest%20Release">
-</a>
+**English** | [简体中文](README.zh-CN.md)
 
-<img width="2063" height="757" alt="image" src="https://github.com/user-attachments/assets/3f0f0438-f079-4226-90bd-87b9e1311d19" />
+A Minecraft bot that a large language model (for example Claude) plays through the [Model Context Protocol](https://modelcontextprotocol.io) (MCP). The bot runs on [Mineflayer](https://github.com/PrismarineJS/mineflayer). The LLM sees the world and acts in it through 61 MCP tools.
 
-___
+What sets this fork apart is the **Autopilot**: background tasks for long jobs, and an **instinct** that reacts to danger within about a second. The instinct pairs a fast *decision model* with code that carries out the chosen move. Without it, the LLM would have to notice every creeper in time by itself.
 
 > [!IMPORTANT]
-> Minecraft Java 26.1.2 has been verified with Mineflayer 4.39.0 or later. Newer versions may not work with this MCP server, but we will add support as soon as possible.
+> Verified with **Minecraft Java Edition 26.1.2** (protocol 775) and Mineflayer 4.39 or later. Other versions may not work.
 
-https://github.com/user-attachments/assets/6f17f329-3991-4bc7-badd-7cde9aacb92f
+---
 
-A Minecraft bot powered by large language models and [Mineflayer API](https://github.com/PrismarineJS/mineflayer). This bot uses the [Model Context Protocol](https://github.com/modelcontextprotocol) (MCP) to enable Claude and other supported models to control a Minecraft character.
+## Where this project comes from
 
-<a href="https://glama.ai/mcp/servers/@yuniko-software/minecraft-mcp-server">
-  <img width="380" height="200" src="https://glama.ai/mcp/servers/@yuniko-software/minecraft-mcp-server/badge" alt="mcp-minecraft MCP server" />
-</a>
+This is a fork of **[yuniko-software/minecraft-mcp-server](https://github.com/yuniko-software/minecraft-mcp-server)** (Apache 2.0, © Yuniko Software).
 
-## Prerequisites
+| Part | Source |
+|---|---|
+| The MCP server, the bot connection and the first **23 tools** (movement, inventory, blocks, crafting, a furnace, chat, flight, game mode) | Upstream `main` at `240c8ce` (version 2.0.4) |
+| Support for **Minecraft Java 26.1.2** | Upstream [pull request #274](https://github.com/yuniko-software/minecraft-mcp-server/pull/274) (`a9c9111`, by lifat), merged into this fork |
+| Everything else in this README: 38 more tools, perception, the Autopilot, the tests and the design documents | This fork ([yxengram/minecraft-mcp-server](https://github.com/yxengram/minecraft-mcp-server), branch `extra-tools`) |
 
-- Git
-- Node.js (>= 22)
-- A running Minecraft game (the setup below was tested with Minecraft 26.1.2 Java Edition)
-- An MCP-compatible client. Claude Desktop will be used as an example, but other MCP clients are also supported
+The upstream project is a good, simple bridge: the LLM calls a tool, and the bot does one thing. This fork keeps that bridge and every upstream tool, with the same names and arguments. It adds what turned out to be missing when an LLM actually tries to survive in the game.
+
+## What changed
+
+### 1. More tools, and seeing like a player (23 → 61 tools)
+- **Moving:** follow or flee from an entity, stop, saved waypoints.
+- **Building and mining:** collect a number of blocks, clear or fill a region, dig a tunnel, read and use containers.
+- **Interacting:** right-click blocks and entities, sleep and wake, ride and dismount, attack.
+- **Perception:**
+  - `get-observation`: one-call snapshot of vitals, effects, armor, time, weather, equipment, inventory and nearby entities.
+  - `get-events` and `wait-for-event`: everything a player would notice (damage and its source, hostile sounds, explosions, chat, deaths, pickups). The LLM can wait for something to happen instead of polling.
+  - `scan-area`: terrain described in text.
+  - `render-map`: a top-down map or cross-section as an image.
+  - `get-cursor-target`: what is under the crosshair.
+
+### 2. The Autopilot
+- **Background tasks:** `follow`, `flee`, `guard`, `gather`, `hunt`, `return-home`. A tool call returns at once; progress arrives as events.
+- **One body, one driver:** an action arbiter makes sure only one thing controls the bot's body at a time. A command from the LLM runs immediately, and the reply says what it interrupted.
+- **Instinct:** code senses danger and works out what the bot can do; a decision model on [OpenRouter](https://openrouter.ai) picks the option; code carries it out. See [Design](#design).
+- **Policy:** the LLM tunes the instinct, the combat rules, chat handling and the decision model with `get-policy` and `set-policy`. It can also say what it is up to (`instinct.intent`), so the instinct does not "rescue" the bot from something it is doing on purpose.
+- **Chat triage:** the decision model sorts chat. Only messages meant for the bot wake the LLM, as `chat_request` events. Nobody can command the bot by chat unless the LLM allows it.
+
+### 3. Tested in the game, not only on paper
+- 820 unit tests.
+- A live test that exercises all 61 tools against a real server.
+- A scenario test that compares the bot with and without the Autopilot: zombie waves, creepers, hunger, fire, drowning, diving on purpose, chat.
+- A 10-day survival test on Normal difficulty. The bot survived all ten nights without dying and built a 7×7 house with a door, eight glass windows, a bed, a chest, a crafting table, a furnace and torches.
+
+Problems found while playing were fixed and re-tested, for example:
+- the bot drowning under a ceiling;
+- tasks leading the bot back into danger;
+- the pathfinder digging through the bot's own walls;
+- placements failing because the bot stood in the target cell;
+- the furnace keeping its output.
+
+## Design
+
+### The problem: an LLM is too slow for real time
+Every "look, think, call a tool" round trip takes the LLM seconds. Minecraft runs at 20 ticks per second, and a lit creeper explodes in 1.5 s. Hand-writing a rule for every situation does not scale either. The first versions of this fork had code reflexes, which is how such bots are usually built. A drowning in the survival test showed the limit: the reflex only knew how to swim up, and the bot was under a stone ceiling. Fixing that with more rules leads to endless code. The next rule would be needed when the bot wants to dive to an ocean monument on purpose. And at that point, is it the LLM that plays, or the code?
+
+### The answer: three roles, like a brain
+
+| Role | Who | Speed | What it does | What it never does |
+|---|---|---|---|---|
+| **Cortex** | The LLM | seconds | Sets goals, starts tasks, plans, talks, adjusts the policy, states its intent | Steer every tick |
+| **Instinct** | A decision model (default `perplexity/pplx-decider-v1.2-20261016`) | about 0.65 s | Picks one option from a menu, with a probability, and says whether it is urgent and whether the current task may carry on | Write text or invent options |
+| **Cerebellum** | Code | every tick | Senses danger, works out which options are possible right now (an air pocket it can reach, a ceiling it can dig, water to put out a fire), and carries out the chosen move: swimming, digging, sprinting away, fighting, eating | Decide on its own to do something else ("if X then do Y") |
+
+Decision models are a kind of model that does not generate text. Given a state and a question, they return calibrated probabilities for a fixed set of choices. That makes them fast and cheap (about $0.00002 per call), and a good fit for "which of these five things now?".
+
+### Rules the code keeps
+1. **Code never maps an event to a behavior.** It may sense, list what is possible, wake the decision model and carry out a choice. A macro either finishes or fails and reports; it never quietly switches to something else.
+2. **No decision, no action.** Without a key, or on a timeout or error, the bot does not act on dangers by itself. It reports each one once as an `instinct offline` event, and the LLM decides.
+3. **The LLM's commands come first.** Only a choice that the decision model marks *urgent* may interrupt them. The reply to the interrupted command says so.
+4. **Safety stays in code, outside the model's reach.**
+   - The instinct never attacks players, even with `combat.attackPlayers` on, and never attacks tamed animals or (by default) neutral mobs.
+   - Chat can never change the policy.
+   - Only one holder drives the body at a time.
+   - The API key never appears in logs, events or tool output.
+5. **Facts for the model, choices by the model.**
+   - The model sees what code knows: earlier dangers, how often it was asked, the LLM's intent.
+   - That is how it learned, for example, to stop a task that kept walking the bot back into the same water.
+6. **Thresholds come from measurements.**
+   - Probabilities and latencies were probed on the pinned model before the defaults were set: act at 0.3 or more, urgent at 0.6 or more.
+   - They have to be probed again when the model changes.
+7. **Everything is visible.** Every decision, its probabilities and its result is an event the LLM can read.
+
+### Known limits
+- A creeper that is **already lit** 4 blocks away leaves about 0.7 s, and the decision API sometimes answers in 1.0–1.3 s. That case is a stress test, not a guarantee. A creeper that walks up is asked about from 10 blocks away and is handled.
+- Cornered at low health inside walls, the only option left is to run.
+- The pathfinder treats wooden doors as passable and a door helper opens and closes them; iron doors are not handled.
+
+The full design, the contract of every file, and the evidence behind each choice are in [docs/BLUEPRINT.md](docs/BLUEPRINT.md) and [docs/PLAN.md](docs/PLAN.md), both in Chinese.
+
+---
 
 ## Getting started
 
-This bot is designed to be used with Claude Desktop through the Model Context Protocol (MCP).
+### Requirements
+- Node.js 22 or later, and Git
+- Minecraft Java Edition 26.1.2
+- An MCP client, for example [Claude Desktop](https://claude.ai/download)
+- Optional: an [OpenRouter](https://openrouter.ai) API key for the instinct and chat triage
 
-### Run Minecraft
+### 1. Build the server
+```bash
+git clone https://github.com/yxengram/minecraft-mcp-server.git
+cd minecraft-mcp-server
+npm install
+npm run build
+```
 
-Create a singleplayer world and open it to LAN (`ESC -> Open to LAN`). Bot will try to connect using port `25565` and hostname `localhost`. These parameters could be configured in `claude_desktop_config.json` on a next step. 
+### 2. Open a world to LAN
+Start a world and choose `ESC → Open to LAN`. Note the port that Minecraft prints in chat. Turn cheats on if you want to run the live tests.
 
-### MCP Configuration
-
-Make sure that [Claude Desktop](https://claude.ai/download) is installed. Open `File -> Settings -> Developer -> Edit Config`. It should open installation directory. Find file with a name `claude_desktop_config.json` and insert the following code:
+### 3. Add the server to your MCP client
+For Claude Desktop, go to `Settings → Developer → Edit Config`, then add an entry to `claude_desktop_config.json`:
 
 ```json
 {
   "mcpServers": {
     "minecraft": {
-      "command": "npx",
+      "command": "node",
       "args": [
-        "-y",
-        "github:yuniko-software/minecraft-mcp-server",
-        "--host",
-        "localhost",
-        "--port",
-        "25565",
-        "--username",
-        "ClaudeBot"
-      ]
-    }
-  }
-}
-```
-
-Double-check that right `--port` and `--host` parameters were used. Make sure to completely reboot the Claude Desktop application (should be closed in OS tray). 
-
-## Running
-
-Make sure Minecraft game is running and the world is opened to LAN. Then start Claude Desktop application and the bot should join the game. 
-
-**It could take some time for Claude Desktop to boot the MCP server**. The marker that the server has booted successfully:
-
-<img width="885" height="670" alt="image" src="https://github.com/user-attachments/assets/ccbb42f8-6544-462c-8ac1-8af13ddfcddd" />
-
-You can give bot any commands through any active Claude Desktop chat. You can also upload images of buildings and ask bot to build them 😁
-
-Don't forget to mention that bot should do something in Minecraft in your prompt. Because saying this is a trigger to run MCP server. It will ask for your permissions.
-
-Using Claude Sonnet could give you some interesting results. The bot-agent would be really smart 🫡
-
-Example usage: [shared Claude chat](https://claude.ai/share/535d5f69-f102-4cdb-9801-f74ea5709c0b)
-
-## Available Commands
-
-Once connected to a Minecraft server, Claude can use these commands:
-
-### Movement
-- `get-position` - Get the current position of the bot
-- `move-to-position` - Move to specific coordinates
-- `look-at` - Make the bot look at specific coordinates
-- `jump` - Make the bot jump
-- `move-in-direction` - Move in a specific direction for a duration
-- `stop-pathfinding` - Stop the current movement
-- `follow-entity` - Keep following a player or mob until `stop-pathfinding`
-- `flee-from` - Run away from an entity until a safe distance
-
-### Flight
-- `fly-to` - Make the bot fly directly to specific coordinates
-
-### Inventory
-- `list-inventory` - List all items in the bot's inventory, with custom names, durability and enchantments
-- `find-item` - Find a specific item in inventory
-- `equip-item` - Equip a specific item
-- `unequip-item` - Take off an equipped item
-- `consume` - Eat or drink an item
-- `toss-item` - Drop items on the ground
-
-### Block Interaction
-- `place-block` - Place a block at specified coordinates
-- `dig-block` - Dig a block at specified coordinates
-- `get-block-info` - Get information about a block: its state (open, facing, powered, ...), light level, biome and sign text
-- `get-cursor-target` - What the bot is looking at: facing direction and the block face or entity under the crosshair
-- `find-blocks` - Find one or more nearby blocks of a specific type
-- `collect-block` - Mine and pick up a number of blocks of one type
-- `clear-region` - Dig out a box between two corners (max 512 blocks)
-- `fill-region` - Fill empty spaces in a box with a block from the inventory (max 512 blocks)
-- `dig-tunnel` - Dig a straight horizontal tunnel
-- `activate-block` - Right-click a block (doors, buttons, levers)
-
-Digging tools pick the best tool in the inventory and skip blocks next to lava.
-
-### Containers
-- `read-container` - Look inside a chest, barrel, shulker box, hopper, dispenser or dropper
-- `container-deposit` - Put inventory items into a container
-- `container-withdraw` - Take items out of a container
-
-### Furnace
-- `smelt-item` - Smelt items using a furnace-like block
-
-### Entity Interaction
-- `find-entity` - Find the nearest entity of a specific type
-- `list-entities` - List nearby entities, nearest first, with what dropped items are, custom names, babies, owners, sheep colors, held or worn items and creepers about to explode
-- `list-players` - List players online on the server
-- `attack-entity` - Attack an entity within reach
-- `activate-entity` - Right-click an entity (villagers, animals)
-- `sleep` / `wake` - Sleep in a bed (at night or during thunderstorms) and get up
-- `mount-entity` / `dismount` - Ride and leave horses, boats and minecarts
-
-### Waypoints
-- `set-waypoint` - Save a named location (current position by default)
-- `list-waypoints` - List saved waypoints with distances
-- `delete-waypoint` - Delete a waypoint
-- `goto-waypoint` - Walk to a saved waypoint
-
-Waypoints are stored per server host in `~/.minecraft-mcp-server/waypoints.json`. Use `--waypoint-file <path>` to store them elsewhere, for example one file per world, since every LAN world is `localhost`.
-
-### Communication
-- `send-chat` - Send a chat message in-game
-- `read-chat` - Get recent chat messages from players, plus system messages (command feedback, death messages, advancements), action bar text and titles
-
-### Vision
-- `scan-area` - Describe the surrounding terrain in text: height and slope in each direction, surface blocks, cliffs, water and lava, notable blocks (ores, chests, beds, trees, spawners) and entities
-- `render-map` - Render a PNG map: a top-down view (north up) with the bot, its facing direction and entities marked, or a vertical cross-section through the bot
-
-Both tools look down from the sky by default and switch to the bot's own level when it is under a roof, so caves and buildings show walkable floor and walls. `scan-area` only lists blocks exposed to air or water unless `xray` is set. `render-map` returns an image, so it needs an MCP client and model that support images. Both only see chunks the server has sent to the bot.
-
-### Game State
-- `detect-gamemode` - Detect the gamemode on game
-- `get-observation` - One-call snapshot of vitals, status effects, armor, xp, position, time, weather, equipment, inventory and nearby entities
-- `get-events` - Read recent game events (chat, system messages, titles, death, damage with its type and attacker, hostile mob sounds, loud sounds, explosions, item pickups, joins/leaves, kicks). Pass `nextSince` back as `since` to read only new events
-- `wait-for-event` - Wait until something happens instead of polling: a new event (optionally of certain types), a hostile mob coming close or health dropping low (up to 55 seconds)
-
-## Autopilot
-
-The bot does not have to wait for the LLM for everything. Long jobs run as **background tasks**. With a decision model, an **instinct** chooses within about a second what to do about dangers, and code carries it out. The LLM stays in charge: it starts and stops tasks, adjusts the **policy**, tells the instinct what it is up to, and is woken up through events when something needs its attention.
-
-### Background tasks
-- `start-task` - Start a task and return at once: `follow`, `flee`, `guard`, `gather`, `hunt` or `return-home`. Starting a task replaces the current one unless `replace` is false
-- `list-tasks` - The current task (running or paused, why it is paused, what it is doing) and recently finished tasks
-- `resume-task` - Resume a task that one of your own commands paused
-- `cancel-task` - Cancel the current task (`stop-pathfinding` does too)
-
-Examples:
-
-```json
-{ "behavior": "guard", "params": { "target": "Steve", "radius": 8 } }
-{ "behavior": "gather", "params": { "blockType": "oak_log", "count": 16 } }
-{ "behavior": "hunt", "params": { "animal": "cow", "count": 2 } }
-{ "behavior": "return-home", "params": { "waypoint": "home" } }
-```
-
-`guard` protects a player, a waypoint or a position and fights hostile mobs that come close; it never attacks players, animals or neutral mobs. `hunt` never attacks players or tamed animals. `return-home` walks to a waypoint and sleeps in a bed next to it at night. `follow-entity`, `flee-from` and `collect-block` run as tasks too.
-
-Any command that moves the bot (for example `move-to-position`) runs immediately: it pauses the current task and its reply says what was interrupted, so you can `resume-task` or `cancel-task` it. Progress, pauses and results are events (`task_started`, `task_progress`, `task_paused`, `task_resumed`, `task_done`, `task_failed`, `task_cancelled`); use `wait-for-event` to be woken up instead of polling.
-
-### Instinct
-Code watches for dangers without the LLM: standing in lava, on fire, under water with a ceiling above or low on air, a creeper close by or about to explode, being hit, low health with hostiles near, and hunger. When one shows up, code works out what the bot can do right now and a decision model picks one option:
-
-- swim up, swim to an air pocket it can reach, or dig up through the ceiling;
-- get out of the lava, walk into water to put the fire out, or step off the fire;
-- run from a creeper, run from the mobs, fight, or hold its ground;
-- eat;
-- keep going, pause the current task, or leave it to the LLM.
-
-Code then carries out the choice. While the danger lasts, the model is asked again every 1.5 s (hunger every 20 s) and after each action ends. A new danger does not wait for an answer about an older one.
-
-- Code never attacks players for the instinct, and never tamed animals or (with `combat.avoidNeutral`, the default) neutral mobs; against those the model can only choose to run.
-
-- An action the model marks as urgent may interrupt the LLM's own command; otherwise the command goes first.
-- When the model leaves a danger to the LLM, or says the task should not carry on afterwards (for example because it keeps leading the bot back into the same danger), the current task stays paused until `resume-task` or `cancel-task`. Otherwise a task paused by the instinct resumes on its own.
-- Set `instinct.intent` to tell the instinct what the bot is doing, for example `{ "instinct": { "intent": "exploring an underwater cave on purpose" } }`, so that it does not try to save the bot from a situation it is in on purpose.
-- Every decision and action is reported as an `instinct` event.
-- **Without a decision model (no key, turned off, timeout or error), the bot does not act on any of these dangers by itself: it does not run from creepers, fight back or eat.** Each danger is reported once as an `instinct offline` event, and the LLM decides.
-
-### Policy
-- `get-policy` - Show the instinct settings and whether it is online, the combat rules, the chat settings and the decision model status
-- `set-policy` - Change part of it; unknown fields are rejected. Example: `{ "instinct": { "food": 10 }, "combat": { "retreatHealth": 8 } }`
-
-The policy lives in memory only and goes back to its defaults whenever the bot (re)joins the game. Turning on `combat.attackPlayers` is possible but always writes a warning event.
-
-### Optional: decision model (OpenRouter)
-With an [OpenRouter](https://openrouter.ai) API key, a fast decision model (about 0.6 s per call) handles two things the LLM is too slow for:
-
-- **Instinct:** dangers, as described above. It has its own budget (`instinct.maxCallsPerMinute`, 90 by default), so chat cannot crowd it out.
-- **Chat triage:** messages meant for the bot become `chat_request` events, so the LLM can wait for them with `wait-for-event` instead of reading all chat. Small talk between other players is not reported.
-
-By default, chat never makes the bot do anything by itself. If you want a player to be able to say "follow me", "guard me", "gather 20 wood", "go home" or "stop" directly, authorize them with `set-policy { "chat": { "commandsFrom": ["Steve"] } }`. Only clear commands that are meant for the bot run; everything else is reported to the LLM.
-
-To enable it, put the key in the `env` field of the MCP server entry (it is read only from the `OPENROUTER_API_KEY` environment variable and never written to logs, events or tool output):
-
-```json
-{
-  "mcpServers": {
-    "minecraft": {
-      "command": "npx",
-      "args": ["-y", "github:yuniko-software/minecraft-mcp-server", "--host", "localhost", "--port", "25565", "--username", "ClaudeBot"],
+        "/path/to/minecraft-mcp-server/dist/main.js",
+        "--host", "localhost",
+        "--port", "25565",
+        "--username", "ClaudeBot"
+      ],
       "env": { "OPENROUTER_API_KEY": "sk-or-..." }
     }
   }
 }
 ```
 
-`list-decision-models` shows the available decision models; `--decision-model <id>` or `set-policy { "decisions": { "model": "<id>" } }` picks another one (the thresholds were tuned for the default model, so re-check them after a change).
+Leave out `env` to run without a decision model: everything else works, but the instinct is offline.
 
-**Privacy and cost:** with a key, chat messages from other players and a summary of the bot's combat situation (health, armor, weapon, mob types and distances) are sent to OpenRouter and the model provider. A call costs about $0.00002 and calls are capped at 30 per minute by default (`decisions.maxCallsPerMinute`). Without a key nothing is sent: whispers and messages that mention the bot's name are reported by rule, and everything else works the same.
+Restart the client completely. The bot joins the world once the client starts the server.
 
-The design and the evidence behind the defaults are in [docs/BLUEPRINT.md](docs/BLUEPRINT.md) and [docs/PLAN.md](docs/PLAN.md).
+| Option | Default | Meaning |
+|---|---|---|
+| `--host` | `localhost` | Minecraft server host |
+| `--port` | `25565` | Minecraft server port (the LAN port) |
+| `--username` | `LLMBot` | The bot's name |
+| `--waypoint-file` | `~/.minecraft-mcp-server/waypoints.json` | Where waypoints are stored (per server host) |
+| `--decision-model` | `perplexity/pplx-decider-v1.2-20261016` | The OpenRouter decision model |
 
-## Contributing
+The API key is read only from the `OPENROUTER_API_KEY` environment variable. Do not put it in any file inside the repository.
 
-Feel free to submit pull requests or open issues for improvements. All refactoring commits, functional and test contributions, issues and discussion are greatly appreciated!
-
-To get started with contributing, please see [CONTRIBUTING.md](CONTRIBUTING.md).
+### 4. Play
+Ask the LLM to do things in Minecraft. A few habits make it much better at the game:
+- Use `start-task` for long jobs, then `wait-for-event` (for example on `task_done`, `task_failed`, `instinct`, `chat_request`) instead of polling.
+- Use `get-observation` for a quick look, and `scan-area` or `render-map` to understand the terrain.
+- Before doing something risky on purpose, set the intent, for example `set-policy { "instinct": { "intent": "exploring an underwater cave on purpose" } }`.
 
 ---
 
-⭐ If you find this project useful, please consider giving it a star on GitHub! ⭐
+## Tools (61)
 
-Your support helps make this project more visible to other people who might benefit from it.
+### Movement
+- `get-position`: the bot's position
+- `move-to-position`: walk to coordinates; reports an error if the pathfinder stops short
+- `move-in-direction`: walk in a direction for a while
+- `look-at`: look at coordinates
+- `jump`: jump
+- `stop-pathfinding`: stop moving, and cancel the current task
+- `follow-entity`: keep following a player or mob (as a task)
+- `flee-from`: run from an entity to a safe distance (as a task)
+- `fly-to`: fly to coordinates (creative)
 
-## Live compatibility check
+### Waypoints
+- `set-waypoint`: save a named place
+- `list-waypoints`: list waypoints with distances
+- `delete-waypoint`: delete one
+- `goto-waypoint`: walk to one
 
-After building the project, open a singleplayer world to LAN and run:
+### Inventory and crafting
+- `list-inventory`: items, with names, durability and enchantments
+- `find-item`: look for an item
+- `equip-item`: hold or wear an item
+- `unequip-item`: take an item off
+- `consume`: eat or drink
+- `toss-item`: drop items
+- `list-recipes`: recipes for an item
+- `get-recipe`: one recipe in detail
+- `can-craft`: whether an item can be crafted now
+- `craft-item`: craft (places a crafting table from the inventory when one is needed and none is near)
+- `smelt-item`: smelt a whole batch in a furnace, blast furnace or smoker
 
-```sh
-npm run test:live -- LAN_PORT
+### Blocks
+- `get-block-info`: a block's state, light, biome and sign text
+- `get-cursor-target`: the block face or entity under the crosshair
+- `find-blocks`: nearby blocks of a type
+- `place-block`: place a block; walks to a spot from which it can see a face to click, never into the target
+- `dig-block`: dig a block with the best tool
+- `collect-block`: mine and pick up a number of blocks of one type (runs as a `gather` task; skips blocks next to lava or water)
+- `clear-region`: dig out a box (up to 512 blocks)
+- `fill-region`: fill the empty cells of a box (up to 512 blocks)
+- `dig-tunnel`: dig a straight tunnel
+- `activate-block`: right-click a block (doors, buttons, levers)
+
+### Containers
+- `read-container`: look inside a chest, barrel, shulker box, hopper, dispenser or dropper
+- `container-deposit`: put items in
+- `container-withdraw`: take items out
+
+### Entities
+- `find-entity`: the nearest entity of a type
+- `list-entities`: nearby entities, with details such as drops, owners, sheep colors, held items and creepers about to explode
+- `list-players`: players online
+- `attack-entity`: attack an entity in reach
+- `activate-entity`: right-click an entity
+- `mount-entity`: ride a horse, boat or minecart
+- `dismount`: get off
+- `sleep`: sleep in a bed
+- `wake`: get up
+
+### Perception
+- `get-observation`: one-call snapshot of the bot and its surroundings
+- `get-events`: recent game events
+- `wait-for-event`: wait (up to 55 s) for an event, a hostile mob coming close, or health dropping
+- `scan-area`: the terrain in text: heights, slopes, surface, water and lava, notable blocks, entities
+- `render-map`: a PNG map, top-down or cross-section (needs a client and model that accept images)
+- `detect-gamemode`: the game mode
+
+### Chat
+- `send-chat`: say something, or run a command
+- `read-chat`: recent chat and system messages
+
+### Autopilot
+- `start-task`: start a background task
+- `list-tasks`: the current task and recently finished ones
+- `resume-task`: resume a task that was held for you
+- `cancel-task`: cancel the current task
+- `get-policy`: show the policy and whether the instinct is online
+- `set-policy`: change part of the policy
+- `list-decision-models`: the decision models OpenRouter offers
+
+## Autopilot reference
+
+### Tasks
+- `start-task` takes one of the behaviors below and returns at once:
+  - `follow` `{ target | entityId, range? }`
+  - `flee` `{ target | entityId, distance? }`
+  - `guard` `{ target | waypoint | x,y,z, radius? }`
+  - `gather` `{ blockType, count? }`
+  - `hunt` `{ animal, count? }`
+  - `return-home` `{ waypoint?, sleep? }`
+- `guard` fights hostile mobs only.
+- `hunt` never attacks players or tamed animals.
+- A new task replaces the current one, unless `replace` is `false`.
+- Any command that moves the bot pauses the current task, and its reply says so. Use `resume-task` or `cancel-task` afterwards.
+- Events: `task_started`, `task_progress`, `task_paused`, `task_resumed`, `task_done`, `task_failed`, `task_cancelled`.
+
+### Instinct
+**What it notices (cues):**
+- standing in lava, or burning;
+- under water with a ceiling above, or low on air;
+- a creeper within 10 blocks, or swelling within 7;
+- being hit;
+- low health with hostiles near;
+- hunger, when there is safe food.
+
+**What it can choose:** swim up, swim to an air pocket, dig up, leave the lava, walk into water, step off the fire, run from a creeper, flee, fight, hold its ground, eat, keep going, pause the task, or leave it to the LLM.
+
+**How it asks:** it asks when a cue appears, again every 1.5 s while the cue lasts (hunger every 20 s), and after each action ends. A new, more urgent danger does not wait behind an older question. Every decision and its result is an `instinct` event.
+
+### Policy (defaults)
+
+| Group | Fields |
+|---|---|
+| `instinct` | `enabled: true`, `intent: ""` (max 300 characters, set only by the LLM), `lowAir: 6`, `lowHealth: 6`, `hostileRadius: 16`, `food: 14`, `reaskMs: 1500`, `actThreshold: 0.3`, `urgentThreshold: 0.6`, `maxCallsPerMinute: 90` |
+| `combat` | `attackPlayers: false` (a warning event whenever it is turned on), `avoidNeutral: true`, `retreatHealth: 6` |
+| `chat` | `triage: true`, `commandsFrom: []` (players whose clear commands such as "follow me" run without the LLM; set only by the LLM), `replyInChat: true` |
+| `decisions` | `enabled: true`, `model`, `actThreshold: 0.95`, `cautiousThreshold: 0.5` (chat), `maxCallsPerMinute: 30` (chat) |
+
+The policy lives in memory only, and goes back to these defaults whenever the bot joins the game.
+
+### Privacy and cost
+**What is sent:** with a key, chat messages from other players and a summary of the bot's situation go to OpenRouter and the model provider. The summary covers health, food, air, the dangers, the options, the current task and the LLM's intent. Without a key, nothing is sent.
+
+**Cost:** a call costs about $0.00002. The instinct is limited to 90 calls a minute and chat to 30. It only asks while a danger lasts.
+
+---
+
+## Testing
+
+```bash
+npm test             # 820 unit tests
+npm run lint
+npm run test:live -- <LAN_PORT>                                 # read-only check against a world
+npm run test:live:world -- <LAN_PORT> --allow-world-changes      # every tool, in a throwaway world with cheats on
+npm run test:scenarios -- <LAN_PORT> --allow-world-changes       # the Autopilot in dangerous situations
 ```
 
-Replace `LAN_PORT` with the port shown in Minecraft chat. The test connects a bot on localhost, lists MCP tools, checks its position and game mode, reads a nearby block, and calls the read-only observation tools. It disconnects when finished and does not intentionally change blocks. The port defaults to `25565` when omitted.
+**Use a throwaway world** for `test:live:world` and `test:scenarios`. They build an arena at y=240, give items, summon mobs and can kill the bot.
 
-### Full world test
+**How the scenario test works:**
+- It runs every scenario in three configurations: `llm-only` (instinct off), `no-key` (instinct offline) and `instinct` (with a key).
+- It fails if a required scenario fails in the `instinct` configuration.
+- `creeper-ambush` is reported but not required, because the decision API's latency doesn't always beat the fuse.
+- Pass the key with `OPENROUTER_API_KEY="..."` in front of the command.
 
-To exercise every MCP tool against a real server, use a throwaway world with cheats enabled and run:
+## Project documents
+- [docs/BLUEPRINT.md](docs/BLUEPRINT.md): the design, the contract of every file, the cross-module rules and the safety invariants (in Chinese)
+- [docs/PLAN.md](docs/PLAN.md): milestones M1–M11, open questions and the log of every check that was actually run (in Chinese)
+- [AGENTS.md](AGENTS.md): rules for coding agents working on this repository (in Chinese)
+- [CONTRIBUTING.md](CONTRIBUTING.md): how to contribute (from upstream)
 
-```sh
-npm run test:live:world -- LAN_PORT --allow-world-changes
-```
+## License and acknowledgements
+Apache License 2.0; see [LICENSE](LICENSE). The upstream copyright (© 2025 Yuniko Software) is kept.
 
-This test **modifies the world**. It builds a floating stone arena at y=240 above the bot (and removes it at the end), gives itself items with `/give`, summons a pig and a minecart, places a bed, crafting table, chest and furnace, changes the time and game mode, and kills the bot at the end to check death and respawn events. A second bot named `MCPHelper` joins to act as another player for the chat, whisper and follow tests. The script reports any tool it did not exercise, so newly added tools show up as missing coverage.
-
-### Scenario test
-
-To compare how the bot copes with and without the autopilot, run in a throwaway world with cheats enabled:
-
-```sh
-npm run test:scenarios -- LAN_PORT --allow-world-changes
-```
-
-It plays nine scenarios (`zombie-wave`, `creeper-approach`, `creeper-ambush`, `hunger`, `fire`, `drowning-pocket`, `drowning-dig`, `intent-dive`, `chat-triage`) under three configurations: `llm-only` (instinct off: only what the LLM's tools would do), `no-key` (no decision model: the instinct is offline, so dangers are only reported) and `instinct` (with the decision model; only when `OPENROUTER_API_KEY` is set). It prints a table of the results and fails if any scenario fails in the `instinct` configuration, except `creeper-ambush`: a creeper already lit 4 blocks away is a stress test that the decision model's latency (sometimes over 1 s against a 1.5 s fuse) does not always beat, so it is reported but not required. `creeper-approach`, where an unlit creeper walks up from about 10 blocks as in the game, is required. Use `--only <scenario>` to run one scenario and `--rounds <n>` to repeat. It **modifies the world** in the same way as the full world test, and also sets the bot on fire, starves it and summons hostile mobs, so the bot can die.
-
-Minecraft Java 26.1.2 (protocol 775) was also manually verified with a Survival bot: place a dirt block, read it back, dig it, and restore the borrowed dirt to its original location.
+**Thanks to:**
+- [yuniko-software/minecraft-mcp-server](https://github.com/yuniko-software/minecraft-mcp-server), the project this fork builds on, and lifat for the Minecraft 26.1.2 support in pull request #274;
+- [PrismarineJS](https://github.com/PrismarineJS) for Mineflayer and mineflayer-pathfinder;
+- [OpenRouter](https://openrouter.ai) for the Decisions API.
