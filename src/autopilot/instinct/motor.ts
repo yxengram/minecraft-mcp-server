@@ -175,6 +175,15 @@ export function bestFood(bot: mineflayer.Bot): InventoryItem | null {
 }
 
 /** Eats the best food, then puts the previously held item back in hand. Stops eating at once if aborted. */
+// mineflayer's consume() ends as soon as the held item changes, so a late slot update from equipping the food can end
+// it at once without eating anything (the survival test's "ate cooked_beef (food 17 → 17) (0.0s)"; E-016).
+const EQUIP_SETTLE_MS = 500;
+const EAT_SETTLE_MS = 300;
+
+function foodCount(bot: mineflayer.Bot, name: string): number {
+  return bot.inventory.items().filter(item => item.name === name).reduce((sum, item) => sum + item.count, 0);
+}
+
 export async function eat(bot: mineflayer.Bot, signal: AbortSignal): Promise<string | null> {
   const food = bestFood(bot);
   if (!food || bot.food >= 20) return null;
@@ -182,6 +191,9 @@ export async function eat(bot: mineflayer.Bot, signal: AbortSignal): Promise<str
   const previous = bot.heldItem;
   await bot.equip(food, 'hand');
   signal.throwIfAborted();
+  for (let waited = 0; bot.heldItem?.name !== food.name && waited < EQUIP_SETTLE_MS; waited += TICK_MS) await delay(TICK_MS, signal);
+  // One more tick, so the slot update that confirms the equip has arrived before eating starts.
+  await delay(TICK_MS, signal);
   const stop = () => {
     try {
       bot.deactivateItem();
@@ -189,13 +201,22 @@ export async function eat(bot: mineflayer.Bot, signal: AbortSignal): Promise<str
       // Not eating any more.
     }
   };
-  signal.addEventListener('abort', stop, { once: true });
-  try {
-    await bot.consume();
-  } finally {
-    signal.removeEventListener('abort', stop);
+  let ate = false;
+  for (let attempt = 0; attempt < 2 && !ate; attempt++) {
+    const start = { count: foodCount(bot, food.name), food: bot.food, saturation: bot.foodSaturation };
+    signal.addEventListener('abort', stop, { once: true });
+    try {
+      await bot.consume();
+    } finally {
+      signal.removeEventListener('abort', stop);
+    }
+    signal.throwIfAborted();
+    const eaten = () => foodCount(bot, food.name) < start.count || bot.food > start.food || bot.foodSaturation > start.saturation;
+    // The slot and hunger updates can come a little after the "finished eating" status.
+    for (let waited = 0; !eaten() && waited < EAT_SETTLE_MS; waited += TICK_MS) await delay(TICK_MS, signal);
+    ate = eaten();
   }
-  signal.throwIfAborted();
+  if (!ate) throw new Error(`did not eat ${food.name}: eating was interrupted`);
   if (previous && previous.name !== food.name) {
     const again = bot.inventory.items().find(item => item.name === previous.name);
     if (again) await bot.equip(again, 'hand').catch(() => {});

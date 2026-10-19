@@ -606,13 +606,15 @@ test('bestFood: the best safe food; none of the ten harmful or valuable foods, e
 });
 
 test.serial('eat: food 10 with bread → equips the bread, eats it, and puts the previously held sword back in hand', async (t) => {
-  useClock(t);
+  const clock = useClock(t);
   const bread = item('bread', 36);
   const sword = item('iron_sword', 37);
   const world = createWorld({ food: 10, inventory: [bread, sword] });
   world.bot.heldItem = sword;
 
-  const result = await eat(world.bot as never, new AbortController().signal);
+  const eating = eat(world.bot as never, new AbortController().signal);
+  await clock.tickAsync(1000);
+  const result = await eating;
 
   t.is(world.bot.equip.firstCall?.args[0], bread, 'the bread goes in hand');
   t.true(world.bot.consume.calledOnce, 'eats it');
@@ -620,6 +622,39 @@ test.serial('eat: food 10 with bread → equips the bread, eats it, and puts the
   t.is(world.bot.equip.lastCall?.args[0], sword, 'the sword goes back in hand');
   t.is(world.bot.heldItem, sword);
   t.is(result, 'ate bread (food 10 → 15)');
+});
+
+test.serial('eat (E-016): waits until the food is really in hand before eating', async (t) => {
+  const clock = useClock(t);
+  const bread = item('bread', 36);
+  const world = createWorld({ food: 10, inventory: [bread] });
+  // The slot update that confirms the equip arrives 3 ticks later.
+  world.bot.equip.callsFake(async (stack: FakeItem) => { setTimeout(() => { world.bot.heldItem = stack; }, TICK * 3); });
+  world.bot.consume.callsFake(async () => { if (world.bot.heldItem?.name === 'bread') world.bot.food = 15; });
+  const eating = eat(world.bot as never, new AbortController().signal);
+  await clock.tickAsync(TICK * 2);
+  t.true(world.bot.consume.notCalled, 'not before the bread is in hand');
+  await clock.tickAsync(1000);
+  t.is(await eating, 'ate bread (food 10 → 15)');
+  t.true(world.bot.consume.calledOnce);
+});
+
+test.serial('eat (E-016): a consume that ends without eating is tried once more, then reported as not eaten', async (t) => {
+  const clock = useClock(t);
+  const world = createWorld({ food: 17, inventory: [item('cooked_beef')] });
+  world.bot.consume.callsFake(async () => {});
+  const eating = eat(world.bot as never, new AbortController().signal);
+  const failed = t.throwsAsync(eating, { message: 'did not eat cooked_beef: eating was interrupted' });
+  await clock.tickAsync(2000);
+  await failed;
+  t.is(world.bot.consume.callCount, 2, 'one more try');
+
+  const second = createWorld({ food: 17, inventory: [item('cooked_beef')] });
+  let calls = 0;
+  second.bot.consume.callsFake(async () => { if (++calls === 2) second.bot.food = 20; });
+  const again = eat(second.bot as never, new AbortController().signal);
+  await clock.tickAsync(2000);
+  t.is(await again, 'ate cooked_beef (food 17 → 20)', 'the second try counts');
 });
 
 test.serial('eat: nothing to do with a full food bar or only harmful food', async (t) => {
@@ -637,7 +672,7 @@ test.serial('eat: cancelled while eating → stops eating at once (deactivateIte
   const controller = new AbortController();
   const eating = eat(world.bot as never, controller.signal);
   const failed = t.throwsAsync(eating);
-  await clock.tickAsync(0);
+  await clock.tickAsync(200);
   t.true(world.bot.consume.calledOnce, 'eating');
 
   controller.abort(new Error('interrupted by manual command move-to-position'));
@@ -803,7 +838,7 @@ test.serial('fight: hit by a zombie → attacks it even at health 8, and ends wh
   kill(world, zombie);
   await clock.tickAsync(200);
   t.true(settled.done);
-  t.regex(settled.value ?? '', new RegExp(`^fought zombie \\(id ${zombie.id}\\): `));
+  t.regex(settled.value ?? '', new RegExp(`^fought zombie \\(id ${zombie.id}\\) with bare hand: `));
 });
 
 // I1: the macro's own rules say attackPlayers false, whatever the policy says; avoidNeutral follows the policy.
@@ -869,6 +904,7 @@ test.serial('the eat macro stops moving and eats the best safe food; with nothin
   await clock.tickAsync(0);
   t.is(world.pathfinder.goal, null, 'the pathfinder goal is cleared first');
   t.false(world.controls.forward, 'the controls are released first');
+  await clock.tickAsync(1000);
   t.is(settled.value, 'ate bread (food 10 → 15)');
 
   const nothing = startMacro(t, createWorld({ food: 10, inventory: [item('rotten_flesh')] }), 'eat');

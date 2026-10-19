@@ -33,6 +33,45 @@ const CONFIGS = [
 
 // ---- scenarios: each returns { ok, detail } and must leave the arena reusable ---------------------------------------
 
+/**
+ * Opens the arena's west wall onto an 80-block runway with 2-high walls (so the bot cannot fall off the sky platform);
+ * `floor(far, near)` builds its floor between those x. Runs `run`, then removes the runway and closes the wall.
+ */
+async function withRunway(s, floor, run) {
+  const { cmd } = s;
+  const { cx, y0, cz } = s.arena;
+  const r = ARENA_RADIUS;
+  const far = cx - r - 80;
+  await floor(far, cx - r);
+  await cmd(`/fill ${far} ${y0} ${cz - 5} ${cx - r - 1} ${y0 + 1} ${cz - 5} stone`);
+  await cmd(`/fill ${far} ${y0} ${cz + 5} ${cx - r - 1} ${y0 + 1} ${cz + 5} stone`);
+  await cmd(`/fill ${far} ${y0} ${cz - 4} ${far} ${y0 + 1} ${cz + 4} stone`);
+  await cmd(`/fill ${cx - r} ${y0} ${cz - 4} ${cx - r} ${y0 + 1} ${cz + 4} air`);
+  await cmd(`/tp @s ${cx} ${y0} ${cz}`);
+  await sleep(500);
+  try {
+    return await run();
+  } finally {
+    await cmd(`/tp @s ${cx} ${y0} ${cz}`);
+    await cmd(`/fill ${far} ${y0 - 5} ${cz - 5} ${cx - r - 1} ${y0 + 2} ${cz + 5} air`);
+    await cmd(`/fill ${cx - r} ${y0} ${cz - 4} ${cx - r} ${y0 + 1} ${cz + 4} stone`);
+  }
+}
+
+/**
+ * Night scenarios count the mobs they summon: invisible light blocks 2 above the floor stop natural spawns in the
+ * arena (and the runway), and the phantoms that come to a player who has not slept for days are killed every second
+ * by `clearPhantoms` (M14: both spoiled zombie-wave once). The arena cleanup removes the light blocks.
+ */
+async function lightForNight(s, { runway = false } = {}) {
+  const { cx, y0, cz } = s.arena;
+  const r = ARENA_RADIUS - 1;
+  await s.cmd(`/fill ${cx - r} ${y0 + 2} ${cz - r} ${cx + r} ${y0 + 2} ${cz + r} light[level=15]`);
+  if (runway) await s.cmd(`/fill ${cx - ARENA_RADIUS - 80} ${y0 + 2} ${cz - 4} ${cx - ARENA_RADIUS} ${y0 + 2} ${cz + 4} light[level=15]`);
+}
+
+const clearPhantoms = s => s.cmd('/kill @e[type=phantom,distance=..64]');
+
 const SCENARIOS = {
   /**
    * A guard task against three zombies with AI, at night as zombie waves are in the game; success: all dead within 60 s
@@ -41,6 +80,7 @@ const SCENARIOS = {
    */
   async 'zombie-wave'(s) {
     const { cmd, call, arena } = s;
+    await lightForNight(s);
     await cmd('/time set midnight');
     for (const item of ['iron_sword', 'iron_helmet', 'iron_chestplate', 'iron_leggings', 'iron_boots']) await cmd(`/give @s ${item}`);
     for (const [item, slot] of [['iron_helmet', 'head'], ['iron_chestplate', 'torso'], ['iron_leggings', 'legs'], ['iron_boots', 'feet']]) {
@@ -48,13 +88,14 @@ const SCENARIOS = {
     }
     const id = (await call('start-task', { behavior: 'guard', params: { radius: 9 } })).match(/task (t\d+)/)?.[1];
     const since = await s.cursor();
-    for (const [dx, dz] of [[6, 0], [-6, 3], [0, -6]]) await call('send-chat', { message: `/summon zombie ${arena.cx + dx} ${arena.y0} ${arena.cz + dz} {PersistenceRequired:1b}` });
+    for (const [dx, dz] of [[6, 0], [-6, 3], [0, -6]]) await call('send-chat', { message: `/summon zombie ${arena.cx + dx} ${arena.y0} ${arena.cz + dz} {PersistenceRequired:1b,Tags:["wave"]}` });
     await sleep(600);
     await cmd('/effect give @e[type=zombie,distance=..32] minecraft:fire_resistance 120 0 true');
     const t0 = Date.now();
     let alive = 3;
     while (Date.now() - t0 < 60000) {
-      alive = await s.countMobs('zombie');
+      await clearPhantoms(s);
+      alive = await s.countTagged('wave');
       if (alive === 0 || await s.died(since)) break;
       await sleep(1000);
     }
@@ -62,6 +103,46 @@ const SCENARIOS = {
     await cmd('/time set day');
     const died = await s.died(since);
     return { ok: alive === 0 && !died, detail: `${3 - alive}/3 killed in ${((Date.now() - t0) / 1000).toFixed(0)}s${died ? ', bot died' : ''}, health ${await s.health()}` };
+  },
+
+  /**
+   * Night, no weapon and no armor; two zombies walk up from 6 blocks east, as on the task test's day 3: running works
+   * for a while (the arena opens west onto the 80-block runway), but the zombies keep coming back, and with bare hands
+   * the bot cannot fight two. The arena and the runway stand on 5 blocks of dirt. Success: alive after 45 s (M14:
+   * dig_in).
+   */
+  async 'zombie-chase'(s) {
+    const { cmd, arena } = s;
+    const { cx, y0, cz } = arena;
+    const dirt = async (x1, z1, x2, z2) => {
+      await cmd(`/fill ${x1} ${y0 - 5} ${z1} ${x2} ${y0 - 2} ${z2} dirt`);
+      await cmd(`/fill ${x1} ${y0 - 1} ${z1} ${x2} ${y0 - 1} ${z2} grass_block`);
+    };
+    const r = ARENA_RADIUS - 1;
+    await dirt(cx - r, cz - r, cx + r, cz + r);
+    return withRunway(s, (far, near) => dirt(far, cz - 5, near, cz + 5), async () => {
+      await lightForNight(s, { runway: true });
+      await cmd('/time set midnight');
+      const since = await s.cursor();
+      for (const dz of [-2, 2]) await cmd(`/summon zombie ${cx + 6} ${y0} ${cz + dz} {PersistenceRequired:1b}`);
+      const t0 = Date.now();
+      while (Date.now() - t0 < 45000 && !(await s.died(since))) {
+        await clearPhantoms(s);
+        await sleep(1000);
+      }
+      const died = await s.died(since);
+      const instinct = await s.eventsSince(since, ['instinct']);
+      // What the instinct started and how its actions ended, in order: "flee, flee done, dig_in, dig_in done".
+      const steps = instinct.map(line => {
+        const chose = line.match(/→ (\w+) p=[\d.]+.*→ started/);
+        if (chose) return chose[1];
+        const ended = line.match(/\[instinct\] (\w+) → (timeout|failed|interrupted)?/);
+        return ended ? `${ended[1]} ${ended[2] ?? 'done'}` : null;
+      }).filter(Boolean);
+      await cmd('/kill @e[type=zombie,distance=..120]');
+      await cmd('/time set day');
+      return { ok: !died, detail: `${died ? 'bot died' : 'alive after 45 s'}; instinct: ${steps.join(', ') || 'nothing'}; health ${await s.health()}` };
+    });
   },
 
   /**
@@ -74,22 +155,13 @@ const SCENARIOS = {
     const { call, cmd } = s;
     const { cx, y0, cz } = s.arena;
     const r = ARENA_RADIUS;
-    const far = cx - r - 80;
-    await cmd(`/fill ${far} ${y0 - 1} ${cz - 5} ${cx - r} ${y0 - 1} ${cz + 5} stone`);
-    await cmd(`/fill ${far} ${y0} ${cz - 5} ${cx - r - 1} ${y0 + 1} ${cz - 5} stone`);
-    await cmd(`/fill ${far} ${y0} ${cz + 5} ${cx - r - 1} ${y0 + 1} ${cz + 5} stone`);
-    await cmd(`/fill ${far} ${y0} ${cz - 4} ${far} ${y0 + 1} ${cz + 4} stone`);
-    await cmd(`/fill ${cx - r} ${y0} ${cz - 4} ${cx - r} ${y0 + 1} ${cz + 4} air`);
-    await cmd(`/tp @s ${cx} ${y0} ${cz}`);
-    await sleep(500);
-    try {
-      return await creeperApproach(s);
-    } finally {
-      await cmd(`/kill @e[type=creeper,distance=..120]`);
-      await cmd(`/tp @s ${cx} ${y0} ${cz}`);
-      await cmd(`/fill ${far} ${y0 - 1} ${cz - 5} ${cx - r - 1} ${y0 + 1} ${cz + 5} air`);
-      await cmd(`/fill ${cx - r} ${y0} ${cz - 4} ${cx - r} ${y0 + 1} ${cz + 4} stone`);
-    }
+    return withRunway(s, (far, near) => cmd(`/fill ${far} ${y0 - 1} ${cz - 5} ${near} ${y0 - 1} ${cz + 5} stone`), async () => {
+      try {
+        return await creeperApproach(s);
+      } finally {
+        await cmd(`/kill @e[type=creeper,distance=..120]`);
+      }
+    });
   },
 
   /** Stress test (not required): an ignited creeper 4 blocks away; success: at least 7 blocks away when it explodes, alive. */
@@ -271,6 +343,13 @@ function extend(session) {
   s.died = async since => (await s.eventsSince(since, ['death'])).length > 0;
   s.health = async () => Number((await call('get-observation')).match(/Health: ([\d.]+)/)?.[1] ?? NaN);
   s.food = async () => Number((await call('get-observation')).match(/food: ([\d.]+)/)?.[1] ?? NaN);
+  // Only the mobs a scenario summoned with this tag: zombies that spawn by themselves nearby must not count (M14).
+  s.countTagged = async tag => {
+    const since = await s.cursor();
+    await cmd(`/execute if entity @e[tag=${tag}]`);
+    const answer = (await s.eventsSince(since, ['system'])).find(line => /Test (passed|failed)/.test(line)) ?? '';
+    return Number(answer.match(/count: (\d+)/)?.[1] ?? (answer.includes('failed') ? 0 : NaN));
+  };
   s.countMobs = async type => {
     const text = await call('list-entities', { type, maxDistance: 32 });
     return (text.match(new RegExp(`${type} \\[`, 'g')) ?? []).length;

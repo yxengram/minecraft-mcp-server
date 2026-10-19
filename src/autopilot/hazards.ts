@@ -2,7 +2,8 @@
 // them. No movement, no decisions, no network; cheap enough to run on every tick.
 import type mineflayer from 'mineflayer';
 import { Vec3 } from 'vec3';
-import { isPassable, isWaterLike } from '../tools/terrain-utils.js';
+import { isLiquid, isPassable, isWaterLike } from '../tools/terrain-utils.js';
+import { isBuiltBlock } from '../tools/movement-utils.js';
 
 export type Block = NonNullable<ReturnType<mineflayer.Bot['blockAt']>>;
 
@@ -190,3 +191,115 @@ export function describeSpot(bot: mineflayer.Bot, spot: Vec3): string {
   if (dy) parts.push(`${Math.abs(dy)} ${dy < 0 ? 'down' : 'up'}`);
   return parts.length > 0 ? `${parts.join(', ')} (block(s))` : 'right here';
 }
+
+// ---- digging in (E-016) -------------------------------------------------------------------------------------------
+
+const SIDES: [number, number][] = [[1, 0], [-1, 0], [0, 1], [0, -1]];
+export const DIG_IN_DEPTH = 3;
+// Three blocks have to come out before the hole is closed: longer than this and the mob gets too many hits in.
+export const DIG_IN_MAX_MS = 4000;
+// Blocks worth spending on closing the hole, cheapest first; any other full, non-falling block also works.
+const CHEAP_CAPS = [
+  'dirt', 'cobblestone', 'cobbled_deepslate', 'netherrack', 'stone', 'andesite', 'diorite', 'granite', 'tuff', 'deepslate',
+  'coarse_dirt', 'rooted_dirt', 'sandstone', 'oak_planks', 'spruce_planks', 'birch_planks', 'jungle_planks', 'acacia_planks',
+  'dark_oak_planks', 'mangrove_planks', 'cherry_planks', 'pale_oak_planks', 'bamboo_planks', 'crimson_planks', 'warped_planks'
+];
+// Full blocks that are worth more than a hole cover, or that do something when placed.
+const NOT_CAPS = new Set([
+  'crafting_table', 'furnace', 'blast_furnace', 'smoker', 'chest', 'trapped_chest', 'barrel', 'ender_chest', 'tnt',
+  'bookshelf', 'chiseled_bookshelf', 'jukebox', 'note_block', 'beehive', 'bee_nest', 'spawner', 'beacon', 'lodestone',
+  'respawn_anchor', 'dispenser', 'dropper', 'observer', 'piston', 'sticky_piston', 'target', 'crafter', 'loom',
+  'cartography_table', 'fletching_table', 'smithing_table', 'barrier', 'command_block', 'diamond_block', 'emerald_block',
+  'gold_block', 'iron_block', 'netherite_block', 'lapis_block', 'redstone_block'
+]);
+// What the first block dug out drops, when that is a block that can close the hole (stone-like ones need a pickaxe).
+const DROPS: Record<string, { item: string; pickaxe: boolean }> = {
+  dirt: { item: 'dirt', pickaxe: false }, grass_block: { item: 'dirt', pickaxe: false }, podzol: { item: 'dirt', pickaxe: false },
+  mycelium: { item: 'dirt', pickaxe: false }, coarse_dirt: { item: 'coarse_dirt', pickaxe: false }, rooted_dirt: { item: 'rooted_dirt', pickaxe: false },
+  stone: { item: 'cobblestone', pickaxe: true }, cobblestone: { item: 'cobblestone', pickaxe: true }, deepslate: { item: 'cobbled_deepslate', pickaxe: true },
+  andesite: { item: 'andesite', pickaxe: true }, diorite: { item: 'diorite', pickaxe: true }, granite: { item: 'granite', pickaxe: true },
+  tuff: { item: 'tuff', pickaxe: true }, netherrack: { item: 'netherrack', pickaxe: true }
+};
+
+export interface DigInPlan {
+  /** The three cells under the feet, top first. */
+  cells: Vec3[];
+  /** The cell that closes the hole above the head (the first cell dug). */
+  cap: Vec3;
+  /** A solid block next to the cap cell to place the cover against. */
+  reference: Vec3;
+  /** The block that will close the hole: from the inventory, or the drop of the first cell. */
+  capItem: string;
+  /** Estimated digging time with the best tool. */
+  ms: number;
+}
+
+/** A block with a full collision box that is not a liquid: a wall a mob cannot pass. */
+export function isSolidWall(block: Block | null | undefined): boolean {
+  return Boolean(block && block.boundingBox === 'block' && !isLiquid(block.name) && !isWaterLike(block));
+}
+
+function capFromInventory(bot: mineflayer.Bot): string | null {
+  const blocks = (bot.registry as { blocksByName?: Record<string, { boundingBox?: string }> } | undefined)?.blocksByName ?? {};
+  const usable = bot.inventory.items()
+    .map(item => item.name)
+    .filter(name => blocks[name]?.boundingBox === 'block' && !FALLING_BLOCKS.has(name) && !name.endsWith('concrete_powder') &&
+      !NOT_CAPS.has(name) && !name.endsWith('shulker_box') && !name.endsWith('_ore'));
+  if (usable.length === 0) return null;
+  const rank = (name: string) => (CHEAP_CAPS.includes(name) ? CHEAP_CAPS.indexOf(name) : CHEAP_CAPS.length);
+  return usable.sort((a, b) => rank(a) - rank(b))[0];
+}
+
+function digMs(bot: mineflayer.Bot, block: Block): number {
+  try {
+    const tool = bot.pathfinder?.bestHarvestTool?.(block) ?? null;
+    const effects = (bot.entity as { effects?: unknown }).effects ?? {};
+    return block.digTime(tool?.type ?? null, false, false, false, [], effects as never);
+  } catch {
+    // A dig time that cannot be worked out is not quick enough.
+    return Infinity;
+  }
+}
+
+/**
+ * Whether the bot can dig 3 blocks straight down and close the hole above its head, and how (E-016). Null when the
+ * ground is not safe for it (caves, liquids, falling or built blocks), it would take too long, or nothing can close it.
+ */
+export function digInPlan(bot: mineflayer.Bot): DigInPlan | null {
+  if (!bot.entity?.onGround || headInWater(bot) || inLavaNow(bot)) return null;
+  const feet = bot.entity.position.floored();
+  const cells = Array.from({ length: DIG_IN_DEPTH }, (_, i) => feet.offset(0, -1 - i, 0));
+  let ms = 0;
+  for (const cell of cells) {
+    const block = bot.blockAt(cell);
+    if (!block || !isSolidWall(block) || !block.diggable || FALLING_BLOCKS.has(block.name) || isHazard(block) || isBuiltBlock(block.name)) return null;
+    ms += digMs(bot, block);
+  }
+  if (ms > DIG_IN_MAX_MS) return null;
+  if (!isSolidWall(bot.blockAt(feet.offset(0, -1 - DIG_IN_DEPTH, 0)))) return null;
+  // Where the bot ends up (feet-3 and its head at feet-2) must be walled in on every side.
+  for (const cell of cells.slice(1)) {
+    if (SIDES.some(([dx, dz]) => !isSolidWall(bot.blockAt(cell.offset(dx, 0, dz))))) return null;
+  }
+  const cap = cells[0];
+  const reference = SIDES.map(([dx, dz]) => cap.offset(dx, 0, dz)).find(spot => isSolidWall(bot.blockAt(spot)));
+  if (!reference) return null;
+  let capItem = capFromInventory(bot);
+  if (!capItem) {
+    const drop = DROPS[bot.blockAt(cap)!.name];
+    const hasPickaxe = bot.inventory.items().some(item => item.name.endsWith('_pickaxe'));
+    if (drop && (!drop.pickaxe || hasPickaxe)) capItem = drop.item;
+  }
+  if (!capItem) return null;
+  return { cells, cap, reference, capItem, ms };
+}
+
+/** Whether every cell around the bot's body is a wall: nothing can walk up to, hit or shoot it (E-016). */
+export function enclosedNow(bot: mineflayer.Bot): boolean {
+  if (!bot.entity) return false;
+  const feet = bot.entity.position.floored();
+  const head = feet.offset(0, 1, 0);
+  if (!isSolidWall(bot.blockAt(feet.offset(0, -1, 0))) || !isSolidWall(bot.blockAt(head.offset(0, 1, 0)))) return false;
+  return [feet, head].every(cell => SIDES.every(([dx, dz]) => isSolidWall(bot.blockAt(cell.offset(dx, 0, dz)))));
+}
+

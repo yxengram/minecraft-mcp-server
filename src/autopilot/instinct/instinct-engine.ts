@@ -11,12 +11,14 @@ import type { EventStore } from '../../event-store.js';
 import type { DecisionQuestion, DecisionResult } from '../../decisions/openrouter-client.js';
 import { stopPathfinder } from '../../tools/movement-utils.js';
 import { airLevel, armorPoints } from '../../tools/gamestate-tools.js';
-import { Attention, Cue, DamageInfo, outranks, readCues } from './attention.js';
+import { Attention, Chaser, Cue, DamageInfo, outranks, readCues } from './attention.js';
 import { assessThreats } from '../threats.js';
 import { bestWeaponName } from '../combat.js';
 import { buildMenu, MenuOption, OptionId } from './affordances.js';
 import { MACROS } from './macros.js';
 import { burningNow, headInWater, inLavaNow } from '../hazards.js';
+import { label } from './motor.js';
+import { FLEE_DISTANCE } from './affordances.js';
 
 export interface InstinctEngineOptions {
   bot: mineflayer.Bot;
@@ -55,6 +57,28 @@ interface Running {
   lease: Lease;
   timer: ReturnType<typeof setTimeout>;
   finished: boolean;
+  /** The mobs a flee or run_from_creeper ran from, to tell the model whether they came back (E-016). */
+  watch: { id: number; label: string }[];
+  /** Health when it started and hits taken since: whether the running action is working (E-016). */
+  startHealth: number | null;
+  hits: number;
+}
+
+// The instinct's recent actions and how they turned out, as facts for the model (E-016): whether a mob the bot ran
+// from came back is what tells it that running again will not end the danger.
+const RECENT_ACTION_MS = 120_000;
+const RECENT_ACTION_LIMIT = 5;
+const RUNS = new Set(['flee', 'run_from_creeper']);
+// A mob that came back counts as chasing the bot for this long (the 'chased' cue).
+const CHASE_MS = 30_000;
+
+interface RecentAction {
+  endedAt: number;
+  text: string;
+  watch: { id: number; label: string }[];
+  cameBack: string | null;
+  /** The mob that came back, and when. */
+  chaser: { id: number; label: string; at: number } | null;
 }
 
 class InstinctAbort extends Error {}
@@ -77,7 +101,8 @@ const ACTION_INSTRUCTIONS =
   'costs much health; an instinct action that is already running (instinct_action_running) can be kept with ' +
   '`continue`. ai_player_intent is what the AI player wants right now and outweighs earlier_dangers: if it says the ' +
   'bot is in this situation on purpose, `continue` is right until the bot is about to be badly hurt (for example ' +
-  'very little air left).';
+  'very little air left). recent_instinct_actions tells how the instinct\'s last actions turned out, for example a mob ' +
+  'that came back after the bot ran away from it.';
 const URGENT_INSTRUCTIONS =
   'Is the danger in `danger` serious enough that the bot must act now, even if that interrupts a command the AI ' +
   'player is running? Low air under water, a ceiling over the water, standing in lava, burning, a creeper about to ' +
@@ -139,6 +164,7 @@ export class InstinctEngine {
   // Repeats of the same decision within one danger episode are written once.
   private lastLogged: { episode: number; key: string } | null = null;
   private history: PastDanger[] = [];
+  private recentActions: RecentAction[] = [];
   // The current danger episode: what it is about, how many times the model was asked, and the last action's result.
   private episodeInfo = { kinds: '', rounds: 0, result: null as string | null };
   private readonly onTick = () => this.tick();
@@ -152,6 +178,8 @@ export class InstinctEngine {
     }
     this.damage = null;
     if (this.running) this.finish(this.running, 'interrupted', 'the bot died');
+    // A new life starts somewhere else: mobs the bot ran from before it died are not chasing it now.
+    this.recentActions = [];
     if (this.attention.inEpisode()) this.endEpisode(Date.now(), 'the bot died');
     this.attention.reset();
   };
@@ -172,6 +200,7 @@ export class InstinctEngine {
   /** The latest hit (E-005 onDamage), for the 'attacked' cue. */
   noteDamage(info: DamageInfo): void {
     this.damage = info;
+    if (this.running && info.attackerId !== undefined) this.running.hits++;
   }
 
   start(): void {
@@ -208,6 +237,7 @@ export class InstinctEngine {
     if (this.stopped || !bot.entity || (typeof bot.health === 'number' && bot.health <= 0)) return;
     const startedAt = performance.now();
     try {
+      this.noteReturns(now);
       this.evaluate(now);
     } finally {
       const elapsed = performance.now() - startedAt;
@@ -227,7 +257,7 @@ export class InstinctEngine {
     }
     let cues: Cue[];
     try {
-      cues = readCues(bot, policy, this.damage, now);
+      cues = readCues(bot, policy, this.damage, now, this.chasers(now));
     } catch (error) {
       this.options.log?.('warn', `Instinct could not read the situation: ${error}`);
       return;
@@ -242,6 +272,57 @@ export class InstinctEngine {
     // creeper); a less urgent one does not throw away the answer that is on its way.
     if (!reason || (this.inFlight && !(reason === 'new' && outranks(cues, this.inFlightCues)))) return;
     this.ask(cues, policy, now);
+  }
+
+  /** Marks a recent run whose mob is back within the flee distance (memory reads only, I6). */
+  private noteReturns(now: number): void {
+    const { bot } = this.options;
+    for (const action of this.recentActions) {
+      if (action.cameBack || action.watch.length === 0) continue;
+      for (const mob of action.watch) {
+        const live = bot.entities?.[mob.id];
+        if (!live || live.isValid === false || !live.position) continue;
+        if (live.position.distanceTo(bot.entity.position) <= FLEE_DISTANCE) {
+          action.cameBack = `${mob.label} came within ${FLEE_DISTANCE} blocks again ${Math.round((now - action.endedAt) / 1000)}s later`;
+          action.chaser = { id: mob.id, label: mob.label, at: now };
+          break;
+        }
+      }
+    }
+  }
+
+  /** "flee for 4.0s; hit 2 time(s) and lost 6 health since it started; zombie (id 9) is 0.8 blocks away" (E-016). */
+  private describeRunning(run: Running): string {
+    const { bot } = this.options;
+    const parts = [`${run.option.id} for ${((Date.now() - run.started) / 1000).toFixed(1)}s`];
+    const lost = run.startHealth !== null && typeof bot.health === 'number' ? Math.max(0, run.startHealth - bot.health) : null;
+    parts.push(run.hits > 0
+      ? `hit ${run.hits} time(s)${lost !== null ? ` and lost ${Number(lost.toFixed(1))} health` : ''} since it started`
+      : 'not hit since it started');
+    const about = run.watch.length > 0 ? run.watch.map(mob => mob.id) : run.option.entityId !== undefined ? [run.option.entityId] : [];
+    const nearest = about
+      .map(id => bot.entities?.[id])
+      .filter((mob): mob is NonNullable<typeof mob> => Boolean(mob && mob.isValid !== false && mob.position))
+      .map(mob => ({ mob, distance: mob.position.distanceTo(bot.entity.position) }))
+      .sort((a, b) => a.distance - b.distance)[0];
+    if (nearest) parts.push(`${label(nearest.mob)} is ${nearest.distance.toFixed(1)} blocks away`);
+    return parts.join('; ');
+  }
+
+  /** Mobs that came back after a run in the last 30 s, newest first, for the 'chased' cue. */
+  private chasers(now: number): Chaser[] {
+    return this.recentActions
+      .filter(action => action.chaser && now - action.chaser.at <= CHASE_MS)
+      .reverse()
+      .map(action => ({ id: action.chaser!.id, label: action.chaser!.label, detail: action.cameBack!.replace(`${action.chaser!.label} `, '') }));
+  }
+
+  private recentInstinctActions(): string[] | 'none' {
+    const now = Date.now();
+    this.recentActions = this.recentActions.filter(action => now - action.endedAt <= RECENT_ACTION_MS).slice(-RECENT_ACTION_LIMIT);
+    if (this.recentActions.length === 0) return 'none';
+    return this.recentActions.map(action =>
+      `${Math.round((now - action.endedAt) / 1000)}s ago: ${action.text}${action.cameBack ? `; ${action.cameBack}` : ''}`);
   }
 
   /** Remembers how a danger episode ended, for the next ones. */
@@ -318,10 +399,11 @@ export class InstinctEngine {
       },
       danger: cues.map(cue => cue.detail),
       doing_now: doing.length > 0 ? doing.join('; ') : 'nothing',
-      instinct_action_running: run ? `${run.option.id} for ${((Date.now() - run.started) / 1000).toFixed(1)}s` : 'none',
+      instinct_action_running: run ? this.describeRunning(run) : 'none',
       last_instinct_result: this.lastResult ?? 'none',
       times_asked_about_this_danger: this.episodeInfo.rounds,
       earlier_dangers: this.earlierDangers(),
+      recent_instinct_actions: this.recentInstinctActions(),
       ai_player_intent: policy.instinct.intent || 'none given'
     };
   }
@@ -417,6 +499,13 @@ export class InstinctEngine {
     if (previous) this.finish(previous, 'interrupted', `replaced by ${option.id}`, { keepBody: true, reask: false });
 
     const controller = new AbortController();
+    const watch: { id: number; label: string }[] = [];
+    if (RUNS.has(option.id)) {
+      const mobs = assessThreats(bot, { radius: FLEE_DISTANCE }).hostiles.map(threat => threat.entity);
+      const named = option.entityId === undefined ? undefined : bot.entities?.[option.entityId];
+      if (named && !mobs.some(mob => mob.id === named.id)) mobs.push(named);
+      for (const mob of mobs) watch.push({ id: mob.id, label: label(mob) });
+    }
     const running: Running = {
       option,
       reason,
@@ -425,7 +514,10 @@ export class InstinctEngine {
       controller,
       lease,
       timer: setTimeout(() => this.finish(running, 'timeout', `timed out after ${macro.maxDurationMs / 1000}s`), macro.maxDurationMs),
-      finished: false
+      finished: false,
+      watch,
+      startHealth: typeof bot.health === 'number' ? bot.health : null,
+      hits: 0
     };
     this.running = running;
     macro.run({ bot, signal: controller.signal, target: option.target ?? null, entityId: option.entityId, policy: this.options.getPolicy() })
@@ -466,6 +558,9 @@ export class InstinctEngine {
     if (this.running === run) this.running = null;
     const seconds = ((Date.now() - run.started) / 1000).toFixed(1);
     this.lastResult = `${run.option.id} → ${outcome}: ${text}`;
+    const endedAt = Date.now();
+    this.recentActions.push({ endedAt, text: `${this.lastResult} (${seconds}s)`, watch: run.watch, cameBack: null, chaser: null });
+    this.recentActions = this.recentActions.filter(action => endedAt - action.endedAt <= RECENT_ACTION_MS).slice(-RECENT_ACTION_LIMIT);
     this.episodeInfo.result = this.lastResult;
     this.options.events.addEvent('instinct', `${run.option.id} → ${outcome === 'done' ? text : `${outcome}: ${text}`} (${seconds}s)${held}`);
     if (reask) this.attention.noteActionEnded();

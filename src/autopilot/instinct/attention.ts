@@ -3,7 +3,7 @@
 // tick (invariant I6).
 import type mineflayer from 'mineflayer';
 import type { Policy } from '../policy.js';
-import { burningNow, columnAbove, headInWater, inLavaNow, touchingFire } from '../hazards.js';
+import { burningNow, columnAbove, enclosedNow, headInWater, inLavaNow, touchingFire } from '../hazards.js';
 import { assessThreats, isSwellingCreeper } from '../threats.js';
 import { currentCombatTarget } from '../combat.js';
 import { bestFood, label } from './motor.js';
@@ -12,7 +12,7 @@ import { describeOffset } from '../../tools/terrain-utils.js';
 
 export type CueKind =
   | 'in_lava' | 'trapped_underwater' | 'low_air' | 'on_fire'
-  | 'creeper_swelling' | 'creeper_near' | 'attacked' | 'low_health' | 'hungry';
+  | 'creeper_swelling' | 'creeper_near' | 'attacked' | 'low_health' | 'hungry' | 'chased';
 
 export interface Cue {
   kind: CueKind;
@@ -20,6 +20,14 @@ export interface Cue {
   detail: string;
   /** The entity the cue is about (the creeper, the attacker), for the menu. */
   entityId?: number;
+}
+
+/** A mob the instinct ran from that came back within the flee distance (E-016), as the engine saw it. */
+export interface Chaser {
+  id: number;
+  label: string;
+  /** "came within 16 blocks again 6s later". */
+  detail: string;
 }
 
 /** The most recent hit the bot took (E-005 onDamage). */
@@ -42,7 +50,7 @@ function where(bot: mineflayer.Bot, position: { x: number; z: number }): string 
 }
 
 /** What the bot senses right now that may need a decision. */
-export function readCues(bot: mineflayer.Bot, policy: Policy, damage: DamageInfo | null = null, now = Date.now()): Cue[] {
+export function readCues(bot: mineflayer.Bot, policy: Policy, damage: DamageInfo | null = null, now = Date.now(), chasers: Chaser[] = []): Cue[] {
   const cues: Cue[] = [];
   const air = airLevel(bot);
   const airText = air === undefined ? 'air unknown' : `${air} air left`;
@@ -61,12 +69,14 @@ export function readCues(bot: mineflayer.Bot, policy: Policy, damage: DamageInfo
   if (burningNow(bot)) cues.push({ kind: 'on_fire', detail: touchingFire(bot) ? 'on fire and standing in or next to fire' : 'on fire' });
 
   const { hostileRadius, lowHealth, food } = policy.instinct;
+  // Walled in on every side, no mob can reach the bot: hostiles near and a creeper walking about are no danger (E-016).
+  const enclosed = enclosedNow(bot);
   const threats = assessThreats(bot, { radius: Math.max(hostileRadius, CREEPER_NEAR_RADIUS) });
   const creepers = threats.hostiles.filter(threat => threat.entity.name === 'creeper' && threat.distance <= CREEPER_NEAR_RADIUS);
   const swelling = creepers.find(threat => threat.distance <= CREEPER_SWELL_RADIUS && isSwellingCreeper(bot, threat.entity));
   if (swelling) {
     cues.push({ kind: 'creeper_swelling', entityId: swelling.entity.id, detail: `${label(swelling.entity)} ${swelling.distance.toFixed(1)} blocks ${where(bot, swelling.entity.position)} is about to explode (about 1.5 s fuse)` });
-  } else if (creepers.length > 0) {
+  } else if (creepers.length > 0 && !enclosed) {
     const nearest = creepers[0];
     const state = isSwellingCreeper(bot, nearest.entity) ? 'swelling, but beyond its blast range for now' : 'not swelling yet';
     cues.push({ kind: 'creeper_near', entityId: nearest.entity.id, detail: `${label(nearest.entity)} ${nearest.distance.toFixed(1)} blocks ${where(bot, nearest.entity.position)}, ${state}` });
@@ -82,8 +92,20 @@ export function readCues(bot: mineflayer.Bot, policy: Policy, damage: DamageInfo
   }
 
   const near = threats.hostiles.filter(threat => threat.distance <= hostileRadius);
-  if (health !== undefined && (health < lowHealth || health <= policy.combat.retreatHealth) && near.length > 0) {
+  if (health !== undefined && !enclosed && (health < lowHealth || health <= policy.combat.retreatHealth) && near.length > 0) {
     cues.push({ kind: 'low_health', detail: `health ${health} with ${near.length} hostile(s) within ${hostileRadius} blocks (nearest ${label(near[0].entity)} ${near[0].distance.toFixed(1)} blocks away)` });
+  }
+
+  // Back after the bot ran from it: ask again now, while it is still some way off, not only once it hits (E-016).
+  if (!enclosed && !cues.some(cue => cue.kind === 'attacked')) {
+    for (const chaser of chasers) {
+      const mob = bot.entities?.[chaser.id];
+      if (!mob || mob.isValid === false || !mob.position) continue;
+      const distance = bot.entity.position.distanceTo(mob.position);
+      if (distance > hostileRadius) continue;
+      cues.push({ kind: 'chased', entityId: chaser.id, detail: `${chaser.label} ${distance.toFixed(1)} blocks ${where(bot, mob.position)} is back: the bot ran from it and it ${chaser.detail}` });
+      break;
+    }
   }
 
   if (typeof bot.food === 'number' && bot.food < food) {
@@ -99,7 +121,7 @@ export type AskReason = 'new' | 'reask' | 'action_ended';
 // that supersedes one already in flight (BLUEPRINT F1-h): a lit creeper must not wait behind a hit, but catching fire
 // must not throw away an answer about a lit creeper that is about to arrive. It never decides what to do.
 export const CUE_URGENCY: CueKind[] = [
-  'creeper_swelling', 'in_lava', 'trapped_underwater', 'low_air', 'low_health', 'on_fire', 'attacked', 'creeper_near', 'hungry'
+  'creeper_swelling', 'in_lava', 'trapped_underwater', 'low_air', 'low_health', 'on_fire', 'attacked', 'chased', 'creeper_near', 'hungry'
 ];
 
 /** Whether `cues` holds a kind more urgent than every kind in `inFlight`. */

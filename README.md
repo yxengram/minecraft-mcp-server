@@ -46,7 +46,7 @@ The upstream project is a good, simple bridge: the LLM calls a tool, and the bot
 ### 3. Tested in the game, not only on paper
 - 820 unit tests.
 - A live test that exercises all 63 tools against a real server.
-- A scenario test that compares the bot with and without the Autopilot: zombie waves, creepers, hunger, fire, drowning, diving on purpose, chat.
+- A scenario test that compares the bot with and without the Autopilot: zombie waves, being chased by zombies with bare hands, creepers, hunger, fire, drowning, diving on purpose, chat.
 - A 10-day survival test on Normal difficulty. The bot survived all ten nights without dying and built a 7×7 house with a door, eight glass windows, a bed, a chest, a crafting table, a furnace and torches.
 - A 5-day survival test on Hard difficulty, from an empty inventory. The bot survived all five nights without dying, sleeping in a sealed pit with a bed, and ended with iron armor and 14 cooked meals.
 
@@ -265,9 +265,10 @@ Ask the LLM to do things in Minecraft. A few habits make it much better at the g
 - a creeper within 10 blocks, or swelling within 7;
 - being hit;
 - low health with hostiles near;
-- hunger, when there is safe food.
+- hunger, when there is safe food;
+- a mob it ran from coming back.
 
-**What it can choose:** swim up, swim to an air pocket, dig up, leave the lava, walk into water, step off the fire, run from a creeper, flee, fight, hold its ground, eat, keep going, pause the task, or leave it to the LLM.
+**What it can choose:** swim up, swim to an air pocket, dig up, leave the lava, walk into water, step off the fire, run from a creeper, flee, fight, hold its ground, dig in (dig 3 blocks down and close the hole above its head, offered only where the ground is safe and no mob can reach the bot before the hole is closed), eat, keep going, pause the task, or leave it to the LLM.
 
 **How it asks:** it asks when a cue appears, again every 1.5 s while the cue lasts (hunger every 20 s), and after each action ends. A new, more urgent danger does not wait behind an older question. Every decision and its result is an `instinct` event.
 
