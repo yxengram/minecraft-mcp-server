@@ -30,6 +30,7 @@ import { WaypointStore, defaultWaypointFile } from './waypoint-store.js';
 import { Autopilot } from './autopilot/autopilot.js';
 import { registerTaskTools } from './tools/task-tools.js';
 import { registerPolicyTools } from './tools/policy-tools.js';
+import { registerTradeTools } from './tools/trade-tools.js';
 
 setupStdioFiltering();
 
@@ -94,6 +95,7 @@ async function main() {
   registerEventTools(factory, eventStore, getBot);
   registerContainerTools(factory, getBot);
   registerInteractionTools(factory, getBot);
+  registerTradeTools(factory, getBot);
   registerFollowTools(factory, getBot, getAutopilot);
   registerTaskTools(factory, getAutopilot);
   registerPolicyTools(factory, getAutopilot, eventStore);

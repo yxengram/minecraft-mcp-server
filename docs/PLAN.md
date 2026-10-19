@@ -20,7 +20,7 @@
 | M10 | 文档收尾与长线验收：情景对比、README/AGENTS、10 天生存测试 | M9 | verified（2026-10-19：10 天生存、没有死亡，建成 7×7 木板房；见进展 M10） |
 | M11 | 修复生存测试发现的四个工具问题：寻路器开门且不挖人工方块、place-block 与 fill-region 选择能放置的站位、smelt-item 取出全部产物 | M10；用户指示（2026-10-19） | verified（2026-10-19；见进展 M11） |
 | M12 | 修复困难模式 5 天生存测试发现的五个工具问题：氧气读数、床上方空间、拾取报告、掉落物丢失与工具用坏、熔炉里的旧燃料 | M11；困难模式 5 天生存测试（2026-10-19） | verified（2026-10-19；见进展 M12 实机验收） |
-| M13 | 与村民交易：新增 list-trades 与 trade 工具 | M12；用户指示（2026-10-20） | placeholder |
+| M13 | 与村民交易：新增 list-trades 与 trade 工具 | M12；用户指示（2026-10-20） | verified（2026-10-20；见进展 M13） |
 
 ---
 
@@ -197,7 +197,7 @@
 | 本步不做 | 流浪商人；找村庄；声望、补货、职业方块；与本能或任务系统的结合 |
 | 验收 | 单元测试覆盖 F-043 的成功与失败场景；`npm test`、`npm run lint` 通过；实机（测试世界 63320，`--allow-world-changes`）全量实机测试通过，覆盖 63 个工具 |
 | 恢复 | 契约与实现各一个独立提交，回退实现提交即可 |
-| 状态与证据 | placeholder |
+| 状态与证据 | verified；见进展记录 2026-10-20 M13 实现与实机验收 |
 
 ---
 
@@ -797,3 +797,15 @@
 - 现有 61 个工具不能选择交易项。用户的决定（2026-10-20）：先做 M13 增加交易工具；找村庄、矿石时不用 /locate 等定位命令，靠探索。
 - 契约写入 BLUEPRINT F1-i（F-043、F-044）与 E-015。读 mineflayer 4.39 的 villager.js 与 26.1.2 的 trade_list 数据包定义得知：openVillager 只接受 villager 实体；交易输入在 26.1.2 中是 {itemId, itemCount, components}，Item.fromNotch 能否正确解析需要实机确认。
 - 本条只有文档，没有执行检查。
+
+### 2026-10-20 M13 实现与实机验收：与村民交易
+
+- 按 F-043 实现 `src/tools/trade-tools.ts`（list-trades、trade，都是身体类工具），在 `src/main.ts` 注册，工具总数 61 → 63。新增 `tests/trade-tools.test.ts`（13 个）。
+- 实现中确定的细节：界面打开期间 mineflayer 只更新界面里的背包副本，bot.inventory 要等界面关闭才同步，所以交易前后的数量从交易界面读取（已写入 F-043 的关键约束）。
+- `scripts/test-live-world.mjs` 新增一步 “trading with a villager”：召唤 NoAI 的农民村民，固定一项交易（1 绿宝石 → 6 面包，最多 3 次）。依次检查：list-trades 显示职业和 “1. 1 emerald -> 6 bread; used 0 of 3; you can afford 3 time(s)”；trade 2 次得到 12 个面包；再交易 2 次报 “has only 1 use(s) left”；编号 2 报 “There is no trade 2”；对猪报 “is not a villager”。
+- **实际执行的检查**：
+  - `tsc --noEmit` 通过；`npm run lint` 无错误；`npm test` 861 个测试通过（M12 后为 848）。
+  - `npm run test:live:world -- 63320 --allow-world-changes`：无 key、有 key（只经 OPENROUTER_API_KEY 传入）各一轮，均为 29 步全部 ok，覆盖 63 个工具中的 63 个。由此确认 26.1.2 的交易数据包（输入为 {itemId, itemCount, components}）能被 mineflayer 正确解析，villager_data 中的职业编号能对应到名称。
+  - 没有运行情景测试：M13 没有改动本能、任务与决策。
+- README 中英文版：工具总数改为 63，工具列表加入 list-trades 与 trade。
+- **文件状态**：F-043、F-044、E-015 为 `verified`。

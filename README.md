@@ -2,7 +2,7 @@
 
 **English** | [简体中文](README.zh-CN.md)
 
-A Minecraft bot that a large language model (for example Claude) plays through the [Model Context Protocol](https://modelcontextprotocol.io) (MCP). The bot runs on [Mineflayer](https://github.com/PrismarineJS/mineflayer). The LLM sees the world and acts in it through 61 MCP tools.
+A Minecraft bot that a large language model (for example Claude) plays through the [Model Context Protocol](https://modelcontextprotocol.io) (MCP). The bot runs on [Mineflayer](https://github.com/PrismarineJS/mineflayer). The LLM sees the world and acts in it through 63 MCP tools.
 
 What sets this fork apart is the **Autopilot**: background tasks for long jobs, and an **instinct** that reacts to danger within about a second. The instinct pairs a fast *decision model* with code that carries out the chosen move. Without it, the LLM would have to notice every creeper in time by itself.
 
@@ -19,16 +19,16 @@ This is a fork of **[yuniko-software/minecraft-mcp-server](https://github.com/yu
 |---|---|
 | The MCP server, the bot connection and the first **23 tools** (movement, inventory, blocks, crafting, a furnace, chat, flight, game mode) | Upstream `main` at `240c8ce` (version 2.0.4) |
 | Support for **Minecraft Java 26.1.2** | Upstream [pull request #274](https://github.com/yuniko-software/minecraft-mcp-server/pull/274) (`a9c9111`, by lifat), merged into this fork |
-| Everything else in this README: 38 more tools, perception, the Autopilot, the tests and the design documents | This fork ([yxengram/minecraft-mcp-server](https://github.com/yxengram/minecraft-mcp-server), branch `extra-tools`) |
+| Everything else in this README: 40 more tools, perception, the Autopilot, the tests and the design documents | This fork ([yxengram/minecraft-mcp-server](https://github.com/yxengram/minecraft-mcp-server), branch `extra-tools`) |
 
 The upstream project is a good, simple bridge: the LLM calls a tool, and the bot does one thing. This fork keeps that bridge and every upstream tool, with the same names and arguments. It adds what turned out to be missing when an LLM actually tries to survive in the game.
 
 ## What changed
 
-### 1. More tools, and seeing like a player (23 → 61 tools)
+### 1. More tools, and seeing like a player (23 → 63 tools)
 - **Moving:** follow or flee from an entity, stop, saved waypoints.
 - **Building and mining:** collect a number of blocks, clear or fill a region, dig a tunnel, read and use containers.
-- **Interacting:** right-click blocks and entities, sleep and wake, ride and dismount, attack.
+- **Interacting:** right-click blocks and entities, trade with villagers, sleep and wake, ride and dismount, attack.
 - **Perception:**
   - `get-observation`: one-call snapshot of vitals, effects, armor, time, weather, equipment, inventory and nearby entities.
   - `get-events` and `wait-for-event`: everything a player would notice (damage and its source, hostile sounds, explosions, chat, deaths, pickups). The LLM can wait for something to happen instead of polling.
@@ -45,7 +45,7 @@ The upstream project is a good, simple bridge: the LLM calls a tool, and the bot
 
 ### 3. Tested in the game, not only on paper
 - 820 unit tests.
-- A live test that exercises all 61 tools against a real server.
+- A live test that exercises all 63 tools against a real server.
 - A scenario test that compares the bot with and without the Autopilot: zombie waves, creepers, hunger, fire, drowning, diving on purpose, chat.
 - A 10-day survival test on Normal difficulty. The bot survived all ten nights without dying and built a 7×7 house with a door, eight glass windows, a bed, a chest, a crafting table, a furnace and torches.
 - A 5-day survival test on Hard difficulty, from an empty inventory. The bot survived all five nights without dying, sleeping in a sealed pit with a bed, and ended with iron armor and 14 cooked meals.
@@ -159,7 +159,7 @@ Ask the LLM to do things in Minecraft. A few habits make it much better at the g
 
 ---
 
-## Tools (61)
+## Tools (63)
 
 ### Movement
 - `get-position`: the bot's position
@@ -214,6 +214,8 @@ Ask the LLM to do things in Minecraft. A few habits make it much better at the g
 - `list-players`: players online
 - `attack-entity`: attack an entity in reach
 - `activate-entity`: right-click an entity
+- `list-trades`: what a villager offers, the stock left and how many times you can afford each trade
+- `trade`: trade with a villager by the number list-trades shows
 - `mount-entity`: ride a horse, boat or minecart
 - `dismount`: get off
 - `sleep`: sleep in a bed

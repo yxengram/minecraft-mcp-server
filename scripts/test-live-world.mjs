@@ -372,6 +372,28 @@ try {
     await cmd('/kill @e[type=minecart,distance=..16]');
   });
 
+  await step('trading with a villager', async () => {
+    await call('move-to-position', { x: cx, y: y0, z: cz, range: 0, timeoutMs: 20000 });
+    await cmd('/clear @s emerald');
+    await cmd('/clear @s bread');
+    // A still farmer with one fixed trade: 1 emerald -> 6 bread, 3 uses.
+    await cmd(`/summon villager ${cx - 2} ${y0} ${cz + 2} {NoAI:1b,Invulnerable:1b,VillagerData:{profession:"minecraft:farmer",level:2,type:"minecraft:plains"},Offers:{Recipes:[{buy:{id:"minecraft:emerald",count:1},sell:{id:"minecraft:bread",count:6},maxUses:3,rewardExp:0b}]}}`);
+    await cmd(`/summon pig ${cx + 2} ${y0} ${cz + 2} {NoAI:1b}`);
+    await cmd('/give @s emerald 5');
+    await waitForCount('emerald', count => count >= 5, 'emeralds');
+    await sleep(1000);
+    const list = await call('list-trades');
+    expectIncludes(list, '(farmer)', 'list-trades profession');
+    expectIncludes(list, '1. 1 emerald -> 6 bread; used 0 of 3; you can afford 3 time(s)', 'list-trades');
+    expectIncludes(await call('trade', { index: 1, times: 2 }), 'gave 2 emerald, got 12 bread', 'trade');
+    await waitForCount('bread', count => count >= 12, 'bread from the trade');
+    expectIncludes(await call('trade', { index: 1, times: 2 }, { expectError: true }), 'has only 1 use(s) left', 'trade beyond the stock');
+    expectIncludes(await call('trade', { index: 2 }, { expectError: true }), 'There is no trade 2', 'trade number not listed');
+    expectIncludes(await call('list-trades', { type: 'pig' }, { expectError: true }), 'is not a villager', 'list-trades with a pig');
+    await cmd('/kill @e[type=villager,distance=..16]');
+    await cmd('/kill @e[type=pig,distance=..16]');
+  });
+
   await step('tasks: guard the helper (kills hostiles, spares animals)', async () => {
     // The helper stays in creative mode (set up above), so the zombie cannot hurt it.
     await cmd(`/gamemode creative ${HELPER_NAME}`);

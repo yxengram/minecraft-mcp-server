@@ -2,7 +2,7 @@
 
 [English](README.md) | **简体中文**
 
-这是一个由大语言模型（例如 Claude）通过 [Model Context Protocol](https://modelcontextprotocol.io)（MCP）操控的 Minecraft 机器人。机器人基于 [Mineflayer](https://github.com/PrismarineJS/mineflayer)，LLM 通过 61 个 MCP 工具观察世界并在其中行动。
+这是一个由大语言模型（例如 Claude）通过 [Model Context Protocol](https://modelcontextprotocol.io)（MCP）操控的 Minecraft 机器人。机器人基于 [Mineflayer](https://github.com/PrismarineJS/mineflayer)，LLM 通过 63 个 MCP 工具观察世界并在其中行动。
 
 这个分支的特点是 **Autopilot**：用后台任务处理长时间的工作，再加上一个约一秒内对危险作出反应的**本能**。本能由一个快速的*决策模型*和执行所选动作的代码配合完成。没有它，LLM 就得自己及时注意到每一只苦力怕。
 
@@ -19,16 +19,16 @@
 |---|---|
 | MCP 服务器、机器人连接和最初的 **23 个工具**（移动、背包、方块、合成、熔炉、聊天、飞行、游戏模式） | 上游 `main` 的 `240c8ce`（2.0.4 版） |
 | 对 **Minecraft Java 26.1.2** 的支持 | 上游 [pull request #274](https://github.com/yuniko-software/minecraft-mcp-server/pull/274)（`a9c9111`，作者 lifat），已合入本分支 |
-| 本文介绍的其余全部内容：新增的 38 个工具、感知、Autopilot、测试和设计文档 | 本分支（[yxengram/minecraft-mcp-server](https://github.com/yxengram/minecraft-mcp-server)，分支 `extra-tools`） |
+| 本文介绍的其余全部内容：新增的 40 个工具、感知、Autopilot、测试和设计文档 | 本分支（[yxengram/minecraft-mcp-server](https://github.com/yxengram/minecraft-mcp-server)，分支 `extra-tools`） |
 
 上游项目是一座简洁好用的桥：LLM 调用一个工具，机器人做一件事。本分支保留了这座桥和上游的全部工具，名称和参数都不变；补上的是 LLM 真正尝试在游戏里生存时发现缺少的东西。
 
 ## 做了哪些改变
 
-### 1. 更多工具，像玩家一样看世界（23 → 61 个工具）
+### 1. 更多工具，像玩家一样看世界（23 → 63 个工具）
 - **移动：**跟随或逃离某个实体、停止、保存路点。
 - **建造与采集：**采集指定数量的方块、清空或填充一个区域、挖隧道、查看和使用容器。
-- **交互：**右键方块和实体、睡觉和起床、骑乘和下来、攻击。
+- **交互：**右键方块和实体、与村民交易、睡觉和起床、骑乘和下来、攻击。
 - **感知：**
   - `get-observation`：一次调用得到生命、效果、护甲、时间、天气、装备、背包和附近实体的快照。
   - `get-events` 和 `wait-for-event`：玩家会注意到的一切（受到的伤害及来源、敌对生物的声音、爆炸、聊天、死亡、拾取）。LLM 可以等待某件事发生，而不必轮询。
@@ -45,7 +45,7 @@
 
 ### 3. 在游戏里实测，而不只是纸面
 - 820 个单元测试。
-- 实机测试：在真实服务器上逐一运行全部 61 个工具。
+- 实机测试：在真实服务器上逐一运行全部 63 个工具。
 - 情景测试：比较有无 Autopilot 时机器人的表现，包括僵尸潮、苦力怕、饥饿、着火、溺水、有意潜水和聊天。
 - 普通难度下的 10 天生存测试：机器人度过了全部十个夜晚，没有死亡，并建起一座 7×7 的房子，带门、八扇玻璃窗、床、箱子、工作台、熔炉和火把。
 - 困难难度下的 5 天生存测试，从空背包开始：机器人度过了全部五个夜晚，没有死亡；夜里睡在挖出的封闭坑里的床上，最后穿着铁甲，还剩 14 份熟食。
@@ -159,7 +159,7 @@ API key 只从环境变量 `OPENROUTER_API_KEY` 读取，不要把它写进仓�
 
 ---
 
-## 工具（61 个）
+## 工具（63 个）
 
 ### 移动
 - `get-position`：机器人的位置
@@ -214,6 +214,8 @@ API key 只从环境变量 `OPENROUTER_API_KEY` 读取，不要把它写进仓�
 - `list-players`：在线玩家
 - `attack-entity`：攻击够得着的实体
 - `activate-entity`：右键实体
+- `list-trades`：村民提供的交易、剩余次数，以及每项能负担几次
+- `trade`：按 list-trades 列出的编号与村民交易
 - `mount-entity`：骑马、乘船或矿车
 - `dismount`：下来
 - `sleep`：在床上睡觉
