@@ -48,6 +48,7 @@ The upstream project is a good, simple bridge: the LLM calls a tool, and the bot
 - A live test that exercises all 61 tools against a real server.
 - A scenario test that compares the bot with and without the Autopilot: zombie waves, creepers, hunger, fire, drowning, diving on purpose, chat.
 - A 10-day survival test on Normal difficulty. The bot survived all ten nights without dying and built a 7×7 house with a door, eight glass windows, a bed, a chest, a crafting table, a furnace and torches.
+- A 5-day survival test on Hard difficulty, from an empty inventory. The bot survived all five nights without dying, sleeping in a sealed pit with a bed, and ended with iron armor and 14 cooked meals.
 
 Problems found while playing were fixed and re-tested, for example:
 - the bot drowning under a ceiling;
@@ -187,7 +188,7 @@ Ask the LLM to do things in Minecraft. A few habits make it much better at the g
 - `list-recipes`: recipes for an item
 - `get-recipe`: one recipe in detail
 - `can-craft`: whether an item can be crafted now
-- `craft-item`: craft (places a crafting table from the inventory when one is needed and none is near)
+- `craft-item`: craft an item a number of times (recipes bigger than 2×2 need a crafting table placed within 16 blocks)
 - `smelt-item`: smelt a whole batch in a furnace, blast furnace or smoker
 
 ### Blocks
