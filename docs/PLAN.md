@@ -19,7 +19,7 @@
 | M9 | 战斗、苦力怕、低血量、进食迁入本能；删除反射引擎与 CombatJudge | M8 | verified（2026-10-19；intent-dive 偶尔在 12 格氧时出水，见进展 M9） |
 | M10 | 文档收尾与长线验收：情景对比、README/AGENTS、10 天生存测试 | M9 | verified（2026-10-19：10 天生存、没有死亡，建成 7×7 木板房；见进展 M10） |
 | M11 | 修复生存测试发现的四个工具问题：寻路器开门且不挖人工方块、place-block 与 fill-region 选择能放置的站位、smelt-item 取出全部产物 | M10；用户指示（2026-10-19） | verified（2026-10-19；见进展 M11） |
-| M12 | 修复困难模式 5 天生存测试发现的五个工具问题：氧气读数、床上方空间、拾取报告、掉落物丢失与工具用坏、熔炉里的旧燃料 | M11；困难模式 5 天生存测试（2026-10-19） | implemented-unverified（2026-10-19：单元测试通过，实机检查未做；见进展 M12） |
+| M12 | 修复困难模式 5 天生存测试发现的五个工具问题：氧气读数、床上方空间、拾取报告、掉落物丢失与工具用坏、熔炉里的旧燃料 | M11；困难模式 5 天生存测试（2026-10-19） | verified（2026-10-19；见进展 M12 实机验收） |
 
 ---
 
@@ -182,7 +182,7 @@
 | 本步不做 | 醒来后自动把 bot 移出方块（没有租约；交给 LLM 或本能）；按战利品表推算“应得”的掉落数量（minecraft-data 的 blockLoot 概率不可靠）；寻路器放脚手架方块的行为本身；smelt-item 输入槽被别的物品占用时的处理 |
 | 验收 | 单元测试覆盖每项（契约中的成功与失败场景）；`npm test`、`npm run lint` 通过；实机（测试世界 63320，`--allow-world-changes`）：记录 air_supply 元数据包确认原因；2 格高的坑里睡觉得到警告、醒来有 woke_up 事件；快坏的石镐 gather 铁矿时报告用坏并停止；燃料槽留有木板时用煤 smelt-item 成功；全量实机测试通过 |
 | 恢复 | 契约与实现各一个独立提交，回退实现提交即可 |
-| 状态与证据 | implemented-unverified；见进展记录 2026-10-19 M12 实现 |
+| 状态与证据 | verified；见进展记录 2026-10-19 M12 实现、M12 实机验收 |
 
 ---
 
@@ -753,5 +753,25 @@
   - `tsc --noEmit` 通过；
   - `npm run lint` 无错误；
   - `npm test` 848 个测试通过（M11 后为 820）。新增 tests/m12-fixes.test.ts（28 个），并按新契约调整了 tests/work-behaviors.test.ts、tests/threats.test.ts 的断言与模拟。
-  - 实机检查尚未进行（需要测试世界 63320）。
-- **文件状态**：E-014 的改动为 `implemented-unverified`。
+  - 实机检查见下一条记录。
+- **文件状态**：见下一条记录。
+
+### 2026-10-19 M12 实机验收
+
+- 用户确认测试世界 63320 已开启（开启作弊）。检查用 `npm run build` 之后的构建（提交 f794f16）。
+- **专项检查**（会话临时脚本，测试场地在 y=240，玩家为 MCPWorldTest 与 MCPHelper）：
+  - **氧气**：确认了 E-014 推断的原因。
+    - 场上放 2 条离水的鳕鱼。helper（直接用 mineflayer 连接）进入游戏后，自身元数据第 1 项一直是 undefined，12 秒内没有收到自己的 air 包。
+    - 同期收到鳕鱼的 air 包 521 个，helper 的 bot.oxygenLevel 跟着降到 2。
+    - 同期 MCPWorldTest 的 get-observation 读了 8 次，都是 air 20/20。
+  - **床，1×2 的坑，2 格高，床边没有空位**：
+    - sleep 的结果附上了警告：“… stone at (-841, 242, -208) above it …”。这正是床头那一半上方第 2 格，说明 parseBedMetadata 的头尾方向用对了。
+    - 用 `/time set 1000` 让服务器叫醒 bot 后，bot 站在床上（y 240.6），写出事件 “Woke up with the head inside stone at (-841, 242, -208) …”。
+  - **床，1×3 的坑，2 格高，脚那头有一格空位**（生存测试中坑的形状）：sleep 没有警告；醒来后服务器把 bot 放在空位上（y 240.0），没有 woke_up 事件，与 bedWakeWarning 的判断一致。由此推断，生存测试那次空位里应该放着别的东西（当时没有记录）。
+  - **gather**：给 bot 一把只剩 2 点耐久的石镐和一把木镐，放 4 块铁矿。collect-block 返回 “Mined 2 of 4 iron_ore; picked up 2 item(s) (2 raw_iron); stone_pickaxe broke. Stopped: no tool that can harvest iron_ore (needs one of: copper_pickaxe, stone_pickaxe, iron_pickaxe, diamond_pickaxe, netherite_pickaxe)”，没有用木镐空挖。
+  - **smelt-item**：
+    - 先用 3 块木板烧 1 个粗铁，燃料槽剩下木板；再用煤烧 1 个，返回 “Smelted 1 iron_ingot; took 2 oak_planks out of the fuel slot first”。
+    - 这一项第一次运行失败了，原因在脚本：熔炉放在离 bot 7 格远的地方，而 smelt-item 本来就不会走到熔炉旁。把熔炉放到 bot 身边后重跑，通过。
+- `npm run test:live:world -- 63320 --allow-world-changes`：无 key、有 key（key 只经 OPENROUTER_API_KEY 传入）各一轮，均为 28 步全部 ok，覆盖 61 个工具中的 61 个。
+- 没有运行情景测试（`test:scenarios`）：M12 没有改动本能与决策；氧气读数的变化只在头不在水里时生效，本能的低氧线索本来就要求头在水里。
+- **文件状态**：E-014 的改动为 `verified`。
