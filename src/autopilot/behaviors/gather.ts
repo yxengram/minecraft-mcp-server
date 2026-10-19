@@ -3,11 +3,10 @@ import { z } from 'zod';
 import { Vec3 } from 'vec3';
 import minecraftData from 'minecraft-data';
 import { BehaviorDefinition } from '../task-manager.js';
-import { countItems } from '../../tools/item-utils.js';
 import { digBlockAt, DigResult, digPrecheck, isAir } from '../../tools/block-utils.js';
 import pathfinderPkg from 'mineflayer-pathfinder';
 const { goals } = pathfinderPkg;
-import { collectNearbyDrops, DeadlineReached, interruptible, waitWhilePaused, walkTo } from './actions.js';
+import { collectNearbyDrops, DeadlineReached, describeLoot, interruptible, waitWhilePaused, walkTo, watchLoot } from './actions.js';
 
 export const MAX_GATHER_COUNT = 64;
 export const DEFAULT_GATHER_TIMEOUT_MS = 120000;
@@ -21,7 +20,8 @@ const schema = z.object({
 });
 
 type GatherParams = z.infer<typeof schema>;
-type BlockInfo = { id: number; name: string };
+// harvestTools: item ids of the tools that make the block drop anything (minecraft-data); null when any will do.
+type BlockInfo = { id: number; name: string; harvestTools: number[] | null };
 
 export const gatherBehavior: BehaviorDefinition<GatherParams, BlockInfo> = {
   name: 'gather',
@@ -30,12 +30,14 @@ export const gatherBehavior: BehaviorDefinition<GatherParams, BlockInfo> = {
   summarize: params => `${params.count} ${params.blockType.toLowerCase()} within ${params.maxDistance} blocks`,
   prepare: (bot, params) => {
     const info = minecraftData(bot.version).blocksByName[params.blockType.toLowerCase()];
-    return info ? { value: { id: info.id, name: info.name } } : { error: `Unknown block type: ${params.blockType}` };
+    if (!info) return { error: `Unknown block type: ${params.blockType}` };
+    const tools = info.harvestTools ? Object.keys(info.harvestTools).map(Number) : null;
+    return { value: { id: info.id, name: info.name, harvestTools: tools && tools.length > 0 ? tools : null } };
   },
   async run(ctx) {
     const { bot, params, prepared: blockInfo, setStep, report } = ctx;
     const { count, maxDistance } = params;
-    const itemsBefore = countItems(bot.inventory.items());
+    const loot = watchLoot(bot, { onBroken: tool => report(`${tool} broke`) });
     const skipped = new Set<string>();
     const seen = new Map<string, Vec3>();
     const dugKeys = new Set<string>();
@@ -47,84 +49,96 @@ export const gatherBehavior: BehaviorDefinition<GatherParams, BlockInfo> = {
     let consecutiveFailures = 0;
     let lastError = '';
     let stopReason = '';
+    // Without one of these tools the block drops nothing: stop instead of digging for nothing (E-014).
+    const tools = blockInfo.harvestTools;
+    const hasHarvestTool = () => !tools || bot.inventory.items().some(item => tools.includes(item.type));
+    const toolNames = () => (tools ?? []).map(id => minecraftData(bot.version).items[id]?.name ?? `item ${id}`).join(', ');
 
-    while (mined + clearedOnTheWay() < count) {
-      if (!(await waitWhilePaused(ctx, deadline)) || Date.now() > deadline) {
-        stopReason = 'time limit reached';
-        break;
-      }
-      if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
-        stopReason = `too many failures (last error: ${lastError})`;
-        break;
-      }
-
-      setStep(`looking for ${blockInfo.name}`);
-      const candidates = bot.findBlocks({
-        point: bot.entity.position,
-        matching: blockInfo.id,
-        maxDistance,
-        count: skipped.size + count
-      }).filter(pos => !skipped.has(pos.toString()));
-      candidates.forEach(pos => seen.set(pos.toString(), pos));
-
-      const target = candidates[0];
-      if (!target) {
-        stopReason = `no more ${blockInfo.name} found within ${maxDistance} blocks`;
-        break;
-      }
-
-      setStep(`digging ${blockInfo.name} at (${target.x}, ${target.y}, ${target.z})`);
-      try {
-        // Blocks touching water are left alone: digging them floods the hole or leads the bot under water (M7).
-        let result: DigResult | null = digPrecheck(bot, target, { avoidWater: true });
-        if (!result) {
-          // Walk first under the time limit, so a long walk cannot run past it (collect-block waits on this task).
-          const block = bot.blockAt(target)!;
-          if (!bot.canDigBlock(block) || !bot.canSeeBlock(block)) {
-            setStep(`walking to ${blockInfo.name} at (${target.x}, ${target.y}, ${target.z})`);
-            await walkTo(ctx, new goals.GoalNear(target.x, target.y, target.z, 2), deadline);
-            setStep(`digging ${blockInfo.name} at (${target.x}, ${target.y}, ${target.z})`);
-          }
-          // The pathfinder may break blocks that are in its way, including the target itself.
-          if (isAir(bot.blockAt(target))) {
-            result = 'dug';
-          } else {
-            const attempt = await interruptible(
-              ctx,
-              () => digBlockAt(bot, target, () => ctx.isPaused() || ctx.signal.aborted),
-              // Only stop this task's own dig, never one a manual command has started on another block since.
-              () => {
-                const digging = bot.targetDigBlock?.position;
-                if (!digging || digging.equals(target)) bot.stopDigging?.();
-              }
-            );
-            // Interrupted by the instinct or a command: look for a target again once the task runs again.
-            if (!attempt.done) continue;
-            result = attempt.value;
-          }
+    try {
+      while (mined + clearedOnTheWay() < count) {
+        if (!(await waitWhilePaused(ctx, deadline)) || Date.now() > deadline) {
+          stopReason = 'time limit reached';
+          break;
         }
-        consecutiveFailures = 0;
-        if (result === 'dug') {
-          mined++;
-          dugKeys.add(target.toString());
-          report(`mined ${mined + clearedOnTheWay()} of ${count} ${blockInfo.name}`);
-          setStep('collecting drops');
-          await collectNearbyDrops(ctx, target, deadline);
-        } else {
+        if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
+          stopReason = `too many failures (last error: ${lastError})`;
+          break;
+        }
+
+        setStep(`looking for ${blockInfo.name}`);
+        const candidates = bot.findBlocks({
+          point: bot.entity.position,
+          matching: blockInfo.id,
+          maxDistance,
+          count: skipped.size + count
+        }).filter(pos => !skipped.has(pos.toString()));
+        candidates.forEach(pos => seen.set(pos.toString(), pos));
+
+        const target = candidates[0];
+        if (!target) {
+          stopReason = `no more ${blockInfo.name} found within ${maxDistance} blocks`;
+          break;
+        }
+        if (!hasHarvestTool()) {
+          stopReason = `no tool that can harvest ${blockInfo.name} (needs one of: ${toolNames()})`;
+          break;
+        }
+
+        setStep(`digging ${blockInfo.name} at (${target.x}, ${target.y}, ${target.z})`);
+        try {
+          // Blocks touching water are left alone: digging them floods the hole or leads the bot under water (M7).
+          let result: DigResult | null = digPrecheck(bot, target, { avoidWater: true });
+          if (!result) {
+            // Walk first under the time limit, so a long walk cannot run past it (collect-block waits on this task).
+            const block = bot.blockAt(target)!;
+            if (!bot.canDigBlock(block) || !bot.canSeeBlock(block)) {
+              setStep(`walking to ${blockInfo.name} at (${target.x}, ${target.y}, ${target.z})`);
+              await walkTo(ctx, new goals.GoalNear(target.x, target.y, target.z, 2), deadline);
+              setStep(`digging ${blockInfo.name} at (${target.x}, ${target.y}, ${target.z})`);
+            }
+            // The pathfinder may break blocks that are in its way, including the target itself.
+            if (isAir(bot.blockAt(target))) {
+              result = 'dug';
+            } else {
+              const attempt = await interruptible(
+                ctx,
+                () => digBlockAt(bot, target, () => ctx.isPaused() || ctx.signal.aborted),
+                // Only stop this task's own dig, never one a manual command has started on another block since.
+                () => {
+                  const digging = bot.targetDigBlock?.position;
+                  if (!digging || digging.equals(target)) bot.stopDigging?.();
+                }
+              );
+              // Interrupted by the instinct or a command: look for a target again once the task runs again.
+              if (!attempt.done) continue;
+              result = attempt.value;
+            }
+          }
+          consecutiveFailures = 0;
+          if (result === 'dug') {
+            mined++;
+            dugKeys.add(target.toString());
+            loot.noteSource(target.offset(0.5, 0.5, 0.5));
+            report(`mined ${mined + clearedOnTheWay()} of ${count} ${blockInfo.name}`);
+            setStep('collecting drops');
+            await collectNearbyDrops(ctx, target, deadline);
+          } else {
+            skipped.add(target.toString());
+          }
+        } catch (error) {
+          ctx.signal.throwIfAborted();
+          if (error instanceof DeadlineReached) continue;
+          lastError = error instanceof Error ? error.message : String(error);
+          consecutiveFailures++;
           skipped.add(target.toString());
         }
-      } catch (error) {
-        ctx.signal.throwIfAborted();
-        if (error instanceof DeadlineReached) continue;
-        lastError = error instanceof Error ? error.message : String(error);
-        consecutiveFailures++;
-        skipped.add(target.toString());
       }
+    } finally {
+      loot.stop();
     }
 
     mined += clearedOnTheWay();
-    const gained = countItems(bot.inventory.items()) - itemsBefore;
-    let text = `Mined ${mined} of ${count} ${blockInfo.name}; inventory gained ${gained} item(s)`;
+    let text = `Mined ${mined} of ${count} ${blockInfo.name}; ${describeLoot(loot)}`;
     if (skipped.size > 0) text += `; skipped ${skipped.size} unreachable or unsafe block(s)`;
     if (stopReason) text += `. Stopped: ${stopReason}`;
     if (mined === 0 && stopReason) throw new Error(text);

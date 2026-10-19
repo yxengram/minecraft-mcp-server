@@ -6,6 +6,33 @@ import { ToolFactory } from '../tool-factory.js';
 import { coerceCoordinates } from './coordinate-utils.js';
 
 const FURNACE_BLOCKS = new Set(['furnace', 'blast_furnace', 'smoker']);
+const TAKE_FUEL_TIMEOUT_MS = 5000;
+
+/**
+ * Why the leftover fuel cannot go back to the inventory, or null (E-014). It must fit whole (mineflayer's shift-click
+ * never finishes when only part of it fits), and an empty slot must be left for the smelted output, which mineflayer
+ * would otherwise throw on the ground.
+ */
+function fuelTakeOutProblem(furnace: mineflayer.Furnace, fuel: Item): string | null {
+  const slots = furnace.slots.slice(furnace.inventoryStart, furnace.inventoryEnd);
+  const empty = slots.filter(slot => !slot).length;
+  const stackRoom = slots
+    .filter((slot): slot is Item => Boolean(slot) && slot!.type === fuel.type && slot!.name === fuel.name)
+    .reduce((room, slot) => room + Math.max(0, (slot.stackSize ?? 64) - slot.count), 0);
+  const emptyAfter = stackRoom >= fuel.count ? empty : empty - 1;
+  if (emptyAfter < 0) return 'the inventory is full';
+  if (emptyAfter < 1) return 'no free inventory slot would be left for the output';
+  return null;
+}
+
+function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(message)), ms);
+  });
+  promise.catch(() => {});
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
 
 export function registerFurnaceTools(factory: ToolFactory, getBot: () => mineflayer.Bot): void {
   factory.registerTool(
@@ -86,9 +113,25 @@ export function registerFurnaceTools(factory: ToolFactory, getBot: () => minefla
           return factory.createResponse(`Furnace input slot is occupied by ${existingInput.name}`);
         }
 
+        // Leftover fuel of another kind goes back to the inventory so the requested fuel fits (E-014).
         const existingFuel = furnace.fuelItem();
+        let tookFuel = '';
         if (existingFuel && existingFuel.name !== fuel.name) {
-          return factory.createResponse(`Furnace fuel slot is occupied by ${existingFuel.name}`);
+          // mineflayer updates this item while moving it: keep what the slot held.
+          const { name: oldName, count: oldCount } = existingFuel;
+          try {
+            const problem = fuelTakeOutProblem(furnace, existingFuel);
+            if (problem) throw new Error(problem);
+            await withTimeout(furnace.takeFuel(), TAKE_FUEL_TIMEOUT_MS, 'taking it out did not finish');
+            if (furnace.fuelItem()) throw new Error('the inventory has no room for all of it');
+          } catch (error) {
+            const reason = error instanceof Error ? error.message : String(error);
+            return factory.createResponse(
+              `Furnace fuel slot holds ${oldCount} ${oldName} and it could not be taken out (${reason}): ` +
+              `pass fuelItem '${oldName}' to smelt with it, or make room in the inventory`
+            );
+          }
+          tookFuel = `; took ${oldCount} ${oldName} out of the fuel slot first`;
         }
 
         await furnace.putFuel(fuel.type, fuel.metadata ?? null, resolvedFuelCount);
@@ -96,7 +139,7 @@ export function registerFurnaceTools(factory: ToolFactory, getBot: () => minefla
 
         if (!takeOutput) {
           return factory.createResponse(
-            `Started smelting ${resolvedInputCount} ${input.name} with ${resolvedFuelCount} ${fuel.name}`
+            `Started smelting ${resolvedInputCount} ${input.name} with ${resolvedFuelCount} ${fuel.name}${tookFuel}`
           );
         }
 
@@ -117,10 +160,10 @@ export function registerFurnaceTools(factory: ToolFactory, getBot: () => minefla
           if (taken >= resolvedInputCount || (!furnace.inputItem() && !furnace.outputItem())) break;
         }
         if (taken === 0) {
-          return factory.createResponse(`No output after ${waitMs}ms`);
+          return factory.createResponse(`No output after ${waitMs}ms${tookFuel}`);
         }
         const left = furnace.inputItem()?.count ?? 0;
-        return factory.createResponse(`Smelted ${taken} ${outputName}${left ? `; ${left} ${input.name} still in the furnace (stopped after ${waitMs}ms)` : ''}`);
+        return factory.createResponse(`Smelted ${taken} ${outputName}${left ? `; ${left} ${input.name} still in the furnace (stopped after ${waitMs}ms)` : ''}${tookFuel}`);
       } finally {
         cleanup();
       }

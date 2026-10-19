@@ -4,8 +4,7 @@ import minecraftData from 'minecraft-data';
 import { BehaviorDefinition } from '../task-manager.js';
 import { checkTarget } from '../threats.js';
 import { combatSettings, engage } from '../combat.js';
-import { countItems } from '../../tools/item-utils.js';
-import { collectNearbyDrops, waitWhilePaused } from './actions.js';
+import { collectNearbyDrops, describeLoot, waitWhilePaused, watchLoot } from './actions.js';
 
 export const MAX_HUNT_COUNT = 16;
 // minecraft-data categories of living mobs; items, orbs, projectiles and vehicles cannot be attacked (the server
@@ -39,57 +38,72 @@ export const huntBehavior: BehaviorDefinition<HuntParams, null> = {
     const { bot, params, services, signal, isPaused, setStep, report } = ctx;
     const { animal, count, maxDistance } = params;
     const huntRules = () => ({ ...combatSettings(services.policy).rules, allowTypes: [animal] });
-    const itemsBefore = countItems(bot.inventory.items());
+    const loot = watchLoot(bot, { onBroken: tool => report(`${tool} broke`) });
     const deadline = Date.now() + params.timeoutMs;
     // Targets that got away or could not be reached are not chased again.
     const ignored = new Set<number>();
     let kills = 0;
     let stopReason = '';
 
-    while (kills < count) {
-      if (!(await waitWhilePaused(ctx, deadline)) || Date.now() > deadline) {
-        stopReason = 'time limit reached';
-        break;
-      }
+    try {
+      while (kills < count) {
+        if (!(await waitWhilePaused(ctx, deadline)) || Date.now() > deadline) {
+          stopReason = 'time limit reached';
+          break;
+        }
 
-      setStep(`searching for ${animal}`);
-      const self = bot.entity.position;
-      const target = Object.values(bot.entities ?? {})
-        .filter(entity => entity?.name === animal && entity.position && !ignored.has(entity.id)
-          && entity.position.distanceTo(self) <= maxDistance && checkTarget(bot, entity, huntRules()).legal)
-        .sort((a, b) => a.position.distanceTo(self) - b.position.distanceTo(self))[0];
-      if (!target) {
-        stopReason = `no huntable ${animal} within ${maxDistance} blocks`;
-        break;
-      }
+        setStep(`searching for ${animal}`);
+        const self = bot.entity.position;
+        const target = Object.values(bot.entities ?? {})
+          .filter(entity => entity?.name === animal && entity.position && !ignored.has(entity.id)
+            && entity.position.distanceTo(self) <= maxDistance && checkTarget(bot, entity, huntRules()).legal)
+          .sort((a, b) => a.position.distanceTo(self) - b.position.distanceTo(self))[0];
+        if (!target) {
+          stopReason = `no huntable ${animal} within ${maxDistance} blocks`;
+          break;
+        }
 
-      setStep(`chasing ${animal} (id ${target.id})`);
-      const fight = await engage(bot, target, {
-        signal,
-        shouldStop: () => isPaused() || Date.now() > deadline,
-        maxChase: maxDistance,
-        retreatHealth: combatSettings(services.policy).retreatHealth,
-        rules: huntRules()
-      });
-      signal.throwIfAborted();
+        setStep(`chasing ${animal} (id ${target.id})`);
+        // The drops appear at the death, about 20 ticks before engage sees the body removed.
+        let diedAt: number | undefined;
+        const onDead = (entity: { id: number }) => {
+          if (entity?.id === target.id) diedAt = Date.now();
+        };
+        bot.on?.('entityDead', onDead as never);
+        let fight;
+        try {
+          fight = await engage(bot, target, {
+            signal,
+            shouldStop: () => isPaused() || Date.now() > deadline,
+            maxChase: maxDistance,
+            retreatHealth: combatSettings(services.policy).retreatHealth,
+            rules: huntRules()
+          });
+        } finally {
+          bot.removeListener?.('entityDead', onDead as never);
+        }
+        signal.throwIfAborted();
 
-      if (fight.outcome === 'killed') {
-        kills++;
-        report(`killed ${animal} (${kills} of ${count})`);
-        setStep('collecting drops');
-        await collectNearbyDrops(ctx, fight.lastPosition, deadline);
-      } else if (fight.outcome === 'retreated') {
-        stopReason = 'health too low to keep hunting';
-        break;
-      } else if (fight.outcome !== 'cancelled') {
-        // lost, out_of_range or illegal_target: try another one.
-        ignored.add(target.id);
-        report(`gave up on ${animal} (id ${target.id}): ${fight.detail}`);
+        if (fight.outcome === 'killed') {
+          kills++;
+          loot.noteSource(fight.lastPosition, diedAt);
+          report(`killed ${animal} (${kills} of ${count})`);
+          setStep('collecting drops');
+          await collectNearbyDrops(ctx, fight.lastPosition, deadline);
+        } else if (fight.outcome === 'retreated') {
+          stopReason = 'health too low to keep hunting';
+          break;
+        } else if (fight.outcome !== 'cancelled') {
+          // lost, out_of_range or illegal_target: try another one.
+          ignored.add(target.id);
+          report(`gave up on ${animal} (id ${target.id}): ${fight.detail}`);
+        }
       }
+    } finally {
+      loot.stop();
     }
 
-    const gained = countItems(bot.inventory.items()) - itemsBefore;
-    let text = `Killed ${kills} of ${count} ${animal}; inventory gained ${gained} item(s)`;
+    let text = `Killed ${kills} of ${count} ${animal}; ${describeLoot(loot)}`;
     if (stopReason) text += `. Stopped: ${stopReason}`;
     if (kills === 0) throw new Error(text);
     return text;

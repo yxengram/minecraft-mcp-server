@@ -5,6 +5,7 @@ import { ToolFactory } from '../tool-factory.js';
 import { formatStat } from '../format.js';
 import { describeItem } from './item-utils.js';
 import { describeEntity, findNearbyEntities, formatPosition } from './entity-utils.js';
+import { isWaterLike } from './terrain-utils.js';
 
 const ARMOR_SLOTS = ['head', 'torso', 'legs', 'feet', 'off-hand'] as const;
 
@@ -18,14 +19,20 @@ const AIR_TICKS_PER_BUBBLE = 15;
 const MAX_AIR = 20;
 
 // mineflayer copies the air_supply metadata of every entity into bot.oxygenLevel, so it can show another
-// mob's value. Read the bot's own entity metadata instead (index 1 is the air supply in ticks).
+// mob's value; it is never read here. The bot's own entity metadata (index 1, the air supply in ticks) is only
+// sent once it differs from the default (full air), so a missing value means full air (E-014). Out of the water
+// air only refills, so the reading counts only while the head is in water.
 export function airLevel(bot: mineflayer.Bot): number | undefined {
-  const ticks = (bot.entity?.metadata as unknown[] | undefined)?.[1];
-  if (typeof ticks === 'number') {
-    return Math.max(0, Math.min(MAX_AIR, Math.round(ticks / AIR_TICKS_PER_BUBBLE)));
-  }
-  const level = bot.oxygenLevel;
-  return typeof level === 'number' && level >= 0 && level <= MAX_AIR ? level : undefined;
+  if (!bot.entity) return undefined;
+  const ticks = (bot.entity.metadata as unknown[] | undefined)?.[1];
+  if (typeof ticks !== 'number' || !headInWaterNow(bot)) return MAX_AIR;
+  return Math.max(0, Math.min(MAX_AIR, Math.round(ticks / AIR_TICKS_PER_BUBBLE)));
+}
+
+/** The block above the feet (where the eyes are when standing) is water; true when the world cannot be read. */
+function headInWaterNow(bot: mineflayer.Bot): boolean {
+  if (typeof bot.blockAt !== 'function' || !bot.entity.position) return true;
+  return isWaterLike(bot.blockAt(bot.entity.position.floored().offset(0, 1, 0)));
 }
 
 const TICKS_PER_SECOND = 20;

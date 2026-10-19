@@ -5,6 +5,7 @@ import pathfinderPkg from 'mineflayer-pathfinder';
 const { goals } = pathfinderPkg;
 import { BehaviorDefinition } from '../task-manager.js';
 import { DeadlineReached, resolveWaypoint, ResolvedWaypoint, walkTo } from './actions.js';
+import { bedWakeWarning } from '../../tools/terrain-utils.js';
 
 export const DEFAULT_RETURN_TIMEOUT_MS = 120000;
 const ARRIVE_RANGE = 3;
@@ -86,6 +87,7 @@ export const returnHomeBehavior: BehaviorDefinition<ReturnHomeParams, ResolvedWa
       await bot.wake().catch(() => {});
       signal.throwIfAborted();
     }
-    return `${arrived} and sleeping in the ${bedAt}`;
+    const warning = bedWakeWarning(bot, bed);
+    return `${arrived} and sleeping in the ${bedAt}${warning ? `; ${warning}` : ''}`;
   }
 };

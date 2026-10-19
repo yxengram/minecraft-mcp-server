@@ -19,7 +19,7 @@
 | M9 | 战斗、苦力怕、低血量、进食迁入本能；删除反射引擎与 CombatJudge | M8 | verified（2026-10-19；intent-dive 偶尔在 12 格氧时出水，见进展 M9） |
 | M10 | 文档收尾与长线验收：情景对比、README/AGENTS、10 天生存测试 | M9 | verified（2026-10-19：10 天生存、没有死亡，建成 7×7 木板房；见进展 M10） |
 | M11 | 修复生存测试发现的四个工具问题：寻路器开门且不挖人工方块、place-block 与 fill-region 选择能放置的站位、smelt-item 取出全部产物 | M10；用户指示（2026-10-19） | verified（2026-10-19；见进展 M11） |
-| M12 | 修复困难模式 5 天生存测试发现的五个工具问题：氧气读数、床上方空间、拾取报告、掉落物丢失与工具用坏、熔炉里的旧燃料 | M11；困难模式 5 天生存测试（2026-10-19） | planned（契约 E-014） |
+| M12 | 修复困难模式 5 天生存测试发现的五个工具问题：氧气读数、床上方空间、拾取报告、掉落物丢失与工具用坏、熔炉里的旧燃料 | M11；困难模式 5 天生存测试（2026-10-19） | implemented-unverified（2026-10-19：单元测试通过，实机检查未做；见进展 M12） |
 
 ---
 
@@ -182,7 +182,7 @@
 | 本步不做 | 醒来后自动把 bot 移出方块（没有租约；交给 LLM 或本能）；按战利品表推算“应得”的掉落数量（minecraft-data 的 blockLoot 概率不可靠）；寻路器放脚手架方块的行为本身；smelt-item 输入槽被别的物品占用时的处理 |
 | 验收 | 单元测试覆盖每项（契约中的成功与失败场景）；`npm test`、`npm run lint` 通过；实机（测试世界 63320，`--allow-world-changes`）：记录 air_supply 元数据包确认原因；2 格高的坑里睡觉得到警告、醒来有 woke_up 事件；快坏的石镐 gather 铁矿时报告用坏并停止；燃料槽留有木板时用煤 smelt-item 成功；全量实机测试通过 |
 | 恢复 | 契约与实现各一个独立提交，回退实现提交即可 |
-| 状态与证据 | planned |
+| 状态与证据 | implemented-unverified；见进展记录 2026-10-19 M12 实现 |
 
 ---
 
@@ -728,3 +728,30 @@
   - **床**：醒来时服务器在床边找不到能站的位置，就把玩家放到床上；2 格高的空间里，头会伸进天花板。
   - **燃料**：smelt-item 只在燃料槽为空或同种燃料时才放燃料。
 - 本条只有文档，没有执行检查。
+
+### 2026-10-19 M12 实现：困难模式测试中的五个工具问题
+
+- 按 E-014 实现（契约提交 6dd3c06）。
+- **氧气读数**（gamestate-tools.ts）：airLevel 不再读 bot.oxygenLevel；自身元数据没有氧气值，或头不在水里时，报告满（20）。
+- **床**（terrain-utils.ts、interaction-tools.ts、return-home.ts、bot-connection.ts）：
+  - 新增 bedWakeWarning：床头上方 2 格内有方块、且床边没有能站的空位时，sleep 与 return-home 的结果附上警告；
+  - 新增 headInsideBlock、wokeUpInsideBlock：醒来 1 秒后，眼睛所在格有方块时写 woke_up 事件；wake 工具的结果也会说明。
+- **拾取、留在地上的掉落物、用坏的工具**（actions.ts 的 watchLoot、describeLoot；gather.ts、hunt.ts）：
+  - 结果从 “inventory gained N” 改为 “picked up T item(s) (…)”，按需附上 “left K item(s) on the ground (…)” 与 “<工具> broke”；
+  - gather 没有能采集目标的工具时停止，不再空手挖。
+- **smelt-item**（furnace-tools.ts）：燃料槽里的另一种燃料先取回背包，再放入指定燃料；放不下时说明原因和该传什么。
+- **审查**：用 workflow 做了分区审查（4 个审查代理，各配 1 个反驳代理），确认 7 项，均已修改：
+  1. 部分拾取：服务器的 collect 包带的是拾取前的数量（反驳代理用 javap 反汇编本机 26.1.2 jar 核对过），所以改为等实体消失或数量变化后再结算；
+  2. hunt 的来源时间改用 entityDead 的时刻（尸体约 20 刻后才消失）；
+  3. bot 死亡时清空背包不算工具用坏；
+  4. smelt-item 报告的数量在 takeFuel 之前记下（mineflayer 会改动原物品对象）；
+  5. 旧燃料只能放下一部分时，mineflayer 的 putAway 永远不返回：改为先按格子检查能否整堆放下，并限时 5 秒；
+  6. 取回旧燃料后，要给产物留一个空格（否则产物被扔到地上）；
+  7. 床的测试里，水的碰撞箱改为与 minecraft-data 一致（'empty'），这样才真正测到“液体不能站”。
+- 审查中被反驳、未改的：床边空位的判断只是近似服务器的 findStandUpPosition，碰撞箱判断也不完全等于“会窒息”（玻璃、树叶也算）。这两点只会多报警告，不会漏报，并且符合 E-014。
+- **实际执行的检查**：
+  - `tsc --noEmit` 通过；
+  - `npm run lint` 无错误；
+  - `npm test` 848 个测试通过（M11 后为 820）。新增 tests/m12-fixes.test.ts（28 个），并按新契约调整了 tests/work-behaviors.test.ts、tests/threats.test.ts 的断言与模拟。
+  - 实机检查尚未进行（需要测试世界 63320）。
+- **文件状态**：E-014 的改动为 `implemented-unverified`。

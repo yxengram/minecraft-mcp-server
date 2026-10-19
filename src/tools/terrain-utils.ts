@@ -133,3 +133,76 @@ export function describeOffset(dx: number, dz: number, dy = 0): string {
   }
   return `${blocks(distance)} ${compassDirection(dx, dz)}`;
 }
+
+const EYE_HEIGHT = 1.62;
+const solid = (block: { boundingBox?: string } | null | undefined) => block?.boundingBox === 'block';
+const at = (pos: Vec3) => `(${pos.x}, ${pos.y}, ${pos.z})`;
+
+/**
+ * The block the bot's eyes are in, if it has a collision box: the server deals suffocation (in_wall) damage then.
+ * Null when the eyes are free or the world cannot be read.
+ */
+export function headInsideBlock(bot: mineflayer.Bot): Block | null {
+  if (typeof bot.blockAt !== 'function' || !bot.entity?.position) return null;
+  try {
+    const block = bot.blockAt(bot.entity.position.offset(0, EYE_HEIGHT, 0).floored());
+    return solid(block) ? block : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Why waking up in this bed would put the bot's head in a block (E-014), or null. On waking, the server stands the
+ * player on a free spot next to the bed, or on the bed itself when there is none; the bed is about 0.56 high, so
+ * standing on it needs the 2 blocks above it free. Only a warning: an unreadable world gives null.
+ */
+export function bedWakeWarning(bot: mineflayer.Bot, bed: Block): string | null {
+  try {
+    return bedWakeProblem(bot, bed);
+  } catch {
+    return null;
+  }
+}
+
+function bedWakeProblem(bot: mineflayer.Bot, bed: Block): string | null {
+  if (typeof bot.blockAt !== 'function' || !bed?.position) return null;
+  // mineflayer's bed plugin adds parseBedMetadata; the typings leave it out.
+  const parse = (bot as unknown as { parseBedMetadata?: (block: Block) => { part: boolean; headOffset: Vec3 } }).parseBedMetadata;
+  const meta = typeof parse === 'function' ? parse(bed) : null;
+  const offset = meta?.headOffset ?? new Vec3(0, 0, 0);
+  // The server keeps the head half as the sleeping position.
+  const head = meta?.part ? bed.position : bed.position.plus(offset);
+  const foot = head.minus(offset);
+
+  const blocked = [head.offset(0, 1, 0), head.offset(0, 2, 0)].map(pos => bot.blockAt(pos)).find(solid);
+  if (!blocked) return null;
+
+  const isHalf = (pos: Vec3) => pos.equals(head) || pos.equals(foot);
+  const canStand = (pos: Vec3) => {
+    const cell = bot.blockAt(pos);
+    const above = bot.blockAt(pos.offset(0, 1, 0));
+    return Boolean(cell && above && isPassable(cell) && isPassable(above) && solid(bot.blockAt(pos.offset(0, -1, 0))));
+  };
+  const minX = Math.min(head.x, foot.x) - 1;
+  const maxX = Math.max(head.x, foot.x) + 1;
+  const minZ = Math.min(head.z, foot.z) - 1;
+  const maxZ = Math.max(head.z, foot.z) + 1;
+  for (let x = minX; x <= maxX; x++) {
+    for (let z = minZ; z <= maxZ; z++) {
+      const pos = new Vec3(x, head.y, z);
+      if (!isHalf(pos) && canStand(pos)) return null;
+    }
+  }
+  return `warning: no free 2-block-high spot next to the bed and ${blocked.name} at ${at(blocked.position)} above it: ` +
+    'when the bot wakes up, the server stands it on the bed with its head in that block (suffocation damage); ' +
+    'clear it or make room next to the bed';
+}
+
+/** What the woke_up event and the wake tool say when the bot woke up with its head in a block, or null. */
+export function wokeUpInsideBlock(bot: mineflayer.Bot): string | null {
+  const block = headInsideBlock(bot);
+  return block
+    ? `Woke up with the head inside ${block.name} at ${at(block.position)}: the bot takes suffocation damage until it moves out`
+    : null;
+}

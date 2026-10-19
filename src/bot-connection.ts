@@ -6,10 +6,12 @@ import { formatStat } from './format.js';
 import { componentToText } from './text-component.js';
 import type { MessageKind } from './message-store.js';
 import { serverRegistryName, trackServerRegistries } from './server-registries.js';
-import { describeOffset } from './tools/terrain-utils.js';
+import { describeOffset, wokeUpInsideBlock } from './tools/terrain-utils.js';
 import { configureMovements, installDoorHelper } from './tools/movement-utils.js';
 
 const SUPPORTED_MINECRAFT_VERSION = '26.1.2';
+// The server moves the player off the bed right after waking; look at where the head ended up after that (E-014).
+const WAKE_CHECK_DELAY_MS = 1000;
 
 type ConnectionState = 'connected' | 'connecting' | 'disconnected';
 
@@ -139,6 +141,16 @@ export class BotConnection {
 
     bot.on('death', () => {
       this.callbacks.onEvent?.('death', 'Bot died');
+    });
+
+    // Also when the server wakes the bot in the morning: with no free spot next to the bed it stands the bot on the
+    // bed, where a low ceiling suffocates it. Only reported; moving the bot needs a lease (G1).
+    bot.on('wake', () => {
+      setTimeout(() => {
+        if (this.bot !== bot) return;
+        const problem = wokeUpInsideBlock(bot);
+        if (problem) this.callbacks.onEvent?.('woke_up', problem);
+      }, WAKE_CHECK_DELAY_MS);
     });
 
     trackServerRegistries(bot);

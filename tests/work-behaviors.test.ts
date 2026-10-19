@@ -42,6 +42,7 @@ function fakeTimers() {
 function combatWorld(entities: FakeEntity[], services: BehaviorServices = {}) {
   const self = { id: 1, position: new Vec3(0, 64, 0) } as { id: number; position: Vec3; metadata?: unknown[] };
   const emitter = new EventEmitter();
+  const client = new EventEmitter();
   const inventory: { name: string; count: number; type: number }[] = [];
   const drops: FakeEntity[] = [];
   let nextDropId = 1000;
@@ -58,6 +59,8 @@ function combatWorld(entities: FakeEntity[], services: BehaviorServices = {}) {
       // Walking onto a drop picks it up.
       for (const [id, entity] of Object.entries(bot.entities)) {
         if (entity.name === 'item' && entity.position.distanceTo(self.position) < 1) {
+          // As on the server: the collect packet comes while the item entity still exists (E-014 counts pickups).
+          client.emit('collect', { collectedEntityId: Number(id), collectorEntityId: self.id, pickupItemCount: 1 });
           delete bot.entities[Number(id)];
           inventory.push({ name: 'beef', count: 1, type: 1 });
         }
@@ -89,6 +92,7 @@ function combatWorld(entities: FakeEntity[], services: BehaviorServices = {}) {
     clearControlStates: sinon.stub(),
     equip: sinon.stub().resolves(),
     lookAt: sinon.stub().resolves(),
+    _client: client,
     on: (event: string, listener: (...args: unknown[]) => void) => emitter.on(event, listener),
     removeListener: (event: string, listener: (...args: unknown[]) => void) => emitter.removeListener(event, listener),
     attack: sinon.spy((target: FakeEntity) => {
@@ -97,7 +101,9 @@ function combatWorld(entities: FakeEntity[], services: BehaviorServices = {}) {
       target.isValid = false;
       delete (bot.entities as Record<number, unknown>)[target.id];
       emitter.emit('entityDead', target);
-      const drop: FakeEntity = { id: nextDropId++, name: 'item', type: 'object', position: target.position.floored(), isValid: true };
+      const drop: FakeEntity & { getDroppedItem: () => { name: string; count: number } } = {
+        id: nextDropId++, name: 'item', type: 'object', position: target.position.floored(), isValid: true, getDroppedItem: () => ({ name: 'beef', count: 1 })
+      };
       drops.push(drop);
       (bot.entities as Record<number, FakeEntity>)[drop.id] = drop;
     })
@@ -113,7 +119,7 @@ function combatWorld(entities: FakeEntity[], services: BehaviorServices = {}) {
     services,
     behaviors: [guardBehavior, gatherBehavior, huntBehavior] as never
   });
-  return { bot, self, pathfinder, arbiter, events, tasks, inventory, drops };
+  return { bot, self, pathfinder, arbiter, events, tasks, inventory, drops, emitter, client };
 }
 
 function player(id: number, username: string, x: number, z = 0): FakeEntity {
@@ -375,16 +381,33 @@ function gatherWorld(initial: Record<string, string>) {
       .filter(pos => pos.distanceTo(point) <= maxDistance)
       .sort((a, b) => a.distanceTo(point) - b.distanceTo(point))
       .slice(0, count));
+  const client = new EventEmitter();
+  const emitter = new EventEmitter();
+  Object.assign(bot, {
+    _client: client,
+    on: (event: string, listener: (...args: unknown[]) => void) => emitter.on(event, listener),
+    removeListener: (event: string, listener: (...args: unknown[]) => void) => emitter.removeListener(event, listener)
+  });
+  Object.assign(bot.entity, { id: 1 });
+  let nextDropId = 500;
+  /** The block's item drops and the bot picks it up at once: a collect packet while the item entity exists (E-014). */
+  const pickUp = (name: string, count = 1) => {
+    const id = nextDropId++;
+    (bot.entities as Record<number, unknown>)[id] = { id, name: 'item', position: bot.entity.position.clone(), isValid: true, getDroppedItem: () => ({ name, count }) };
+    client.emit('collect', { collectedEntityId: id, collectorEntityId: 1, pickupItemCount: count });
+    delete (bot.entities as Record<number, unknown>)[id];
+    inventory.push({ name, count, type: data.itemsByName[name]?.id ?? 0 });
+  };
   const mine = async (block: { name: string; position: Vec3 }) => {
     blocks.delete(key(block.position));
-    inventory.push({ name: block.name, count: 1, type: data.itemsByName[block.name]?.id ?? 0 });
+    pickUp(block.name);
   };
   bot.dig.callsFake(mine);
 
   const arbiter = new ActionArbiter({ stopBody: () => { bot.pathfinder.goal = null; } });
   const events = new EventStore();
   const tasks = new TaskManager({ getBot: () => bot as never, getArbiter: () => arbiter, events, behaviors: [gatherBehavior] as never });
-  return { ...world, inventory, arbiter, events, tasks, mine };
+  return { ...world, inventory, arbiter, events, tasks, mine, client, emitter, pickUp, data };
 }
 
 test.serial('gather mines the requested count and reports the collect-block result', async (t) => {
@@ -399,7 +422,7 @@ test.serial('gather mines the requested count and reports the collect-block resu
   const final = await end;
 
   t.is(final.status, 'done');
-  t.is(final.result, 'Mined 3 of 3 oak_log; inventory gained 3 item(s)');
+  t.is(final.result, 'Mined 3 of 3 oak_log; picked up 3 item(s) (3 oak_log)');
   t.is(bot.dig.callCount, 3);
   t.deepEqual(bot.dig.getCalls().map(call => call.args[0].position.toString()).sort(),
     [new Vec3(0, 64, 4), new Vec3(2, 64, 0), new Vec3(3, 64, 0)].map(String).sort(), 'the three nearest logs');
@@ -417,7 +440,7 @@ test.serial('gather skips a block next to lava and counts it as skipped', async 
   const final = await end;
 
   t.is(final.status, 'done');
-  t.regex(final.result ?? '', /^Mined 1 of 1 oak_log; inventory gained 1 item\(s\)/);
+  t.regex(final.result ?? '', /^Mined 1 of 1 oak_log; picked up 1 item\(s\) \(1 oak_log\)/);
   t.regex(final.result ?? '', /skipped 1\b/);
   t.true(bot.dig.getCalls().every(call => !call.args[0].position.equals(new Vec3(1, 64, 0))), 'the log next to lava is never dug');
   t.is(blocks.get('1,64,0'), 'oak_log');
@@ -435,7 +458,7 @@ test.serial('M7: gather skips a block touching water (submerged or an aquifer wa
   const final = await end;
 
   t.is(final.status, 'done');
-  t.regex(final.result ?? '', /^Mined 1 of 1 oak_log; inventory gained 1 item\(s\); skipped 1 unreachable or unsafe block/);
+  t.regex(final.result ?? '', /^Mined 1 of 1 oak_log; picked up 1 item\(s\) \(1 oak_log\); skipped 1 unreachable or unsafe block/);
   t.true(bot.dig.getCalls().every(call => !call.args[0].position.equals(new Vec3(1, 64, 0))), 'the wet log is never dug');
   t.is(blocks.get('1,64,0'), 'oak_log');
   t.false(blocks.has('0,64,4'));
@@ -466,7 +489,7 @@ test.serial('gather finishes with a partial result when it runs out of blocks', 
   const final = await end;
 
   t.is(final.status, 'done');
-  t.regex(final.result ?? '', /^Mined 1 of 3 oak_log; inventory gained 1 item\(s\)/);
+  t.regex(final.result ?? '', /^Mined 1 of 3 oak_log; picked up 1 item\(s\) \(1 oak_log\)/);
 });
 
 test.serial('gather refuses an unknown block type', async (t) => {
@@ -505,7 +528,7 @@ test.serial('a pause while digging is not a failure: the same block is mined aft
   const final = await end;
 
   t.is(final.status, 'done');
-  t.is(final.result, 'Mined 1 of 1 oak_log; inventory gained 1 item(s)');
+  t.is(final.result, 'Mined 1 of 1 oak_log; picked up 1 item(s) (1 oak_log)');
   t.is(bot.dig.callCount, 2);
   t.true(bot.dig.secondCall.args[0].position.equals(new Vec3(2, 64, 0)), 'the interrupted block is mined');
 });
@@ -531,7 +554,7 @@ test.serial('gather stops at its time limit even while paused', async (t) => {
   const final = await end;
 
   t.is(final.status, 'done', 'one log was mined, so the result is partial rather than a failure');
-  t.regex(final.result ?? '', /^Mined 1 of 2 oak_log; inventory gained 1 item\(s\)/);
+  t.regex(final.result ?? '', /^Mined 1 of 2 oak_log; picked up 1 item\(s\) \(1 oak_log\)/);
   t.regex(final.result ?? '', /time limit reached/);
   t.is(bot.dig.callCount, 2);
 });
@@ -587,7 +610,7 @@ test.serial('hunt kills the requested number of cows and walks to their drops', 
   t.truthy(firstDropWalk && firstHitOnSecondCow);
   if (firstDropWalk && firstHitOnSecondCow) t.true(firstDropWalk.calledBefore(firstHitOnSecondCow), 'drops are picked up before the next cow is chased');
   t.true(inventory.some(item => item.name === 'beef'), 'beef was picked up');
-  t.regex(final.result ?? '', /inventory gained 2 item\(s\)/);
+  t.regex(final.result ?? '', /picked up 2 item\(s\) \(2 beef\)/);
   t.true(progressMessages(events).some(message => /^t1 hunt: .*killed cow/.test(message)));
 });
 
@@ -779,7 +802,7 @@ test.serial('gather paused while equipping the tool does not dig until resume-ta
   const final = await end;
 
   t.is(final.status, 'done');
-  t.is(final.result, 'Mined 1 of 1 oak_log; inventory gained 1 item(s)', 'the block was not skipped');
+  t.is(final.result, 'Mined 1 of 1 oak_log; picked up 1 item(s) (1 oak_log)', 'the block was not skipped');
   t.true(bot.dig.calledOnce);
   t.true(bot.dig.firstCall.args[0].position.equals(new Vec3(2, 64, 0)));
   t.is((bot.dig.firstCall.args as unknown[])[1], true, 'dug with a forced look');
@@ -909,7 +932,7 @@ test.serial('gather that mined one block and then cannot reach the next ends don
   t.true(ended, 'the task ended within about 0.5 s of the time limit');
   const final = await end;
   t.is(final.status, 'done', 'one log was mined, so the result is partial rather than a failure');
-  t.regex(final.result ?? '', /^Mined 1 of 2 oak_log; inventory gained 1 item\(s\)/);
+  t.regex(final.result ?? '', /^Mined 1 of 2 oak_log; picked up 1 item\(s\) \(1 oak_log\)/);
   t.regex(final.result ?? '', /time limit reached/);
   t.true(bot.dig.getCalls().every(call => !call.args[0].position.equals(hidden)), 'the unreachable log was never dug');
 });
@@ -927,7 +950,7 @@ test.serial('gather skips a lava-adjacent block it cannot see without walking to
   const final = await end;
 
   t.is(final.status, 'done');
-  t.is(final.result, 'Mined 1 of 1 oak_log; inventory gained 1 item(s); skipped 1 unreachable or unsafe block(s)');
+  t.is(final.result, 'Mined 1 of 1 oak_log; picked up 1 item(s) (1 oak_log); skipped 1 unreachable or unsafe block(s)');
   const walkedToLava = bot.pathfinder.goto.getCalls().some(call => call.args[0].x === 3 && call.args[0].z === 0);
   t.false(walkedToLava, 'no walk toward the lava-adjacent log');
   t.deepEqual(bot.dig.getCalls().map(call => call.args[0].position.toString()), [new Vec3(0, 64, 6).toString()]);
@@ -949,7 +972,7 @@ test.serial('gather counts a target the pathfinder broke while walking to it as 
   const final = await end;
 
   t.is(final.status, 'done');
-  t.is(final.result, 'Mined 1 of 1 oak_log; inventory gained 0 item(s)');
+  t.is(final.result, 'Mined 1 of 1 oak_log; picked up nothing');
   t.is(bot.dig.callCount, 0, 'nothing else is dug');
   t.is(blocks.get('0,64,10'), 'oak_log', 'the second log is left alone');
 });

@@ -7,12 +7,15 @@ import { ToolFactory } from '../tool-factory.js';
 import { coerceCoordinates } from './coordinate-utils.js';
 import { approachEntity, entityLabel, resolveTargetEntity } from './entity-utils.js';
 import { sleep } from './block-utils.js';
+import { bedWakeWarning, wokeUpInsideBlock } from './terrain-utils.js';
 
 const BLOCK_REACH = 4;
 const ENTITY_REACH = 3;
 const DEFAULT_ENTITY_SEARCH = 16;
 const DISMOUNT_WAIT_MS = 600;
 const SNEAK_HOLD_MS = 300;
+// The server moves the player off the bed right after waking; check where the head ended up after that (E-014).
+export const WAKE_SETTLE_MS = 1000;
 
 export function registerInteractionTools(factory: ToolFactory, getBot: () => mineflayer.Bot): void {
   const entityTarget = {
@@ -102,7 +105,8 @@ export function registerInteractionTools(factory: ToolFactory, getBot: () => min
       }
 
       await bot.sleep(bed);
-      return factory.createResponse(`Sleeping in ${bed.name} at (${bed.position.x}, ${bed.position.y}, ${bed.position.z})`);
+      const warning = bedWakeWarning(bot, bed);
+      return factory.createResponse(`Sleeping in ${bed.name} at (${bed.position.x}, ${bed.position.y}, ${bed.position.z})${warning ? `; ${warning}` : ''}`);
     }
   );
 
@@ -116,7 +120,8 @@ export function registerInteractionTools(factory: ToolFactory, getBot: () => min
         return factory.createResponse("Not sleeping");
       }
       await bot.wake();
-      return factory.createResponse("Woke up");
+      await sleep(WAKE_SETTLE_MS);
+      return factory.createResponse(wokeUpInsideBlock(bot) ?? "Woke up");
     }
   );
 

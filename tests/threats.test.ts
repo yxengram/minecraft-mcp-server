@@ -62,6 +62,7 @@ interface WorldOptions {
   /** Raw self metadata: index 0 is the shared flags byte, index 1 the air supply in ticks. */
   selfMetadata?: unknown[];
   lava?: Vec3[];
+  water?: Vec3[];
   health?: number;
   position?: Vec3;
 }
@@ -70,6 +71,7 @@ interface WorldOptions {
 function world(options: WorldOptions = {}) {
   const self = { id: 1, name: 'player', type: 'player', username: 'Bot', position: options.position ?? new Vec3(0.5, 64, 0.5), metadata: options.selfMetadata ?? [] };
   const lava = new Set((options.lava ?? []).map(pos => `${pos.x},${pos.y},${pos.z}`));
+  const water = new Set((options.water ?? []).map(pos => `${pos.x},${pos.y},${pos.z}`));
   const entities: Record<number, unknown> = { 1: self };
   for (const entity of options.entities ?? []) entities[entity.id] = entity;
   const bot = {
@@ -80,7 +82,8 @@ function world(options: WorldOptions = {}) {
     health: options.health,
     blockAt: (pos: Vec3) => {
       const floored = pos.floored();
-      return { name: lava.has(`${floored.x},${floored.y},${floored.z}`) ? 'lava' : 'air', position: floored };
+      const key = `${floored.x},${floored.y},${floored.z}`;
+      return { name: lava.has(key) ? 'lava' : water.has(key) ? 'water' : 'air', position: floored };
     }
   };
   return { bot: bot as never, self };
@@ -199,18 +202,25 @@ test('standing in lava is detected at the feet or at the head', (t) => {
   t.false(assessThreats(world().bot).inLava);
 });
 
+// E-014: the air supply counts only while the head is in water; out of it air only refills.
+const HEAD_IN_WATER = [new Vec3(0, 65, 0)];
+
 test('low air is detected at 6 bubbles or fewer', (t) => {
-  const drowning = assessThreats(world({ selfMetadata: [0, 60] }).bot);
+  const drowning = assessThreats(world({ selfMetadata: [0, 60], water: HEAD_IN_WATER }).bot);
   t.is(drowning.air, 4);
   t.true(drowning.lowAir);
 
-  const boundary = assessThreats(world({ selfMetadata: [0, 90] }).bot);
+  const boundary = assessThreats(world({ selfMetadata: [0, 90], water: HEAD_IN_WATER }).bot);
   t.is(boundary.air, 6);
   t.true(boundary.lowAir, '6 bubbles is low (the default instinct.lowAir is 6: air <= 6 is a cue)');
 
-  const full = assessThreats(world({ selfMetadata: [0, 300] }).bot);
+  const full = assessThreats(world({ selfMetadata: [0, 300], water: HEAD_IN_WATER }).bot);
   t.is(full.air, 20);
   t.false(full.lowAir);
+
+  const outOfWater = assessThreats(world({ selfMetadata: [0, 60] }).bot);
+  t.is(outOfWater.air, 20, 'a low reading with the head out of water is not low air (E-014)');
+  t.false(outOfWater.lowAir);
 });
 
 test('low health is detected below the default threshold of 6', (t) => {
