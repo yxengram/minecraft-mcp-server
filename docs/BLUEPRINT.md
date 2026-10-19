@@ -273,6 +273,7 @@ src/main.ts（现有，改动）--创建并注册--> src/autopilot/autopilot.ts�
 │   │   └── decision-hooks.ts         新增：聊天筛选、聊天命令与战斗判断
 │   ├── tools/
 │   │   ├── task-tools.ts             新增：start-task / list-tasks / resume-task / cancel-task
+│   │   ├── trade-tools.ts            新增（M13，F-043）：list-trades / trade
 │   │   ├── policy-tools.ts           新增：get-policy / set-policy（M3）/ list-decision-models（M4）
 │   │   ├── follow-tools.ts           现有，改动
 │   │   ├── position-tools.ts         现有，改动
@@ -296,6 +297,7 @@ src/main.ts（现有，改动）--创建并注册--> src/autopilot/autopilot.ts�
 │   ├── openrouter-client.test.ts     新增
 │   ├── decision-hooks.test.ts        新增
 │   ├── task-tools.test.ts            新增
+│   ├── trade-tools.test.ts           新增（M13，F-044）
 │   └── policy-tools.test.ts          新增
 └── scripts/
     ├── test-live-world.mjs           现有，改动：覆盖 7 个新工具，改用共享场地辅助
@@ -1065,6 +1067,40 @@ src/main.ts（现有，改动）--创建并注册--> src/autopilot/autopilot.ts�
   - test-scenarios.mjs：llm-only 改为关闭本能；新增 intent-dive 情景。
   - README、AGENTS。
 
+### F1-i 与村民交易（M13）
+
+> 用户指示（2026-10-20）：任务式生存测试的第 1 项是“和村民进行一次交易”，而现有工具只能用 activate-entity 打开交易界面，不能选择交易项。用户选择先做 M13 增加交易工具（改变公开工具接口，已获授权）。
+
+### F-043 · `src/tools/trade-tools.ts`
+
+- **模块**：M-MCP 工具接口　**里程碑**：M13　**状态**：placeholder　**设计**：已确定：工具名、参数、编号从 1 开始；输出措辞暂定
+- **职责**：注册 2 个 MCP 工具，都是身体类工具（注册时 body: true，持有动作租约）：
+  - **list-trades**（entityId?、type? 默认 villager、maxDistance? 默认 16）：找到目标村民，走到 3 格内，打开交易界面，等待交易列表（最多 5 秒），关闭界面，返回每一项交易。
+  - **trade**（与 list-trades 相同的目标参数，加 index：list-trades 列出的编号，从 1 开始；times? 默认 1，1～64）：打开交易界面，检查后用 mineflayer 的 villager.trade 交易 times 次，关闭界面，返回实际给出和得到的物品。
+- **不负责**：不找村庄；不管理声望或补货；不支持流浪商人（mineflayer 的 openVillager 只接受 villager 实体）；不用绿宝石以外的方式压价。
+- **输入**：来源：LLM（经 MCP）。 限制：entityId 优先；否则按 type 找 maxDistance 内最近的实体（resolveTargetEntity）；目标不是 villager 时返回错误 “<实体> is not a villager: only villagers can be traded with (wandering traders are not supported)”。
+- **输出**：去向：LLM（工具返回文字）。
+  - list-trades：第一行 “<村民描述> (id N) offers K trade(s):”，村民描述含职业（villager_data 元数据中的 profession，读不到时只写 villager）；随后每项一行：“i. <a> <物品1>[ + <b> <物品2>] -> <c> <产物>; used u of m”，用完时附 “; out of stock”，并附 “; you can afford x time(s)”（按背包数量与实际价格 realPrice 计算，最多算到剩余次数）。没有交易时为 “<村民描述> (id N) offers no trades (unemployed villagers and nitwits do not trade)”。
+  - trade：成功时 “Traded n time(s) with <村民描述> (id N): gave <物品摘要>, got <物品摘要>”，物品摘要按交易前后的背包差计算（“5 emerald”“1 emerald, 3 book”）。
+- **失败处理**（都返回错误，界面先关闭）：
+  - 找不到目标、目标不是村民：见上。
+  - 5 秒内没有收到交易列表（例如幼年村民、界面被拒）：“<村民描述> did not open a trade window within 5s (baby villagers cannot trade)”。
+  - index 超出范围：“There is no trade <i>: <村民描述> offers K trade(s); use list-trades”。
+  - 交易已用完或剩余次数不足：“Trade <i> is out of stock (used u of m)” / “Trade <i> has only r use(s) left (used u of m)”。
+  - 背包不够：“Not enough for <times> trade(s): needs <a×times> <物品1>[ and <b×times> <物品2>], you have <h1>[ and <h2>]”（不打开交易就能算出时不调用 villager.trade）。
+  - villager.trade 抛错或超时（10 秒 + 每次 2 秒）：“Trade failed after n of times trade(s): <原因>”，n 按背包中产物的增加计算。
+- **使用方**：src/main.ts（注册）；tests/trade-tools.test.ts；scripts/test-live-world.mjs。
+- **依赖**：src/tool-factory.ts、src/tools/entity-utils.ts（resolveTargetEntity、approachEntity、entityLabel、metadataValue）；mineflayer 的 openVillager、villager.trade。
+- **状态与副作用**：状态：无。 副作用：bot 走近村民、交易改变背包。
+- **关键约束**：界面无论成败都关闭；交易前在工具里检查库存与背包，不依赖 mineflayer 的 assert 报错文字。
+- **验收**：tests/trade-tools.test.ts；实机：召唤一个不动的农民村民并给它固定的交易，list-trades 列出交易与可负担次数，trade 2 次后背包中绿宝石减少、面包增加，超过库存时报 out of stock，对猪报 not a villager。
+
+### F-044 · `tests/trade-tools.test.ts`
+
+- **模块**：测试　**里程碑**：M13　**状态**：placeholder
+- **职责**：用模拟的村民窗口验证 F-043 的正常与失败场景：列出交易（含第二件输入、用完、可负担次数）、没有交易、不是村民、超时、编号越界、用完、次数不足、背包不够（不调用 villager.trade）、成功时按背包差报告、交易中途失败时报告完成次数、各种情况下界面都关闭。
+- **依赖**：ava、sinon、tests/_helpers.ts。
+
 ## F2. 现有文件的计划改动
 
 以下文件已经实现并通过测试，**不创建占位副本**。实现对应里程碑时在原文件上修改，并保持现有测试通过。
@@ -1084,6 +1120,7 @@ src/main.ts（现有，改动）--创建并注册--> src/autopilot/autopilot.ts�
 | E-011 | M8 对已实现的 Autopilot 文件的改动（设计 v0.4） | M8 | **F-001 autopilot.ts**：在反射引擎之后创建并启动 InstinctEngine，断线时停止。顺序保证反射引擎的死亡回调先运行：任务先被取消，再中止宏。**F-003 task-manager.ts**：新增 hold(reason)，把当前任务挂起为“等待 resume-task 或 cancel-task”（与手动暂停相同）；任务正在驾驶时先停止身体。**F-013 reflexes.ts**：删除 hazard-escape，危险判断移到 F-036。**F-014 policy.ts**：删除 reflexes.hazardEscape；新增 instinct 分组：enabled（默认 true）、intent（默认空，最长 300 字符，只有来源 llm 能设置）、lowAir（6）、reaskMs（1500）、actThreshold、urgentThreshold、maxCallsPerMinute（90）。**F-015 openrouter-client.ts**：decide 增加 budget 选项；'instinct' 使用独立的调用窗口与 instinct.maxCallsPerMinute，其他调用仍用 decisions.maxCallsPerMinute。**F-018 policy-tools.ts**：get-policy 显示本能状态（在线或离线及原因、正在执行的动作、最近一次判断）；set-policy 接受 instinct 分组。**F-032 test-scenarios.mjs**：配置改为 llm-only（反射与本能都关闭）、no-key（无 key：反射开启，本能离线）、instinct（有 key，必须全部通过）；加入 drowning-pocket、drowning-dig | 其余反射（creeper-evade、low-health-retreat、self-defense、auto-eat）、任务、聊天筛选与聊天命令、CombatJudge 在 M8 不变 | tests/instinct.test.ts；现有测试按新字段调整；情景测试 |
 | E-013 | M11：生存测试中发现的四个工具问题（BLUEPRINT H 节） | M11 | **`src/bot-connection.ts`、`src/tools/movement-utils.ts`**：寻路器把木门（开着或关着）都视为可通过（adjustDoor），由“门助手”（installDoorHelper，挂在 physicsTick 上）在 bot 寻路走到门前时打开正前方关着的木门，并在 bot 离开 2.2 格后关上它自己打开的门；不碰铁门，也不关别人开着的门。实测发现 mineflayer-pathfinder 自身只把栅栏门当作可打开的，自带的“使用方块”步骤在开门后不会继续前进，所以门由门助手负责；canOpenDoors = true 仍保留给栅栏门。寻路器的路径后处理会把路径点放到所在方块碰撞形状的顶上（门的顶上），bot 因此想爬到门上而卡住；门助手因此给 bot.blockAt 包一层：调用时不传 false 的（寻路器、工具）看到的木门没有碰撞形状，物理引擎用 bot.blockAt(pos, false) 读取，仍与真实的门碰撞。新增“建筑方块”排除规则，寻路时不挖木板、玻璃、门、活板门、床、箱子、工作台、熔炉、火把、栅栏、楼梯、台阶、羊毛、砖等人工方块（exclusionAreasBreak 返回 100，等于不可破坏），自然方块照常可挖。**`src/tools/block-utils.ts`**：新增 approachToPlace(bot, pos)：用 mineflayer-pathfinder 的 GoalPlaceBlock（距离 4.5 内、对参照面有视线、不站在目标格里）走到能放的位置；placeBlockAt（fill-region 使用）改用它，走过去最多 20 秒（到不了就算这一块失败，不再让工具挂住），不再用“目标 3 格内”（屋顶边角从室内够不到 3 格，寻路器只好上屋顶或挖墙）。**`src/tools/block-tools.ts`**：place-block 看不到参照方块时也改用 approachToPlace，不再走到“参照方块 2 格内”（可能正是目标格）；放置前再次检查 bot 不在目标格及其上一格。**`src/tools/furnace-tools.ts`**：smelt-item 在 takeOutput 为 true 时，持续取出产物，直到投入的物品全部烧完或超时；返回取出的总数与剩余数量；熔炉里已有的同种产物也一并取出；默认超时改为每件 10 秒再加 10 秒；物品名优先精确匹配（"sand" 不再选中 red_sand） | 工具名、参数与成功时文字的开头不变；dig-block 等手动工具仍可挖任何方块（排除规则只作用于寻路器） | 单元测试；实机：bot 从屋外经门进屋、从屋内出门，墙不被挖；室内 fill-region 补屋顶边角，bot 不上屋顶；place-block 填一格深的坑；smelt-item 一次烧出 4 块玻璃 |
 | E-014 | M12：困难模式 5 天生存测试中发现的五个工具问题（BLUEPRINT H 节） | M12 | **1. 氧气读数（`src/tools/gamestate-tools.ts` 的 airLevel）**：原因（读代码推断，M12 实机验收时已确认）：服务器只发送与默认值不同的实体数据，满氧 300 是默认值，所以 bot 进入游戏后没在水下待过时，自身元数据第 1 项从未收到；airLevel 这时退回读 bot.oxygenLevel，而 mineflayer 把**任何**实体的 air_supply 都写进 bot.oxygenLevel（离水的鱼、在水下的生物、潜水的玩家），读数就跟着别的实体从 20 降到 0、再跳回。改为：不再读 bot.oxygenLevel；自身元数据没有氧气值时报告满（20）；头部所在格（脚所在格往上一格）不是水时也报告满（在空气中氧气只会回升，几秒内回满），作为对其他未知原因的防护；只有头在水里时才报告元数据中的值。没有 bot.entity 时仍返回 undefined。本能的 low_air / trapped_underwater 线索本来就先要求头在水里，判断不变。**2. 床上方的空间（`src/tools/terrain-utils.ts`、`src/tools/interaction-tools.ts`、`src/autopilot/behaviors/return-home.ts`、`src/bot-connection.ts`）**：醒来时服务器先在床边找能站的位置，找不到就把玩家放到床上；床高约 0.56 格，站在床上时头顶约在床面以上 2.36 格。新增 bedWakeWarning(bot, bed)：床头那一半（服务器记录的睡眠位置）上方第 1、2 格中有带碰撞箱的方块，且床两半周围同一高度的 10 格中没有能站的空位（本格与上一格无碰撞箱、不是液体，下一格有碰撞箱）时，返回警告 “warning: no free 2-block-high spot next to the bed and <方块> at (x, y, z) above it: when the bot wakes up, the server stands it on the bed with its head in that block (suffocation damage); clear it or make room next to the bed”，否则返回 null；读不到世界时也返回 null（只是警告，不能让睡觉失败）。sleep 工具与 return-home 在成功入睡时把警告附在结果后（不阻止睡觉）。新增 headInsideBlock(bot)：bot 眼睛所在的格（脚的高度 + 1.62，与服务器判断 in_wall 的位置相同）中带碰撞箱的方块，没有时为 null。BotConnection 在 bot 醒来（mineflayer 的 wake 事件，包括早上服务器自动叫醒）1 秒后检查一次，头在方块里时写事件 woke_up：“Woke up with the head inside <方块> at (x, y, z): the bot takes suffocation damage until it moves out”；只报告，不移动 bot（没有租约，G1）。wake 工具醒来后同样等 1 秒再检查，头在方块里时结果为同一段说明（以 “Woke up” 开头），否则仍为 “Woke up”。**3、4. hunt / gather 的结果（`src/autopilot/behaviors/actions.ts`、`gather.ts`、`hunt.ts`）**：actions.ts 新增 watchLoot(bot)，在任务运行期间记录：(a) 拾取：bot._client 的 collect 数据包中拾取者是 bot、被拾取实体是掉落物（name 为 item）的，按物品名累计；经验球、箭等不计。实际拾取数量不取包中的 pickupItemCount：服务器在背包只装得下一部分时也发送拾取前的整堆数量（审查时用 javap 反汇编本机 26.1.2 客户端 jar 中的内置服务器代码核对：ItemEntity.playerTouch 发送拾取前的数量），所以先记下拾取前的数量，等掉落物实体消失（entityGone）或数量变少（itemDrop）后再结算，没装下的部分仍算在地上；任务结束时仍未结算的按整堆计；(b) 留在地上的掉落物：noteSource(pos, at) 标记一个来源（gather 挖掉的目标方块，时间为现在；hunt 击杀的位置，时间为 entityDead 事件的时刻，因为尸体约 20 刻后才消失，服务器卡顿时更久），与来源时间相差 2 秒内、2 格内出现的掉落物（mineflayer 的 itemDrop 事件，保留最近 10 秒）被记下，任务结束时仍然存在、没被 bot 拾取的，按物品名统计；(c) 用坏的工具：背包某格原来是剩余耐久不超过 2 的工具，随后变空或变成别的物品，且 250 毫秒后背包里找不到同名、损耗不低于它的工具（排除换手、挪格）时，记为用坏，并用 report 记下进度 “<工具> broke”（task_progress 事件按现有节流规则发出）；bot 死亡（death 事件或血量为 0）时清空背包不算用坏；任务结束时还在等待的检查立即完成。gather 与 hunt 的结果把 “inventory gained Y item(s)”（背包净变化，寻路器放下的脚手架方块会使它为负）**替换**为 “picked up T item(s) (n1 名称1, n2 名称2, …)”（按数量从多到少；一个都没有时为 “picked up nothing”），其后按需附上 “; left K item(s) on the ground (…)” 与 “; <工具> broke”。gather 另外在挖每个目标前检查：方块需要特定工具才有掉落（minecraft-data 的 harvestTools）而背包里没有任何一件时，停止任务，停止原因 “no tool that can harvest <方块> (needs one of: <工具列表>)”，不再空手挖（13 块铁矿只得 10 个粗铁很可能就是石镐用坏后继续挖、没有掉落）。本条替换 F-007、F-008 的结果文字、G3 的 task_done 示例，以及 E-004 中 “collect-block 返回文字格式不变” 的说法：collect-block 的结果随 gather 改变，开头 “Mined X of N <方块>” 不变。**5. smelt-item 的燃料（`src/tools/furnace-tools.ts`）**：燃料槽里已有另一种燃料时，先用 furnace.takeFuel 把它取回背包，再放入指定的燃料，结果后附上 “; took N <旧燃料> out of the fuel slot first”（N 为取出前槽里的数量）。取出前先按背包格子检查：旧燃料必须能整堆放下（并入未满的同种堆，或占一个空格；mineflayer 的 shift 点击在只放得下一部分时永远不返回），放下后还要留一个空格给产物（否则 mineflayer 取产物时会把它扔到地上）；取出最多等 5 秒。做不到时返回 “Furnace fuel slot holds N <旧燃料> and it could not be taken out (<原因>): pass fuelItem '<旧燃料>' to smelt with it, or make room in the inventory”，原因为 the inventory is full、no free inventory slot would be left for the output、taking it out did not finish 或 the inventory has no room for all of it。输入槽被别的物品占用时的处理不变 | 工具名与参数不变；collect-block、gather、hunt 结果开头的 “Mined X of N” / “Killed X of N” 不变；sleep、wake、smelt-item 成功时文字的开头不变；本能的低氧判断条件不变；dig-block 等手动工具不检查采集工具 | 单元测试（新增 tests/m12-fixes.test.ts，并按新契约调整现有断言）；实机：记录 bot 自身与其他实体的 air_supply 元数据包，确认原因；在 2 格高的坑里放床，sleep 给出警告，醒来写 woke_up 事件；用快坏的石镐 gather 铁矿，结果说明石镐用坏并以“没有能采集的工具”停止；燃料槽留有木板时用煤 smelt-item 成功 |
+| E-015 | M13：交易工具接入 | M13 | **`src/main.ts`**：注册 trade-tools（F-043），工具总数 61 → 63。**`scripts/test-live-world.mjs`**：新增一步“trading”：在场地召唤 NoAI 的农民村民，固定一项交易（1 绿宝石 → 6 面包，最多 3 次）；给 bot 绿宝石；依次检查 list-trades、trade 2 次、trade 超过库存、对非村民调用；清理村民；覆盖检查随之包括 2 个新工具。**`README.md`、`README.zh-CN.md`**：工具总数与工具列表加入 list-trades、trade | 其余工具注册与实机步骤不变 | 实机：`npm run test:live:world -- 63320 --allow-world-changes` 全部通过，覆盖 63 个工具 |
 
 ## G. 跨模块约定
 
