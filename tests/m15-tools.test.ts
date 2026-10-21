@@ -106,24 +106,37 @@ test('dig-block refuses a block no tool in the inventory can harvest, with the t
   const result = await getTool('dig-block')!.execute({ x: 1, y: 64, z: 0 });
 
   t.true(result.isError);
-  t.is(result.content[0].text, 'Failed: Cannot harvest obsidian with what the bot has (needs diamond_pickaxe or netherite_pickaxe): digging would take about 250 s and drop nothing');
+  t.is(result.content[0].text, 'Failed: Cannot harvest obsidian with what the bot has (needs diamond_pickaxe or netherite_pickaxe): digging would take about 250 s and drop nothing; to dig it out of the way anyway, use clear-region');
   t.false(bot.dig.called);
   t.false(bot.pathfinder.goto.called, 'it does not walk there either');
 });
 
-test('dig-block keeps the held item when no tool digs faster than a bare hand', async (t) => {
+test('dig-block digs bare-handed when no tool is faster: no random item, and no wear on a held sword', async (t) => {
   const litter = { name: 'leaf_litter', type: 7, count: 3 };
   const grass = { name: 'grass_block', position: new Vec3(1, 64, 0), diggable: true, harvestTools: undefined, digTime: () => 900 };
-  const bot = {
-    entity: { position: new Vec3(0, 64, 0), effects: {} }, heldItem: { name: 'iron_sword', type: 5 },
-    inventory: { items: () => [litter] }, blockAt: () => grass, canDigBlock: () => true, canSeeBlock: () => true,
-    pathfinder: { goto: sinon.stub().resolves(), bestHarvestTool: () => litter }, equip: sinon.stub().resolves(), dig: sinon.stub().resolves()
+  const make = (held: { name: string; type: number } | null) => {
+    const bot = {
+      entity: { position: new Vec3(0, 64, 0), effects: {} }, heldItem: held,
+      registry: { items: { 5: { name: 'iron_sword', maxDurability: 250 }, 8: { name: 'cobblestone' } } },
+      inventory: { items: () => [litter] }, blockAt: () => grass, canDigBlock: () => true, canSeeBlock: () => true,
+      pathfinder: { goto: sinon.stub().resolves(), bestHarvestTool: () => litter }, equip: sinon.stub().resolves(), dig: sinon.stub().resolves(),
+      unequip: sinon.stub().callsFake(async () => { bot.heldItem = null; })
+    };
+    return bot;
   };
-  const { factory, getTool } = createFactory();
-  registerBlockTools(factory, asBot(bot));
-  const text = (await getTool('dig-block')!.execute({ x: 1, y: 64, z: 0 })).content[0].text;
-  t.false(bot.equip.called);
-  t.regex(text, /with iron_sword/);
+  const sword = make({ name: 'iron_sword', type: 5 });
+  const first = createFactory();
+  registerBlockTools(first.factory, asBot(sword));
+  const text = (await first.getTool('dig-block')!.execute({ x: 1, y: 64, z: 0 })).content[0].text;
+  t.false(sword.equip.called, 'leaf_litter is not "the best tool"');
+  t.true(sword.unequip.calledOnceWith('hand'), 'the sword is put away rather than worn down');
+  t.regex(text, /with bare hand/);
+
+  const stone = make({ name: 'cobblestone', type: 8 });
+  const second = createFactory();
+  registerBlockTools(second.factory, asBot(stone));
+  t.regex((await second.getTool('dig-block')!.execute({ x: 1, y: 64, z: 0 })).content[0].text, /with cobblestone/, 'an item that does not wear stays in the hand');
+  t.false(stone.unequip.called);
 });
 
 test('missingHarvestTools and digSeconds: null when any tool will do or the bot has one; null for an unknown time', (t) => {

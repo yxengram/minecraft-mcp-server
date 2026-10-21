@@ -122,7 +122,8 @@ export function registerBlockTools(factory: ToolFactory, getBot: () => mineflaye
       if (missing) {
         const seconds = digSeconds(bot, block, null);
         const time = seconds === null ? '' : `: digging would take about ${Math.ceil(seconds)} s and drop nothing`;
-        return factory.createErrorResponse(`Cannot harvest ${block.name} with what the bot has (needs ${missing.join(' or ')})${time}`);
+        // clear-region still digs it, e.g. to get out of a hole without a pickaxe.
+        return factory.createErrorResponse(`Cannot harvest ${block.name} with what the bot has (needs ${missing.join(' or ')})${time}; to dig it out of the way anyway, use clear-region`);
       }
 
       if (!bot.canDigBlock(block) || !bot.canSeeBlock(block)) {

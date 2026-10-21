@@ -39,10 +39,16 @@ export async function equipBestTool(bot: mineflayer.Bot, block: Block): Promise<
   const tool = bot.pathfinder?.bestHarvestTool?.(block);
   if (!tool) return;
   // When nothing digs faster than a bare hand, bestHarvestTool still returns the first item: dig-block then said it
-  // dug grass "with leaf_litter" (E-017 live test). Keep what is in the hand instead.
+  // dug grass "with leaf_litter" (E-017 live test). Dig bare-handed instead, but keep a held item that does not wear:
+  // a sword left in the hand after a fight would lose durability on every block.
   const withTool = digSeconds(bot, block, tool.type);
   const bare = digSeconds(bot, block, null);
-  if (withTool !== null && bare !== null && withTool >= bare) return;
+  if (withTool !== null && bare !== null && withTool >= bare) {
+    const held = bot.heldItem;
+    const items = (bot.registry as { items?: Record<number, { maxDurability?: number }> } | undefined)?.items;
+    if (held && items?.[held.type]?.maxDurability) await bot.unequip('hand');
+    return;
+  }
   await bot.equip(tool, 'hand');
 }
 
