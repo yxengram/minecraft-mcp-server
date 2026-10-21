@@ -226,7 +226,7 @@
 | 范围 | BLUEPRINT E-017：interaction-tools.ts、tool-factory.ts、block-tools.ts、block-utils.ts、bot-connection.ts、position-tools.ts、waypoint-tools.ts、movement-utils.ts、threats.ts、entity-utils.ts、vision-tools.ts、gamestate-tools.ts、test-live-world.mjs、README（中英文）及测试 |
 | 本步不做 | 远处地面高度、长距离探索（任务式测试的问题，另行规划）；拾取掉落物的工具；门框的角块提示；hot_floor 的本能线索；下界专门的本能选项（恶魂火球等）；末地；重生锚 |
 | 验收 | 单元测试覆盖 E-017 的成功与失败场景；`npm test`、`npm run lint` 通过；全量实机测试新增步骤（水桶、黑曜石、传送门往返、下界的 sleep）无 key 与有 key 各一轮通过，覆盖 64 个工具；情景测试 instinct 配置下必选情景全部通过；重复一次下界实测，不用命令补黑曜石 |
-| 恢复 | 契约与实现各一个独立提交，回退实现提交即可 |
+| 恢复 | 契约（284c99e、1f6851a）与实现（60e7101，验收中的修正 a1ba150、f6fc1a2）分开提交；回退这三个实现提交即可 |
 | 状态与证据 | verified；见进展记录 2026-10-22 M15 规划、M15 实现与实机验收 |
 
 ---
@@ -1068,5 +1068,9 @@
   - 寻路器让 bot 走进岩浆烧死；本能只当作“着火”，选了 ask_llm。
   - 死后 move-to-position 用新的身体继续走，并报告成功、不提死亡。
   - 恶魂会炸掉下界那边的门。
+- **审查后的最后修改**：
+  - 没有更快的工具时空手挖，手里会磨损的物品（例如剑）先收起；
+  - dig-block 拒绝时提示可以用 clear-region；
+  - 同步 F-010（猪灵的规则）与 G6（新增 I7：岩浆桶的两条限制）。
+  - 改后检查：`npm test` 903 个通过，lint 无错误；全量实机测试无 key、有 key 各一轮 32 步全部 ok，覆盖 64 个工具；zombie-chase 与 drowning-dig 情景在 instinct 配置下通过。
 - **文件状态**：E-017 为 `verified`。
-
