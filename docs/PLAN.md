@@ -22,7 +22,7 @@
 | M12 | 修复困难模式 5 天生存测试发现的五个工具问题：氧气读数、床上方空间、拾取报告、掉落物丢失与工具用坏、熔炉里的旧燃料 | M11；困难模式 5 天生存测试（2026-10-19） | verified（2026-10-19；见进展 M12 实机验收） |
 | M13 | 与村民交易：新增 list-trades 与 trade 工具 | M12；用户指示（2026-10-20） | verified（2026-10-20；见进展 M13） |
 | M14 | 本能在近死时的选择：新的小脑宏 dig_in、被围住时的线索与菜单、最近本能动作的结果（含“又追回来”）、进食核对 | M13；任务式生存测试第 2～3 天的 3 次死亡；用户指示（2026-10-20） | verified（2026-10-20；见进展 M14 实机验收） |
-| M15 | 下界传送门实测中发现的工具问题：新工具 use-item（桶）、activate-block 的结果、dig-block 选工具、需要铁镐以上的方块的挖掘时间、走进传送门、sleep 检查维度、寻路器避开岩浆块、猪灵等生物的分类、下界的时间行 | M14；下界传送门实测（2026-10-22）；用户指示（2026-10-22，只规划） | placeholder（2026-10-22 规划；Q14 已由用户确认，等待实现指令） |
+| M15 | 下界传送门实测中发现的工具问题：新工具 use-item（桶）、activate-block 的结果、dig-block 选工具、需要铁镐以上的方块的挖掘时间、走进传送门、sleep 检查维度、寻路器避开岩浆块、猪灵等生物的分类、下界的时间行 | M14；下界传送门实测（2026-10-22）；用户指示（2026-10-22，只规划） | verified（2026-10-22；见进展 M15 实现与实机验收） |
 
 ---
 
@@ -227,7 +227,7 @@
 | 本步不做 | 远处地面高度、长距离探索（任务式测试的问题，另行规划）；拾取掉落物的工具；门框的角块提示；hot_floor 的本能线索；下界专门的本能选项（恶魂火球等）；末地；重生锚 |
 | 验收 | 单元测试覆盖 E-017 的成功与失败场景；`npm test`、`npm run lint` 通过；全量实机测试新增步骤（水桶、黑曜石、传送门往返、下界的 sleep）无 key 与有 key 各一轮通过，覆盖 64 个工具；情景测试 instinct 配置下必选情景全部通过；重复一次下界实测，不用命令补黑曜石 |
 | 恢复 | 契约与实现各一个独立提交，回退实现提交即可 |
-| 状态与证据 | placeholder（2026-10-22 规划，见进展记录 M15 规划） |
+| 状态与证据 | verified；见进展记录 2026-10-22 M15 规划、M15 实现与实机验收 |
 
 ---
 
@@ -1013,3 +1013,60 @@
 - 据此写出契约 BLUEPRINT E-017 与里程碑 M15，新增未决问题 Q14（use-item 与猪灵分类两项公开变化，实现前需用户确认）。
 - 本条的检查只有读代码和离线计算挖掘时间；没有修改代码。
 - 用户确认 Q14（2026-10-22）：接受新工具 use-item 与岩浆桶的两条限制，接受猪灵在 bot 没穿金盔甲时算 hostile。暂不实现，等待实现指令。
+
+### 2026-10-22 M15 实现与实机验收
+
+- 用户指示（2026-10-22）：实现 M15。按 E-017 实现：
+  - interaction-tools.ts：use-item、activate-block 的变化检查、sleep 的维度检查；
+  - block-tools.ts、block-utils.ts：dig-block 选工具与拒绝、fixToolMaterials、missingHarvestTools、digSeconds；
+  - bot-connection.ts：第一次 spawn 时调用 fixToolMaterials；
+  - movement-utils.ts、position-tools.ts、waypoint-tools.ts：传送门报告、岩浆块的寻路代价；
+  - threats.ts、entity-utils.ts、vision-tools.ts：猪灵按金盔甲分类、实体标签；
+  - gamestate-tools.ts：下界的时间行；
+  - tool-factory.ts（use-item 是身体类工具）、test-live-world.mjs（3 个新步骤）、README（中英文）。
+- **实现中改变的细节**都写入了 E-017。主要来自实机：
+  1. 倒水后空桶比方块更新先到，所以 use-item 等目标格本身变化；
+  2. 往岩浆湖里倒水时找不到参照面，改为可以把岩浆格当目标，并用射线选择看得见的面；
+  3. 打火石点火时被点的方块不变，activate-block 改为也看上方一格和耐久；
+  4. 刚传送过来约 15 秒内服务器不再传送，碰到门会重新计时，所以报告里加了提示，实机测试在门外等 17 秒；
+  5. 下界读到的时间是 0，时间行不再写数字；
+  6. 没有更快的工具时不换工具（实机报告过用 leaf_litter 挖草）。
+- **实际执行的检查**：
+  - `tsc --noEmit` 通过；`npm run lint` 无错误；`npm test` 903 个测试通过（M14 后为 879）。
+    - 新增 tests/m15-tools.test.ts（24 个）。
+    - 按新契约调整了 dig-block、move-to-position 的说明文字断言，以及“猪灵默认是中立”的断言（改为只在穿金盔甲时中立）。
+  - 离线：minecraft-data 26.1.2 中有 108 个方块的 material 是 incorrect_for_wooden_tool。修正后黑曜石用钻石镐 9.4 秒、铁矿用石镐 1.15 秒（修正前 75 秒、4.55 秒）。
+  - `npm run test:live:world -- 63320 --allow-world-changes`：
+    - 最终代码下无 key、有 key 各一轮，均为 32 步全部 ok，覆盖 64 个工具中的 64 个。
+    - 之前几轮的失败都已修复：倒水报告、水留在场地上冲走后续步骤、传送门冷却、恶魂炸掉下界的门。
+- `npm run test:scenarios -- 63320 --allow-world-changes`（有 key，1 轮，三种配置）：
+    - **最终代码下 instinct 配置的 10 个情景全部通过**，包括 creeper-ambush 压力测试（7.0 格）、zombie-chase（flee → 追回来 → dig_in）、intent-dive（10 格氧时才行动）。
+    - 之前的一轮（实现提交 60e7101，最后三处修改之前）只有 intent-dive 失败：在 12 格氧时出水，略早于“低于 12”的标准。这是 M9 起记录的偶发偏差。单独重跑 3 轮都在 6 格氧时才行动，全部通过。
+- **重做下界实测**（ClaudeBot，有 key，测试世界 63320）：
+  - **准备（命令）**：bot 中途死亡、装备丢失后，按第一次的工具包补给（钻石镐、打火石、空桶、水桶、熟牛肉、金头盔、铁靴子，另加 32 个圆石）。没有给黑曜石。
+  - **找岩浆**：find-blocks 找到地下岩浆湖（y=62 一层岩浆源，上方是洞穴空气）。
+  - **死亡 1 次**：用 move-to-position 去湖边时掉进岩浆烧死，见下面的观察。
+  - **浇黑曜石**：
+    - 复活后补给，bot 被同一个命令带到湖边。
+    - use-item 把水倒进一格岩浆：报告 “the cell is now water”，四周 3 格岩浆变成黑曜石。
+    - 再往新黑曜石上方倒水，水铺满湖面，约 26 格岩浆变成黑曜石。
+    - 两次都用 use-item 空桶把水收回，报告 “holding water_bucket”。
+    - 这一步之前，use-item 第一次被拒绝（找不到参照面），修复后重启服务器再做。
+  - **采黑曜石**：collect-block 黑曜石 10 块，用时 102 秒，跳过 5 块挨着岩浆的。
+  - **搭门、点火、进门**：
+    - 回地面，在第一扇门西边搭第二扇门（10 块浇出的黑曜石，上角用圆石）。
+    - 用打火石 activate-block 点火，结果没有误报“没有变化”。
+    - goto-waypoint 走进门，报告 “went through the portal: now in the_nether at (-169, 68, -52)”。新门连到了第一次的下界门。
+  - **在下界**：
+    - sleep 被拒绝（“Beds explode in the_nether”）；时间行正确。
+    - 戴金头盔时，list-entities 把猪灵和僵尸猪灵标为 [neutral]，岩浆怪标为 [hostile]。
+    - collect-block 采石英 2 块，用时 9 秒。
+  - **返回**：出门等 17 秒后，goto-waypoint 报告 “went through the portal: now in overworld at (-1348, 69, -428)”。
+  - **夜里**：一只僵尸打 bot（手里没有剑）。本能 flee → chased → dig_in，封口后一直等到天亮。
+  - 结束时 bot 在第二扇门旁，血量 19.8，已断开。
+- **新观察到的问题**（写入 BLUEPRINT H 节，没有修复）：
+  - 寻路器让 bot 走进岩浆烧死；本能只当作“着火”，选了 ask_llm。
+  - 死后 move-to-position 用新的身体继续走，并报告成功、不提死亡。
+  - 恶魂会炸掉下界那边的门。
+- **文件状态**：E-017 为 `verified`。
+
