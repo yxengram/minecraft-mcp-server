@@ -37,9 +37,13 @@ export function hasAdjacentLava(bot: mineflayer.Bot, pos: Vec3): boolean {
 
 export async function equipBestTool(bot: mineflayer.Bot, block: Block): Promise<void> {
   const tool = bot.pathfinder?.bestHarvestTool?.(block);
-  if (tool) {
-    await bot.equip(tool, 'hand');
-  }
+  if (!tool) return;
+  // When nothing digs faster than a bare hand, bestHarvestTool still returns the first item: dig-block then said it
+  // dug grass "with leaf_litter" (E-017 live test). Keep what is in the hand instead.
+  const withTool = digSeconds(bot, block, tool.type);
+  const bare = digSeconds(bot, block, null);
+  if (withTool !== null && bare !== null && withTool >= bare) return;
+  await bot.equip(tool, 'hand');
 }
 
 type BlockData = { material?: string };

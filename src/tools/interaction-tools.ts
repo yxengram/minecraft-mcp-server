@@ -82,14 +82,23 @@ function aimFor(bot: mineflayer.Bot, pos: Vec3, item: string): { point: Vec3 } |
     return { point: center };
   }
   if (isFilledBucket(item)) {
-    // The liquid goes into the cell next to the face the ray hits, as with place-block's reference faces.
+    // The server's ray passes through liquids and the liquid goes into the cell next to the face it hits, so aim at a
+    // face of a solid neighbour that the eyes can see. A lava cell can be the target: water poured there turns the
+    // lava around it into obsidian (the live test's lava lake had nothing solid next to the air above it).
     if (block && !isAir(block) && block.boundingBox !== 'empty') return { error: `Cannot empty ${item} into ${at}: it holds ${block.name}` };
+    const eyes = bot.entity.position.offset(0, EYE_HEIGHT, 0);
+    const raycast = (bot.world as { raycast?: (from: Vec3, dir: Vec3, range: number) => { position: Vec3 } | null } | undefined)?.raycast;
     for (const offset of FACES) {
       const reference = bot.blockAt(pos.plus(offset)) as BlockLike | null;
       if (!reference || isAir(reference) || reference.boundingBox === 'empty') continue;
-      return { point: center.plus(offset.scaled(0.5)) };
+      const point = center.plus(offset.scaled(0.5));
+      if (raycast) {
+        const hit = raycast.call(bot.world, eyes, point.minus(eyes).normalize(), PLACE_REACH + 1);
+        if (!hit || !hit.position.equals(pos.plus(offset))) continue;
+      }
+      return { point };
     }
-    return { error: `Cannot empty ${item} into ${at}: no solid block next to it to aim at` };
+    return { error: `Cannot empty ${item} into ${at}: no solid block next to it that the bot can aim at from here` };
   }
   return { point: center };
 }

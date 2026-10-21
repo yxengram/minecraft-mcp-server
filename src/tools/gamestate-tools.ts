@@ -22,11 +22,12 @@ const MAX_AIR = 20;
 // mob's value; it is never read here. The bot's own entity metadata (index 1, the air supply in ticks) is only
 // sent once it differs from the default (full air), so a missing value means full air (E-014). Out of the water
 // air only refills, so the reading counts only while the head is in water.
-// Day, night and weather only exist in the overworld; in the Nether the line said "day, weather: rain" (E-017).
+// Day, night and weather only exist in the overworld; in the Nether the line said "day, weather: rain" (E-017). The
+// time the bot reads there is not the overworld's (it showed 0 ticks), so none is given.
 function timeLine(bot: mineflayer.Bot): string {
   const dimension = bot.game?.dimension?.replace(/^minecraft:/, '');
   if (dimension && dimension !== 'overworld') {
-    return `Time: no day or night in ${dimension} (overworld time ${bot.time.timeOfDay} ticks); weather: none here`;
+    return `Time: no day or night in ${dimension}; weather: none here`;
   }
   return `Time: ${bot.time.timeOfDay} ticks (${bot.time.isDay ? 'day' : 'night'}), weather: ${describeWeather(bot)}`;
 }

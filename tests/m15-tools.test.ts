@@ -111,6 +111,21 @@ test('dig-block refuses a block no tool in the inventory can harvest, with the t
   t.false(bot.pathfinder.goto.called, 'it does not walk there either');
 });
 
+test('dig-block keeps the held item when no tool digs faster than a bare hand', async (t) => {
+  const litter = { name: 'leaf_litter', type: 7, count: 3 };
+  const grass = { name: 'grass_block', position: new Vec3(1, 64, 0), diggable: true, harvestTools: undefined, digTime: () => 900 };
+  const bot = {
+    entity: { position: new Vec3(0, 64, 0), effects: {} }, heldItem: { name: 'iron_sword', type: 5 },
+    inventory: { items: () => [litter] }, blockAt: () => grass, canDigBlock: () => true, canSeeBlock: () => true,
+    pathfinder: { goto: sinon.stub().resolves(), bestHarvestTool: () => litter }, equip: sinon.stub().resolves(), dig: sinon.stub().resolves()
+  };
+  const { factory, getTool } = createFactory();
+  registerBlockTools(factory, asBot(bot));
+  const text = (await getTool('dig-block')!.execute({ x: 1, y: 64, z: 0 })).content[0].text;
+  t.false(bot.equip.called);
+  t.regex(text, /with iron_sword/);
+});
+
 test('missingHarvestTools and digSeconds: null when any tool will do or the bot has one; null for an unknown time', (t) => {
   const { bot, obsidian } = digWorld({ inventory: [{ name: 'diamond_pickaxe', type: 900, count: 1 }] });
   t.is(missingHarvestTools(bot as never, obsidian as never), null);
@@ -295,6 +310,27 @@ test('use-item equips the named item, uses it where the bot looks without a posi
   t.true(BODY_TOOLS.has('use-item'), 'it drives the body, so it holds the action lease');
 });
 
+test('use-item aims a filled bucket at a face the eyes can see, and may pour into lava (the live lava lake)', async (t) => {
+  // The lava at (3, 64, 0) has stone below it and stone to the west. Here the ray toward the floor's top face is
+  // blocked by the west stone, so the west stone's east face is used.
+  const { bot } = useWorld({
+    cells: { '3,64,0': { name: 'lava', boundingBox: 'empty', level: 0 }, '2,64,0': { name: 'stone', boundingBox: 'block' } },
+    held: { name: 'water_bucket', count: 1 },
+    onUse: ({ cells, bot }) => { cells.set('3,64,0', { name: 'water', boundingBox: 'empty', level: 0 }); bot.heldItem = { name: 'bucket', count: 1 }; }
+  });
+  const rays: Vec3[] = [];
+  bot.world = { raycast: (_from: Vec3, dir: Vec3) => { rays.push(dir); return { position: new Vec3(2, 64, 0) }; } };
+  const { factory, getTool } = createFactory();
+  registerInteractionTools(factory, asBot(bot));
+
+  const result = await getTool('use-item')!.execute({ x: 3, y: 64, z: 0 });
+
+  t.is(result.content[0].text, 'Used water_bucket at (3, 64, 0): the cell is now water; holding bucket x1');
+  const aim = (bot.lookAt as sinon.SinonStub).firstCall.args[0] as Vec3;
+  t.deepEqual([aim.x, aim.y, aim.z], [3, 64.5, 0.5], 'the east face of the west stone, the first face the eyes can see');
+  t.is(rays.length, 2, 'the floor face was tried first and skipped');
+});
+
 test('use-item will not empty a bucket into a solid block or a cell with nothing solid next to it', async (t) => {
   const solid = useWorld({ cells: { '3,64,0': { name: 'dirt', boundingBox: 'block' } }, held: { name: 'water_bucket', count: 1 } });
   const first = createFactory();
@@ -304,7 +340,7 @@ test('use-item will not empty a bucket into a solid block or a cell with nothing
   const floating = useWorld({ held: { name: 'water_bucket', count: 1 } });
   const second = createFactory();
   registerInteractionTools(second.factory, asBot(floating.bot));
-  t.regex((await second.getTool('use-item')!.execute({ x: 3, y: 70, z: 0 })).content[0].text, /no solid block next to it/);
+  t.regex((await second.getTool('use-item')!.execute({ x: 3, y: 70, z: 0 })).content[0].text, /no solid block next to it that the bot can aim at/);
 });
 
 // ---------------------------------------------------------------- 6. beds outside the overworld
@@ -445,7 +481,7 @@ test('get-observation has no day, night or weather outside the overworld', async
   const nether = createFactory();
   registerGameStateTools(nether.factory, asBot(bot('the_nether')));
   t.regex((await nether.getTool('get-observation')!.execute({})).content[0].text,
-    /Time: no day or night in the_nether \(overworld time 1264 ticks\); weather: none here/);
+    /Time: no day or night in the_nether; weather: none here/);
 
   const overworld = createFactory();
   registerGameStateTools(overworld.factory, asBot(bot('overworld')));
