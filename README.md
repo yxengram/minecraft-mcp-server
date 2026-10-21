@@ -196,7 +196,7 @@ Ask the LLM to do things in Minecraft. A few habits make it much better at the g
 - `get-cursor-target`: the block face or entity under the crosshair
 - `find-blocks`: nearby blocks of a type
 - `place-block`: place a block; walks to a spot from which it can see a face to click, never into the target
-- `dig-block`: dig a block with the best tool
+- `dig-block`: dig a block with the held item (equip a tool first; `clear-region` picks the best tool)
 - `collect-block`: mine and pick up a number of blocks of one type (runs as a `gather` task; skips blocks next to lava or water)
 - `clear-region`: dig out a box (up to 512 blocks)
 - `fill-region`: fill the empty cells of a box (up to 512 blocks)

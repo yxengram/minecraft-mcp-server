@@ -196,7 +196,7 @@ API key 只从环境变量 `OPENROUTER_API_KEY` 读取，不要把它写进仓�
 - `get-cursor-target`：准星下的方块面或实体
 - `find-blocks`：附近某种方块
 - `place-block`：放置方块；会走到能看到可点击的面的位置，绝不走进目标格
-- `dig-block`：用最合适的工具挖方块
+- `dig-block`：用手里的物品挖方块（先装备工具；`clear-region` 会自动选最合适的工具）
 - `collect-block`：采集并拾取一定数量的同种方块（以 `gather` 任务运行；跳过挨着岩浆或水的方块）
 - `clear-region`：挖空一个长方体（最多 512 格）
 - `fill-region`：填满长方体中的空格（最多 512 格）
