@@ -371,7 +371,8 @@ test('an untamed wolf is legal only when wolves are named in allowTypes', (t) =>
 
 test('default neutral mobs are illegal targets', (t) => {
   const { bot } = world();
-  for (const name of ['enderman', 'zombified_piglin', 'piglin', 'polar_bear', 'bee', 'wolf']) {
+  // Piglins are neutral only while the bot wears gold armor (E-017; tests/m15-tools.test.ts).
+  for (const name of ['enderman', 'zombified_piglin', 'polar_bear', 'bee', 'wolf']) {
     const entity = mob(name, ...at(2, 0));
     t.false(checkTarget(bot, entity as never).legal, `${name} is illegal by default`);
     t.false(checkTarget(bot, entity as never, { attackPlayers: true }).legal, `${name} stays illegal with attackPlayers`);

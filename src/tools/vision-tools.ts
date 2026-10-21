@@ -5,6 +5,7 @@ import { Vec3 } from 'vec3';
 import { ToolFactory } from '../tool-factory.js';
 import { encodePng } from '../png.js';
 import { findNearbyEntities, entityLabel, droppedItem, BotEntity } from './entity-utils.js';
+import { mobHostility } from '../autopilot/threats.js';
 import {
   AIR_COLOR, CAVE_AIR_COLOR, UNLOADED_COLOR, Rgb, blockColor, shade, toHex
 } from './block-colors.js';
@@ -30,6 +31,7 @@ const ENTITY_COLORS: Record<string, Rgb> = {
   player: [0, 230, 255],
   hostile: [255, 32, 32],
   animal: [255, 216, 0],
+  neutral: [255, 140, 0],
   mob: [255, 140, 0],
   other: [200, 200, 200]
 };
@@ -38,10 +40,13 @@ const viewSchema = z.enum(VIEW_MODES).optional().describe(
   "'surface' looks down from the sky, 'current-level' shows the floor at the bot's own level (useful in caves and buildings), 'auto' picks current-level when there is a roof over the bot (default: auto)"
 );
 
-function entityCategory(entity: BotEntity): keyof typeof ENTITY_COLORS {
+function entityCategory(bot: mineflayer.Bot, entity: BotEntity): keyof typeof ENTITY_COLORS {
   // Newer minecraft-data reports types the typings do not list yet, such as 'animal'.
   const type = entity.type as string;
   if (type === 'player') return 'player';
+  // The autopilot's own lists first: minecraft-data calls zombified piglins hostile (E-017).
+  const hostility = mobHostility(bot, entity);
+  if (hostility) return hostility;
   if (type === 'hostile') return 'hostile';
   if (type === 'animal' || type === 'passive' || type === 'water_creature' || type === 'ambient') return 'animal';
   if (type === 'mob') return 'mob';
@@ -215,7 +220,7 @@ function describeNotableBlocks(bot: mineflayer.Bot, radius: number, xray: boolea
 function describeEntities(bot: mineflayer.Bot, radius: number): string {
   const groups = new Map<string, Map<string, number>>();
   for (const { entity } of findNearbyEntities(bot, { maxDistance: radius })) {
-    const category = entityCategory(entity);
+    const category = entityCategory(bot, entity);
     const label = category === 'player' || droppedItem(entity) ? entityLabel(entity) : entity.name ?? entity.type;
     const names = groups.get(category) ?? new Map<string, number>();
     names.set(label, (names.get(label) ?? 0) + 1);
@@ -223,7 +228,7 @@ function describeEntities(bot: mineflayer.Bot, radius: number): string {
   }
   if (groups.size === 0) return `Entities within ${radius} blocks: none`;
 
-  const order = ['player', 'hostile', 'mob', 'animal', 'other'];
+  const order = ['player', 'hostile', 'neutral', 'mob', 'animal', 'other'];
   const parts = order.filter(category => groups.has(category)).map(category => {
     const names = groups.get(category)!;
     const total = [...names.values()].reduce((sum, value) => sum + value, 0);
@@ -286,7 +291,7 @@ function markerLegend(showEntities: boolean): string {
   const parts = ['bot = white square with a black outline'];
   if (showEntities) {
     parts.push(`players ${toHex(ENTITY_COLORS.player)}`, `hostile mobs ${toHex(ENTITY_COLORS.hostile)}`,
-      `animals ${toHex(ENTITY_COLORS.animal)}`, `neutral mobs ${toHex(ENTITY_COLORS.mob)}`, `items and other entities ${toHex(ENTITY_COLORS.other)}`);
+      `animals ${toHex(ENTITY_COLORS.animal)}`, `neutral and other mobs ${toHex(ENTITY_COLORS.mob)}`, `items and other entities ${toHex(ENTITY_COLORS.other)}`);
   }
   return parts.join(', ');
 }
@@ -336,7 +341,7 @@ function renderTopMap(bot: mineflayer.Bot, radius: number, view: ViewMode, showE
     for (const { entity } of findNearbyEntities(bot, { maxDistance: radius * 1.5 })) {
       const [px, py] = toPixel(entity.position.x, entity.position.z);
       if (px < 0 || py < 0 || px >= canvas.width || py >= canvas.height) continue;
-      canvas.marker(px, py, markerSize, ENTITY_COLORS[entityCategory(entity)]);
+      canvas.marker(px, py, markerSize, ENTITY_COLORS[entityCategory(bot, entity)]);
       entityCount++;
     }
   }
@@ -410,7 +415,7 @@ function renderSlice(bot: mineflayer.Bot, radius: number, axis: 'x' | 'z', showE
       if (Math.abs(across) > 2) continue;
       const [px, py] = toPixel(axis === 'x' ? entity.position.x : entity.position.z, entity.position.y + 0.5);
       if (px < 0 || py < 0 || px >= canvas.width || py >= canvas.height) continue;
-      canvas.marker(px, py, markerSize, ENTITY_COLORS[entityCategory(entity)]);
+      canvas.marker(px, py, markerSize, ENTITY_COLORS[entityCategory(bot, entity)]);
       entityCount++;
     }
   }

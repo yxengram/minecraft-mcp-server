@@ -18,7 +18,7 @@ type McpResponse = {
 // collect-block is not listed: it runs a gather task, which takes the body at task priority itself (E-004).
 export const BODY_TOOLS = new Set([
   'move-to-position', 'move-in-direction', 'look-at', 'jump', 'fly-to', 'goto-waypoint',
-  'dig-block', 'place-block', 'activate-block', 'activate-entity', 'attack-entity',
+  'dig-block', 'place-block', 'activate-block', 'use-item', 'activate-entity', 'attack-entity',
   'mount-entity', 'dismount', 'sleep', 'consume', 'equip-item', 'craft-item', 'smelt-item',
   'read-container', 'container-deposit', 'container-withdraw',
   'clear-region', 'fill-region', 'dig-tunnel'

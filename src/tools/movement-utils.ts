@@ -34,8 +34,13 @@ export interface PathBlock {
 interface ConfigurableMovements {
   canOpenDoors: boolean;
   exclusionAreasBreak: ((block: { name: string }) => number)[];
+  // Added cost for each cell the bot would move through (mineflayer-pathfinder's exclusionStep).
+  exclusionAreasStep?: ((block: { name: string; position?: unknown }) => number)[];
   getBlock: (...args: never[]) => PathBlock;
 }
+
+// Extra path cost for walking over a magma block: avoided, but still used when there is no other way (100 forbids).
+export const MAGMA_STEP_COST = 20;
 
 /**
  * How the pathfinder should see a wooden door (iron doors need redstone): passable, open or closed; the door helper
@@ -143,6 +148,11 @@ export function configureMovements(movements: ConfigurableMovements): void {
   movements.canOpenDoors = true;
   // A cost of 100 or more makes a block unbreakable for the pathfinder.
   movements.exclusionAreasBreak.push(block => (isBuiltBlock(block.name) ? 100 : 0));
+  // Magma burns whoever walks on it (hot_floor), and the bot crossed it three times in the Nether (E-017). The step
+  // exclusion sees the cells the bot moves through, so it looks at the block below each one.
+  const below = movements.getBlock as unknown as (pos: unknown, dx: number, dy: number, dz: number) => { name?: string } | null;
+  movements.exclusionAreasStep?.push(block =>
+    (block.position && below.call(movements, block.position, 0, -1, 0)?.name === 'magma_block' ? MAGMA_STEP_COST : 0));
   const getBlock = movements.getBlock.bind(movements);
   movements.getBlock = ((...args: never[]) => adjustDoor(getBlock(...args))) as ConfigurableMovements['getBlock'];
 }
@@ -191,3 +201,35 @@ export async function gotoWithTimeout(bot: mineflayer.Bot, goal: Goal, timeoutMs
     }
   }
 }
+
+// The server sends a player standing in a Nether portal to the other dimension after about 4 s (E-017).
+export const PORTAL_WAIT_MS = 10000;
+// After a trip the server ignores the player in a portal for about 15 s, and touching it restarts that (live test).
+export const PORTAL_COOLDOWN_S = 15;
+const PORTAL_POLL_MS = 250;
+
+export function inNetherPortal(bot: mineflayer.Bot): boolean {
+  // Optional call: test fakes may have no world.
+  return bot.blockAt?.(bot.entity.position.floored())?.name === 'nether_portal';
+}
+
+/**
+ * After a move that ended in a Nether portal, waits for the dimension to change and says where the bot is now, as a
+ * suffix for the tool's reply; '' when the bot is not in a portal. The live test stopped one block short of the portal
+ * and nothing said so (E-017).
+ */
+export async function portalReport(bot: mineflayer.Bot, waitMs = PORTAL_WAIT_MS): Promise<string> {
+  if (!inNetherPortal(bot)) return '';
+  const start = bot.game?.dimension;
+  for (let waited = 0; waited < waitMs && bot.game?.dimension === start; waited += PORTAL_POLL_MS) {
+    await new Promise(resolve => setTimeout(resolve, PORTAL_POLL_MS));
+  }
+  // The server restarts a player's portal cooldown (about 15 s after a trip) on every tick it touches a portal.
+  if (bot.game?.dimension === start) {
+    return `; stood in the portal for ${Math.round(waitMs / 1000)} s; the dimension did not change ` +
+      `(right after a trip, wait about ${PORTAL_COOLDOWN_S} s outside the portal before walking back in)`;
+  }
+  const { x, y, z } = bot.entity.position.floored();
+  return `; went through the portal: now in ${bot.game?.dimension} at (${x}, ${y}, ${z})`;
+}
+

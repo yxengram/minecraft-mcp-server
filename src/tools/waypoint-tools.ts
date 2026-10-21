@@ -5,7 +5,8 @@ const { goals } = pathfinderPkg;
 import { ToolFactory } from '../tool-factory.js';
 import { WaypointStore } from '../waypoint-store.js';
 import { coerceCoordinates } from './coordinate-utils.js';
-import { gotoWithTimeout, arrivalProblem } from './movement-utils.js';
+import { Vec3 } from 'vec3';
+import { gotoWithTimeout, arrivalProblem, portalReport } from './movement-utils.js';
 
 export function registerWaypointTools(factory: ToolFactory, getBot: () => mineflayer.Bot, store: WaypointStore): void {
   factory.registerTool(
@@ -88,13 +89,13 @@ export function registerWaypointTools(factory: ToolFactory, getBot: () => minefl
 
   factory.registerTool(
     "goto-waypoint",
-    "Walk to a saved waypoint",
+    "Walk to a saved waypoint. A waypoint inside a Nether portal is walked into (range 0) and the trip to the other dimension is reported",
     {
       name: z.string().trim().min(1).describe("Waypoint name"),
-      range: z.coerce.number().finite().min(0).optional().describe("How close to get, 0 for the exact block (default: 2)"),
+      range: z.coerce.number().finite().min(0).optional().describe("How close to get, 0 for the exact block (default: 2, or 0 when the waypoint is in a Nether portal)"),
       timeoutMs: z.number().int().min(50).optional().describe("Timeout in milliseconds before cancelling (default: no timeout)")
     },
-    async ({ name, range = 2, timeoutMs }) => {
+    async ({ name, range: givenRange, timeoutMs }) => {
       const bot = getBot();
       const waypoint = store.get(name);
       if (!waypoint) {
@@ -106,10 +107,13 @@ export function registerWaypointTools(factory: ToolFactory, getBot: () => minefl
         return factory.createErrorResponse(`Waypoint '${store.normalizeName(name)}' is in ${waypoint.dimension} but the bot is in ${currentDimension}`);
       }
 
+      // Stopping 2 blocks away from a portal waypoint left the bot outside the portal (E-017).
+      const inPortal = bot.blockAt?.(new Vec3(waypoint.x, waypoint.y, waypoint.z).floored())?.name === 'nether_portal';
+      const range = givenRange ?? (inPortal ? 0 : 2);
       await gotoWithTimeout(bot, new goals.GoalNear(waypoint.x, waypoint.y, waypoint.z, range), timeoutMs);
       const problem = arrivalProblem(bot, waypoint, range);
       if (problem) return factory.createErrorResponse(`Did not reach waypoint '${store.normalizeName(name)}': ${problem}`);
-      return factory.createResponse(`Arrived near waypoint '${store.normalizeName(name)}' (${waypoint.x}, ${waypoint.y}, ${waypoint.z})`);
+      return factory.createResponse(`Arrived near waypoint '${store.normalizeName(name)}' (${waypoint.x}, ${waypoint.y}, ${waypoint.z})${await portalReport(bot)}`);
     }
   );
 }

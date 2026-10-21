@@ -2,7 +2,7 @@
 
 **English** | [简体中文](README.zh-CN.md)
 
-A Minecraft bot that a large language model (for example Claude) plays through the [Model Context Protocol](https://modelcontextprotocol.io) (MCP). The bot runs on [Mineflayer](https://github.com/PrismarineJS/mineflayer). The LLM sees the world and acts in it through 63 MCP tools.
+A Minecraft bot that a large language model (for example Claude) plays through the [Model Context Protocol](https://modelcontextprotocol.io) (MCP). The bot runs on [Mineflayer](https://github.com/PrismarineJS/mineflayer). The LLM sees the world and acts in it through 64 MCP tools.
 
 What sets this fork apart is the **Autopilot**: background tasks for long jobs, and an **instinct** that reacts to danger within about a second. The instinct pairs a fast *decision model* with code that carries out the chosen move. Without it, the LLM would have to notice every creeper in time by itself.
 
@@ -25,7 +25,7 @@ The upstream project is a good, simple bridge: the LLM calls a tool, and the bot
 
 ## What changed
 
-### 1. More tools, and seeing like a player (23 → 63 tools)
+### 1. More tools, and seeing like a player (23 → 64 tools)
 - **Moving:** follow or flee from an entity, stop, saved waypoints.
 - **Building and mining:** collect a number of blocks, clear or fill a region, dig a tunnel, read and use containers.
 - **Interacting:** right-click blocks and entities, trade with villagers, sleep and wake, ride and dismount, attack.
@@ -45,7 +45,7 @@ The upstream project is a good, simple bridge: the LLM calls a tool, and the bot
 
 ### 3. Tested in the game, not only on paper
 - 820 unit tests.
-- A live test that exercises all 63 tools against a real server.
+- A live test that exercises all 64 tools against a real server.
 - A scenario test that compares the bot with and without the Autopilot: zombie waves, being chased by zombies with bare hands, creepers, hunger, fire, drowning, diving on purpose, chat.
 - A 10-day survival test on Normal difficulty. The bot survived all ten nights without dying and built a 7×7 house with a door, eight glass windows, a bed, a chest, a crafting table, a furnace and torches.
 - A 5-day survival test on Hard difficulty, from an empty inventory. The bot survived all five nights without dying, sleeping in a sealed pit with a bed, and ended with iron armor and 14 cooked meals.
@@ -159,11 +159,11 @@ Ask the LLM to do things in Minecraft. A few habits make it much better at the g
 
 ---
 
-## Tools (63)
+## Tools (64)
 
 ### Movement
 - `get-position`: the bot's position
-- `move-to-position`: walk to coordinates; reports an error if the pathfinder stops short
+- `move-to-position`: walk to coordinates; reports an error if the pathfinder stops short, and the trip when it ends in a Nether portal
 - `move-in-direction`: walk in a direction for a while
 - `look-at`: look at coordinates
 - `jump`: jump
@@ -176,7 +176,7 @@ Ask the LLM to do things in Minecraft. A few habits make it much better at the g
 - `set-waypoint`: save a named place
 - `list-waypoints`: list waypoints with distances
 - `delete-waypoint`: delete one
-- `goto-waypoint`: walk to one
+- `goto-waypoint`: walk to one (into the portal when the waypoint is in a Nether portal)
 
 ### Inventory and crafting
 - `list-inventory`: items, with names, durability and enchantments
@@ -196,12 +196,13 @@ Ask the LLM to do things in Minecraft. A few habits make it much better at the g
 - `get-cursor-target`: the block face or entity under the crosshair
 - `find-blocks`: nearby blocks of a type
 - `place-block`: place a block; walks to a spot from which it can see a face to click, never into the target
-- `dig-block`: dig a block with the held item (equip a tool first; `clear-region` picks the best tool)
+- `dig-block`: dig a block with the best tool in the inventory; refuses when no tool the bot has makes it drop anything
 - `collect-block`: mine and pick up a number of blocks of one type (runs as a `gather` task; skips blocks next to lava or water)
 - `clear-region`: dig out a box (up to 512 blocks)
 - `fill-region`: fill the empty cells of a box (up to 512 blocks)
 - `dig-tunnel`: dig a straight tunnel
-- `activate-block`: right-click a block (doors, buttons, levers)
+- `activate-block`: right-click a block (doors, buttons, levers); says when nothing changed
+- `use-item`: use the held item: fill or empty a bucket, throw a pearl; reports what changed (never pours lava next to the bot or near another player)
 
 ### Containers
 - `read-container`: look inside a chest, barrel, shulker box, hopper, dispenser or dropper
@@ -218,7 +219,7 @@ Ask the LLM to do things in Minecraft. A few habits make it much better at the g
 - `trade`: trade with a villager by the number list-trades shows
 - `mount-entity`: ride a horse, boat or minecart
 - `dismount`: get off
-- `sleep`: sleep in a bed
+- `sleep`: sleep in a bed (refused outside the overworld, where beds explode)
 - `wake`: get up
 
 ### Perception
@@ -252,7 +253,7 @@ Ask the LLM to do things in Minecraft. A few habits make it much better at the g
   - `gather` `{ blockType, count? }`
   - `hunt` `{ animal, count? }`
   - `return-home` `{ waypoint?, sleep? }`
-- `guard` fights hostile mobs only.
+- `guard` fights hostile mobs only. Piglins count as hostile unless the bot wears a piece of gold armor; zombified piglins and endermen are neutral.
 - `hunt` never attacks players or tamed animals.
 - A new task replaces the current one, unless `replace` is `false`.
 - Any command that moves the bot pauses the current task, and its reply says so. Use `resume-task` or `cancel-task` afterwards.

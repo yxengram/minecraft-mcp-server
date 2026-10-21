@@ -8,6 +8,7 @@ import type { MessageKind } from './message-store.js';
 import { serverRegistryName, trackServerRegistries } from './server-registries.js';
 import { describeOffset, wokeUpInsideBlock } from './tools/terrain-utils.js';
 import { configureMovements, installDoorHelper } from './tools/movement-utils.js';
+import { fixToolMaterials } from './tools/block-utils.js';
 
 const SUPPORTED_MINECRAFT_VERSION = '26.1.2';
 // The server moves the player off the bed right after waking; look at where the head ended up after that (E-014).
@@ -112,6 +113,8 @@ export class BotConnection {
       this.state = 'connected';
       this.callbacks.onLog('info', 'Bot spawned in world');
 
+      // Before anything estimates a dig: the shared block data understates pickaxe speed for 108 blocks (E-017).
+      fixToolMaterials(bot.registry as never);
       const mcData = minecraftData(bot.version);
       const defaultMove = new Movements(bot, mcData);
       configureMovements(defaultMove as never);

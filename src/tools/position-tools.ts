@@ -5,7 +5,7 @@ const { goals } = pathfinderPkg;
 import { Vec3 } from 'vec3';
 import { ToolFactory } from '../tool-factory.js';
 import { coerceCoordinates } from './coordinate-utils.js';
-import { stopPathfinder, arrivalProblem } from './movement-utils.js';
+import { stopPathfinder, arrivalProblem, portalReport } from './movement-utils.js';
 import type { Autopilot } from '../autopilot/autopilot.js';
 
 type Direction = 'forward' | 'back' | 'left' | 'right';
@@ -29,7 +29,7 @@ export function registerPositionTools(factory: ToolFactory, getBot: () => minefl
 
   factory.registerTool(
     "move-to-position",
-    "Move the bot to a specific position",
+    "Move the bot to a specific position. Ending in a Nether portal waits up to 10 s for the trip to the other dimension and reports it",
     {
       x: z.coerce.number().describe("X coordinate"),
       y: z.coerce.number().describe("Y coordinate"),
@@ -65,7 +65,7 @@ export function registerPositionTools(factory: ToolFactory, getBot: () => minefl
         }
         const problem = arrivalProblem(bot, { x, y, z }, range);
         if (problem) return factory.createErrorResponse(`Did not reach (${x}, ${y}, ${z}): ${problem}`);
-        return factory.createResponse(`Successfully moved to position near (${x}, ${y}, ${z})`);
+        return factory.createResponse(`Successfully moved to position near (${x}, ${y}, ${z})${await portalReport(bot)}`);
       } catch (error) {
         if (timedOut) {
           throw new Error(`Move timed out after ${timeoutMs}ms`);

@@ -2,6 +2,7 @@ import type { Bot } from 'mineflayer';
 import { formatStat } from '../format.js';
 import pathfinderPkg from 'mineflayer-pathfinder';
 const { goals } = pathfinderPkg;
+import { mobHostility } from '../autopilot/threats.js';
 
 export type BotEntity = Bot['entity'];
 
@@ -9,6 +10,8 @@ export interface NearbyEntity {
   entity: BotEntity;
   distance: number;
   details?: string[];
+  /** hostile / neutral as the autopilot sees it (entityKind); minecraft-data's type when missing. */
+  kind?: string;
 }
 
 const DYE_COLORS = ['white', 'orange', 'magenta', 'light_blue', 'yellow', 'lime', 'pink', 'gray',
@@ -92,12 +95,22 @@ export function entityLabel(entity: BotEntity): string {
   return entity.username || entity.name || entity.displayName || entity.type || 'unknown';
 }
 
-export function matchesEntityType(entity: BotEntity, type: string): boolean {
+/**
+ * The label shown for an entity: hostile or neutral by the autopilot's own lists, which minecraft-data's categories
+ * contradict (it calls zombified piglins hostile and hoglins animals; E-017). Mobs the lists do not know keep
+ * minecraft-data's type, so a new hostile mob is still shown as hostile.
+ */
+export function entityKind(bot: Bot | undefined, entity: BotEntity): string {
+  if (droppedItem(entity)) return 'dropped item';
+  return (bot ? mobHostility(bot, entity) : null) ?? entity.type;
+}
+
+export function matchesEntityType(entity: BotEntity, type: string, bot?: Bot): boolean {
   if (!type) return true;
   const normalized = type.toLowerCase();
   if (normalized === 'player') return entity.type === 'player';
-  if (normalized === 'mob') return entity.type === 'mob' || entity.type === 'hostile';
-  if (normalized === 'hostile') return entity.type === 'hostile';
+  if (normalized === 'mob') return entity.type === 'mob' || entity.type === 'hostile' || (bot ? mobHostility(bot, entity) !== null : false);
+  if (normalized === 'hostile') return entityKind(bot, entity) === 'hostile';
   return Boolean(entity.name && entity.name.toLowerCase().includes(normalized))
     || Boolean(entity.username && entity.username.toLowerCase() === normalized)
     || Boolean(droppedItem(entity)?.name.includes(normalized));
@@ -109,19 +122,18 @@ export function findNearbyEntities(
 ): NearbyEntity[] {
   const self = bot.entity;
   return Object.values(bot.entities ?? {})
-    .filter(entity => entity !== self && entity.position && matchesEntityType(entity, type))
+    .filter(entity => entity !== self && entity.position && matchesEntityType(entity, type, bot))
     .map(entity => ({ entity, distance: self.position.distanceTo(entity.position) }))
     .filter(({ distance }) => distance <= maxDistance)
     .sort((a, b) => a.distance - b.distance)
-    .map(nearby => ({ ...nearby, details: entityDetails(bot, nearby.entity) }));
+    .map(nearby => ({ ...nearby, details: entityDetails(bot, nearby.entity), kind: entityKind(bot, nearby.entity) }));
 }
 
 export function formatPosition(position: { x: number; y: number; z: number }): string {
   return `(${Math.floor(position.x)}, ${Math.floor(position.y)}, ${Math.floor(position.z)})`;
 }
 
-export function describeEntity({ entity, distance, details = [] }: NearbyEntity): string {
-  const kind = droppedItem(entity) ? 'dropped item' : entity.type;
+export function describeEntity({ entity, distance, details = [], kind = entityKind(undefined, entity) }: NearbyEntity): string {
   const parts = [`${entityLabel(entity)} [${kind}]`, `id ${entity.id}`, `at ${formatPosition(entity.position)}`, `${distance.toFixed(1)} blocks away`];
   if (typeof entity.health === 'number') {
     parts.push(`health ${formatStat(entity.health)}`);

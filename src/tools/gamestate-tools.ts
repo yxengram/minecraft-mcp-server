@@ -22,6 +22,15 @@ const MAX_AIR = 20;
 // mob's value; it is never read here. The bot's own entity metadata (index 1, the air supply in ticks) is only
 // sent once it differs from the default (full air), so a missing value means full air (E-014). Out of the water
 // air only refills, so the reading counts only while the head is in water.
+// Day, night and weather only exist in the overworld; in the Nether the line said "day, weather: rain" (E-017).
+function timeLine(bot: mineflayer.Bot): string {
+  const dimension = bot.game?.dimension?.replace(/^minecraft:/, '');
+  if (dimension && dimension !== 'overworld') {
+    return `Time: no day or night in ${dimension} (overworld time ${bot.time.timeOfDay} ticks); weather: none here`;
+  }
+  return `Time: ${bot.time.timeOfDay} ticks (${bot.time.isDay ? 'day' : 'night'}), weather: ${describeWeather(bot)}`;
+}
+
 export function airLevel(bot: mineflayer.Bot): number | undefined {
   if (!bot.entity) return undefined;
   const ticks = (bot.entity.metadata as unknown[] | undefined)?.[1];
@@ -138,7 +147,7 @@ export function registerGameStateTools(factory: ToolFactory, getBot: () => minef
         `Health: ${formatStat(bot.health)}/20, food: ${formatStat(bot.food)}/20, saturation: ${formatStat(bot.foodSaturation)}, air: ${airLevel(bot) ?? MAX_AIR}/${MAX_AIR}`,
         `Effects: ${describeEffects(bot)}`,
         `Armor: ${armorPoints(bot)}/20, xp: level ${bot.experience?.level ?? 0} (${bot.experience?.points ?? 0} points)`,
-        `Time: ${bot.time.timeOfDay} ticks (${bot.time.isDay ? 'day' : 'night'}), weather: ${describeWeather(bot)}`,
+        timeLine(bot),
         `Held item: ${held ? describeItem(bot, held) : 'nothing'}`,
         `Equipment: ${describeEquipment(bot)}`,
         `Inventory: ${summarizeInventory(bot)}`

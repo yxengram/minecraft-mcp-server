@@ -8,9 +8,9 @@ import { ToolFactory } from '../tool-factory.js';
 import { log } from '../logger.js';
 import { coerceCoordinates } from './coordinate-utils.js';
 import { blockDetails, faceName } from './block-details.js';
-import { describeEntity, entityDetails } from './entity-utils.js';
+import { describeEntity, entityDetails, entityKind } from './entity-utils.js';
 import { compassDirection } from './terrain-utils.js';
-import { approachToPlace, overlapsBot } from './block-utils.js';
+import { approachToPlace, digSeconds, equipBestTool, missingHarvestTools, overlapsBot } from './block-utils.js';
 
 type FaceDirection = 'up' | 'down' | 'north' | 'south' | 'east' | 'west';
 const MAX_FIND_BLOCKS_COUNT = 256;
@@ -100,7 +100,7 @@ export function registerBlockTools(factory: ToolFactory, getBot: () => mineflaye
 
   factory.registerTool(
     "dig-block",
-    "Dig a block at the specified position",
+    "Dig a block at the specified position with the best tool in the inventory. Refuses when no tool the bot has makes the block drop anything",
     {
       x: z.coerce.number().describe("X coordinate"),
       y: z.coerce.number().describe("Y coordinate"),
@@ -117,13 +117,24 @@ export function registerBlockTools(factory: ToolFactory, getBot: () => mineflaye
         return factory.createResponse(`No block found at position (${x}, ${y}, ${z})`);
       }
 
+      // Digging obsidian with the sword the instinct last fought with took 4 minutes and dropped nothing (E-017).
+      const missing = missingHarvestTools(bot, block);
+      if (missing) {
+        const seconds = digSeconds(bot, block, null);
+        const time = seconds === null ? '' : `: digging would take about ${Math.ceil(seconds)} s and drop nothing`;
+        return factory.createErrorResponse(`Cannot harvest ${block.name} with what the bot has (needs ${missing.join(' or ')})${time}`);
+      }
+
       if (!bot.canDigBlock(block) || !bot.canSeeBlock(block)) {
         const goal = new goals.GoalNear(x, y, z, 2);
         await bot.pathfinder.goto(goal);
       }
 
+      await equipBestTool(bot, block);
+      const tool = bot.heldItem?.name ?? 'bare hand';
+      const started = Date.now();
       await bot.dig(block);
-      return factory.createResponse(`Dug ${block.name} at (${x}, ${y}, ${z})`);
+      return factory.createResponse(`Dug ${block.name} at (${x}, ${y}, ${z}) with ${tool} (${((Date.now() - started) / 1000).toFixed(1)} s)`);
     }
   );
 
@@ -223,7 +234,7 @@ export function registerBlockTools(factory: ToolFactory, getBot: () => mineflaye
       const entityDistance = entity ? eye.distanceTo(entity.position) : Infinity;
 
       if (entity && entityDistance <= blockDistance) {
-        lines.push(`Looking at entity: ${describeEntity({ entity, distance: bot.entity.position.distanceTo(entity.position), details: entityDetails(bot, entity) })}`);
+        lines.push(`Looking at entity: ${describeEntity({ entity, distance: bot.entity.position.distanceTo(entity.position), details: entityDetails(bot, entity), kind: entityKind(bot, entity) })}`);
       } else if (block) {
         const face = faceName((block as { face?: number }).face);
         lines.push(`Looking at ${block.name} at (${block.position.x}, ${block.position.y}, ${block.position.z}), ${blockDistance.toFixed(1)} blocks away${face ? `, ${face}` : ''}`);

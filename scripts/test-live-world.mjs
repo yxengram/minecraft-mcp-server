@@ -474,6 +474,129 @@ try {
     await cmd('/time set day');
   });
 
+  await step('use-item: buckets, and activate-block when nothing changes (M15)', async () => {
+    try {
+      await bucketChecks();
+    } finally {
+      // Water left on the arena floor spreads and pushes the bot around in every later step.
+      await cmd(`/fill ${cx - 9} ${y0} ${cz - 9} ${cx + 9} ${y0 + 5} ${cz + 9} air replace water`);
+      await cmd(`/fill ${cx - 9} ${y0} ${cz - 9} ${cx + 9} ${y0 + 5} ${cz + 9} air replace lava`);
+      await cmd('/clear @s lava_bucket');
+      await cmd('/clear @s water_bucket');
+    }
+  });
+
+  async function bucketChecks() {
+    await call('move-to-position', { x: cx, y: y0, z: cz, range: 0, timeoutMs: 20000 });
+    await cmd('/clear @s water_bucket');
+    await cmd('/clear @s bucket');
+    await cmd('/give @s water_bucket');
+    await waitForCount('water_bucket', count => count >= 1, 'a water bucket');
+    await call('equip-item', { itemName: 'water_bucket' });
+    expectIncludes(await call('activate-block', { x: cx + 2, y: y0 - 1, z: cz + 2 }), 'no visible change', 'activate-block with a bucket');
+    expect((await block(cx + 2, y0, cz + 2)) === 'air', 'activate-block poured water');
+    expectIncludes(await call('use-item', { itemName: 'water_bucket', x: cx + 2, y: y0, z: cz + 2 }), 'the cell is now water', 'use-item pours water');
+    expect((await block(cx + 2, y0, cz + 2)) === 'water', 'no water after use-item');
+    expectIncludes(await call('use-item', { itemName: 'bucket', x: cx + 2, y: y0, z: cz + 2 }), 'holding water_bucket', 'use-item fills the bucket');
+    await waitFor(async () => (await block(cx + 2, y0, cz + 2)) === 'air', 'the water to be gone', 5000);
+    expectIncludes(await call('use-item', { itemName: 'water_bucket', x: cx + 2, y: y0 + 4, z: cz + 2 }, { expectError: true }),
+      'no solid block next to it', 'use-item into the air');
+    await cmd('/give @s lava_bucket');
+    await waitForCount('lava_bucket', count => count >= 1, 'a lava bucket');
+    expectIncludes(await call('use-item', { itemName: 'lava_bucket', x: cx + 1, y: y0, z: cz }, { expectError: true }),
+      'in or next to the bot', 'use-item refuses lava next to the bot');
+  }
+
+  await step('dig-block: obsidian with a diamond pickaxe, and no pickaxe (M15)', async () => {
+    await cmd('/clear @s obsidian');
+    await cmd('/give @s diamond_pickaxe');
+    await waitForCount('diamond_pickaxe', count => count >= 1, 'a diamond pickaxe');
+    await cmd(`/setblock ${cx + 2} ${y0} ${cz - 2} obsidian`);
+    await sleep(500);
+    const started = Date.now();
+    const dug = await call('dig-block', { x: cx + 2, y: y0, z: cz - 2 }, { timeout: 90000 });
+    const seconds = (Date.now() - started) / 1000;
+    expectIncludes(dug, 'with diamond_pickaxe', 'dig-block picks the pickaxe');
+    // 9.4 s in the game; before M15 mineflayer waited 75 s.
+    expect(seconds < 20, `digging obsidian took ${seconds.toFixed(1)} s`);
+    expect((await block(cx + 2, y0, cz - 2)) === 'air', 'the obsidian is still there');
+    await call('move-to-position', { x: cx + 2, y: y0, z: cz - 2, range: 0, timeoutMs: 20000 });
+    await waitForCount('obsidian', count => count >= 1, 'the obsidian drop');
+    await cmd('/clear @s diamond_pickaxe');
+    await cmd(`/setblock ${cx + 3} ${y0} ${cz - 2} obsidian`);
+    await sleep(500);
+    expectIncludes(await call('dig-block', { x: cx + 3, y: y0, z: cz - 2 }, { expectError: true }), 'Cannot harvest obsidian', 'dig-block without a pickaxe');
+    await cmd(`/setblock ${cx + 3} ${y0} ${cz - 2} air`);
+  });
+
+  await step('portals: light, walk in, sleep refused in the Nether, walk back (M15)', async () => {
+    try {
+      await portalChecks();
+    } finally {
+      // Whatever happened, bring the bot back to the overworld arena and remove the frame.
+      if (!(await call('get-observation')).includes('dimension: overworld')) {
+        await cmd(`/execute in minecraft:overworld run tp @s ${cx} ${y0} ${cz}`);
+        await sleep(3000);
+      }
+      await cmd(`/fill ${cx + 2} ${y0} ${cz + 6} ${cx + 5} ${y0 + 3} ${cz + 6} air`);
+      await cmd(`/fill ${cx + 2} ${y0 - 1} ${cz + 6} ${cx + 5} ${y0 - 1} ${cz + 6} stone`);
+      await cmd('/clear @s flint_and_steel');
+      for (const name of ['live-portal', 'live-portal-nether']) {
+        try { await call('delete-waypoint', { name }); } catch { /* not saved */ }
+      }
+    }
+  });
+
+  async function portalChecks() {
+    await call('move-to-position', { x: cx, y: y0, z: cz, range: 0, timeoutMs: 20000 });
+    // A frame on the arena edge: interior x cx+3..cx+4, y y0..y0+2, z cz+6; the bottom row replaces the floor.
+    await cmd(`/fill ${cx + 2} ${y0 - 1} ${cz + 6} ${cx + 5} ${y0 + 3} ${cz + 6} obsidian`);
+    await cmd(`/fill ${cx + 3} ${y0} ${cz + 6} ${cx + 4} ${y0 + 2} ${cz + 6} air`);
+    await cmd('/give @s flint_and_steel');
+    await cmd('/effect give @s fire_resistance 300 0 true');
+    await waitForCount('flint_and_steel', count => count >= 1, 'flint and steel');
+    await call('move-to-position', { x: cx + 3, y: y0, z: cz + 4, range: 0, timeoutMs: 20000 });
+    await call('equip-item', { itemName: 'flint_and_steel' });
+    const lit = await call('activate-block', { x: cx + 3, y: y0 - 1, z: cz + 6 });
+    expect(!lit.includes('no visible change'), `lighting the portal was reported as no change: ${lit}`);
+    await waitFor(async () => (await block(cx + 3, y0, cz + 6)) === 'nether_portal', 'the portal to light', 5000);
+    await call('set-waypoint', { name: 'live-portal', x: cx + 3, y: y0, z: cz + 6 });
+    expectIncludes(await call('goto-waypoint', { name: 'live-portal', timeoutMs: 20000 }, { timeout: 40000 }), 'now in the_nether', 'goto-waypoint into the portal');
+    expectIncludes(await call('sleep', {}, { expectError: true }), 'Beds explode in the_nether', 'sleep in the Nether');
+    expectIncludes(await call('get-observation'), 'no day or night in the_nether', 'get-observation in the Nether');
+    const [nx, ny, nz] = await position();
+    await call('set-waypoint', { name: 'live-portal-nether' });
+    // Ghasts can blow up the Nether side while the bot waits out the cooldown: remember its cells and their axis.
+    const portalCells = [...(await call('find-blocks', { blockType: 'nether_portal', maxDistance: 4, count: 6 }))
+      .matchAll(/\((-?\d+), (-?\d+), (-?\d+)\)/g)].map(m => m.slice(1).map(Number));
+    const axis = (await call('get-block-info', { x: nx, y: ny, z: nz })).match(/axis=(\w)/)?.[1] ?? 'x';
+    // Arriving in a portal does not count as entering it: step out before walking back in.
+    let out = false;
+    for (const [dx, dz] of [[0, 1], [0, -1], [1, 0], [-1, 0]]) {
+      try {
+        await call('move-to-position', { x: nx + dx, y: ny, z: nz + dz, range: 0, timeoutMs: 8000 });
+      } catch {
+        continue;
+      }
+      if ((await block(...(await position()))) !== 'nether_portal') { out = true; break; }
+    }
+    expect(out, 'could not step out of the Nether portal');
+    // The portal cooldown after a trip (about 15 s) restarts whenever the bot touches a portal.
+    await sleep(17000);
+    let repaired = 0;
+    for (const [x, y, z] of portalCells) {
+      if ((await block(x, y, z)) !== 'nether_portal') {
+        await cmd(`/setblock ${x} ${y} ${z} nether_portal[axis=${axis}]`);
+        repaired++;
+      }
+    }
+    if (repaired > 0) console.log(`    (the Nether side lost ${repaired} portal block(s), probably to a ghast; restored by command)`);
+    expectIncludes(await call('goto-waypoint', { name: 'live-portal-nether', timeoutMs: 20000 }, { timeout: 40000 }), 'now in overworld', 'goto-waypoint back');
+    const [bx, , bz] = await position();
+    expect(Math.hypot(bx - (cx + 3.5), bz - (cz + 6.5)) <= 3, `came back at ${bx}, ${bz}, not by the arena portal`);
+    await call('move-to-position', { x: cx, y: y0, z: cz, range: 0, timeoutMs: 20000 });
+  }
+
   await step('fly-to (creative)', async () => {
     await call('move-to-position', { x: cx, y: y0, z: cz, range: 0, timeoutMs: 20000 });
     await cmd('/gamemode creative @s');

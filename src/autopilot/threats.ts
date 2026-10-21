@@ -29,11 +29,31 @@ export const HOSTILE_MOBS = new Set([
 ]);
 
 // Only dangerous when provoked, and hitting one can turn a whole group against the bot (zombified piglins).
-// Never attacked unless the caller names the type explicitly. Tentative list (BLUEPRINT F-010).
+// Never attacked unless the caller names the type explicitly. Tentative list (BLUEPRINT F-010). Piglins are here
+// only while the bot wears gold armor; otherwise they attack on sight and count as hostile (mobHostility, E-017).
 export const NEUTRAL_MOBS = new Set([
   'enderman', 'piglin', 'zombified_piglin', 'wolf', 'bee', 'polar_bear', 'llama', 'trader_llama', 'panda',
   'goat', 'dolphin', 'iron_golem', 'snow_golem'
 ]);
+
+// mineflayer's inventory window keeps the worn armor in slots 5 (head) to 8 (feet).
+const ARMOR_SLOTS = [5, 6, 7, 8];
+const GOLD_ARMOR = new Set(['golden_helmet', 'golden_chestplate', 'golden_leggings', 'golden_boots']);
+
+/** Any piece of gold armor keeps piglins from attacking. */
+export function wearsGoldArmor(bot: mineflayer.Bot): boolean {
+  const slots = (bot.inventory as { slots?: ({ name: string } | null)[] } | undefined)?.slots ?? [];
+  return ARMOR_SLOTS.some(slot => GOLD_ARMOR.has(slots[slot]?.name ?? ''));
+}
+
+/** 'hostile' or 'neutral' by entity name (piglins by the bot's armor), null for everything else (E-017). */
+export function mobHostility(bot: mineflayer.Bot, entity: BotEntity): 'hostile' | 'neutral' | null {
+  const name = entity.name;
+  if (!name || isPlayer(entity)) return null;
+  if (HOSTILE_MOBS.has(name)) return 'hostile';
+  if (name === 'piglin') return wearsGoldArmor(bot) ? 'neutral' : 'hostile';
+  return NEUTRAL_MOBS.has(name) ? 'neutral' : null;
+}
 
 export const CREEPER_DANGER_RADIUS = 7;
 export const DEFAULT_THREAT_RADIUS = 16;
@@ -113,12 +133,13 @@ export function checkTarget(bot: mineflayer.Bot, entity: BotEntity | null | unde
     if (!name) return { legal: false, reason: 'unknown entity' };
     if (isTamed(bot, entity)) return { legal: false, reason: `${label} is tamed; tamed animals are never attacked` };
     if (rules.allowTypes?.includes(name)) return { legal: true };
-    if (NEUTRAL_MOBS.has(name)) {
+    const hostility = mobHostility(bot, entity);
+    if (hostility === 'neutral') {
       return (rules.avoidNeutral ?? DEFAULT_COMBAT_RULES.avoidNeutral)
         ? { legal: false, reason: `${label} is neutral and is only attacked when named explicitly` }
         : { legal: true };
     }
-    if (HOSTILE_MOBS.has(name)) return { legal: true };
+    if (hostility === 'hostile') return { legal: true };
     return { legal: false, reason: `${label} is not hostile` };
   } catch {
     return { legal: false, reason: 'unreadable entity data' };
@@ -134,7 +155,9 @@ export function legalHostilesNear(bot: mineflayer.Bot, center: Vec3, radius: num
   const withNeutral = (rules.avoidNeutral ?? DEFAULT_COMBAT_RULES.avoidNeutral) === false;
   for (const entity of Object.values(bot.entities ?? {})) {
     try {
-      if (!entity?.position || !entity.name || !(HOSTILE_MOBS.has(entity.name) || (withNeutral && NEUTRAL_MOBS.has(entity.name)))) continue;
+      if (!entity?.position || !entity.name) continue;
+      const hostility = mobHostility(bot, entity);
+      if (!(hostility === 'hostile' || (withNeutral && hostility === 'neutral'))) continue;
       const distance = entity.position.distanceTo(center);
       if (distance > radius || !checkTarget(bot, entity, rules).legal) continue;
       found.push({ entity, distance });
@@ -175,7 +198,7 @@ export function assessThreats(bot: mineflayer.Bot, options: ThreatOptions = {}):
   for (const entity of Object.values(bot.entities ?? {})) {
     try {
       if (!entity || entity === bot.entity || !entity.position || entity.isValid === false) continue;
-      if (!entity.name || !HOSTILE_MOBS.has(entity.name) || isTamed(bot, entity)) continue;
+      if (!entity.name || mobHostility(bot, entity) !== 'hostile' || isTamed(bot, entity)) continue;
       const distance = self.distanceTo(entity.position);
       if (distance > radius) continue;
       // Read everything before listing it, so an entity whose data throws is skipped entirely.

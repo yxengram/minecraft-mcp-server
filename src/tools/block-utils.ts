@@ -42,6 +42,50 @@ export async function equipBestTool(bot: mineflayer.Bot, block: Block): Promise<
   }
 }
 
+type BlockData = { material?: string };
+
+/**
+ * minecraft-data gives the blocks that need a stone pickaxe or better (ores, metal and copper blocks, obsidian, ancient
+ * debris...) the material "incorrect_for_wooden_tool" instead of "mineable/pickaxe", so prismarine-block's digTime
+ * ignores the pickaxe's speed and mineflayer waits 4-8 times longer than the game does (E-017; obsidian with a diamond
+ * pickaxe: 75 s instead of 9.4 s). In the game all of them are pickaxe blocks. Blocks read their material from the
+ * registry when they are created, so fixing the shared registry once fixes every later dig. Returns how many changed.
+ */
+export function fixToolMaterials(registry: { blocksArray?: BlockData[] } | undefined): number {
+  let fixed = 0;
+  for (const block of registry?.blocksArray ?? []) {
+    if (block.material?.startsWith('incorrect_for_')) {
+      block.material = 'mineable/pickaxe';
+      fixed++;
+    }
+  }
+  return fixed;
+}
+
+/**
+ * The tools that make the block drop anything when the inventory holds none of them (E-017), or null when the bot
+ * can harvest it (or any tool will do).
+ */
+export function missingHarvestTools(bot: mineflayer.Bot, block: Block): string[] | null {
+  const tools = (block as { harvestTools?: Record<string, boolean> | null }).harvestTools;
+  const ids = tools ? Object.keys(tools).map(Number) : [];
+  if (ids.length === 0) return null;
+  if (bot.inventory.items().some(item => ids.includes(item.type))) return null;
+  const items = (bot.registry as { items?: Record<number, { name: string }> } | undefined)?.items;
+  return ids.map(id => items?.[id]?.name ?? `item ${id}`);
+}
+
+/** Seconds the bot would take to dig the block with the given item (null: bare hand), or null when unknown. */
+export function digSeconds(bot: mineflayer.Bot, block: Block, toolType: number | null): number | null {
+  try {
+    const effects = (bot.entity as { effects?: unknown }).effects ?? {};
+    const ms = block.digTime(toolType, false, false, false, [], effects as never);
+    return Number.isFinite(ms) ? ms / 1000 : null;
+  } catch {
+    return null;
+  }
+}
+
 export class DigInterrupted extends Error {
   constructor() {
     super('digging interrupted');

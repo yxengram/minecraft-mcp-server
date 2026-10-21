@@ -2,7 +2,7 @@
 
 [English](README.md) | **简体中文**
 
-这是一个由大语言模型（例如 Claude）通过 [Model Context Protocol](https://modelcontextprotocol.io)（MCP）操控的 Minecraft 机器人。机器人基于 [Mineflayer](https://github.com/PrismarineJS/mineflayer)，LLM 通过 63 个 MCP 工具观察世界并在其中行动。
+这是一个由大语言模型（例如 Claude）通过 [Model Context Protocol](https://modelcontextprotocol.io)（MCP）操控的 Minecraft 机器人。机器人基于 [Mineflayer](https://github.com/PrismarineJS/mineflayer)，LLM 通过 64 个 MCP 工具观察世界并在其中行动。
 
 这个分支的特点是 **Autopilot**：用后台任务处理长时间的工作，再加上一个约一秒内对危险作出反应的**本能**。本能由一个快速的*决策模型*和执行所选动作的代码配合完成。没有它，LLM 就得自己及时注意到每一只苦力怕。
 
@@ -25,7 +25,7 @@
 
 ## 做了哪些改变
 
-### 1. 更多工具，像玩家一样看世界（23 → 63 个工具）
+### 1. 更多工具，像玩家一样看世界（23 → 64 个工具）
 - **移动：**跟随或逃离某个实体、停止、保存路点。
 - **建造与采集：**采集指定数量的方块、清空或填充一个区域、挖隧道、查看和使用容器。
 - **交互：**右键方块和实体、与村民交易、睡觉和起床、骑乘和下来、攻击。
@@ -45,7 +45,7 @@
 
 ### 3. 在游戏里实测，而不只是纸面
 - 820 个单元测试。
-- 实机测试：在真实服务器上逐一运行全部 63 个工具。
+- 实机测试：在真实服务器上逐一运行全部 64 个工具。
 - 情景测试：比较有无 Autopilot 时机器人的表现，包括僵尸潮、空手被僵尸追赶、苦力怕、饥饿、着火、溺水、有意潜水和聊天。
 - 普通难度下的 10 天生存测试：机器人度过了全部十个夜晚，没有死亡，并建起一座 7×7 的房子，带门、八扇玻璃窗、床、箱子、工作台、熔炉和火把。
 - 困难难度下的 5 天生存测试，从空背包开始：机器人度过了全部五个夜晚，没有死亡；夜里睡在挖出的封闭坑里的床上，最后穿着铁甲，还剩 14 份熟食。
@@ -159,11 +159,11 @@ API key 只从环境变量 `OPENROUTER_API_KEY` 读取，不要把它写进仓�
 
 ---
 
-## 工具（63 个）
+## 工具（64 个）
 
 ### 移动
 - `get-position`：机器人的位置
-- `move-to-position`：走到指定坐标；寻路器中途停下时报错
+- `move-to-position`：走到指定坐标；寻路器中途停下时报错；停在下界传送门里时报告是否到了另一个维度
 - `move-in-direction`：朝某个方向走一段时间
 - `look-at`：看向指定坐标
 - `jump`：跳
@@ -176,7 +176,7 @@ API key 只从环境变量 `OPENROUTER_API_KEY` 读取，不要把它写进仓�
 - `set-waypoint`：保存一个命名地点
 - `list-waypoints`：列出路点及距离
 - `delete-waypoint`：删除一个路点
-- `goto-waypoint`：走到某个路点
+- `goto-waypoint`：走到某个路点（路点在下界传送门里时走进门里）
 
 ### 背包与合成
 - `list-inventory`：物品，含名称、耐久和附魔
@@ -196,12 +196,13 @@ API key 只从环境变量 `OPENROUTER_API_KEY` 读取，不要把它写进仓�
 - `get-cursor-target`：准星下的方块面或实体
 - `find-blocks`：附近某种方块
 - `place-block`：放置方块；会走到能看到可点击的面的位置，绝不走进目标格
-- `dig-block`：用手里的物品挖方块（先装备工具；`clear-region` 会自动选最合适的工具）
+- `dig-block`：用背包里最合适的工具挖方块；没有能让它掉落的工具时拒绝
 - `collect-block`：采集并拾取一定数量的同种方块（以 `gather` 任务运行；跳过挨着岩浆或水的方块）
 - `clear-region`：挖空一个长方体（最多 512 格）
 - `fill-region`：填满长方体中的空格（最多 512 格）
 - `dig-tunnel`：挖一条直隧道
-- `activate-block`：右键方块（门、按钮、拉杆）
+- `activate-block`：右键方块（门、按钮、拉杆）；没有变化时会说明
+- `use-item`：使用手里的物品：装满或倒空桶、扔末影珍珠；报告发生了什么变化（不在 bot 身边或其他玩家附近倒岩浆）
 
 ### 容器
 - `read-container`：查看箱子、木桶、潜影盒、漏斗、发射器或投掷器的内容
@@ -218,7 +219,7 @@ API key 只从环境变量 `OPENROUTER_API_KEY` 读取，不要把它写进仓�
 - `trade`：按 list-trades 列出的编号与村民交易
 - `mount-entity`：骑马、乘船或矿车
 - `dismount`：下来
-- `sleep`：在床上睡觉
+- `sleep`：在床上睡觉（主世界以外会爆炸，所以拒绝）
 - `wake`：起床
 
 ### 感知
@@ -252,7 +253,7 @@ API key 只从环境变量 `OPENROUTER_API_KEY` 读取，不要把它写进仓�
   - `gather` `{ blockType, count? }`
   - `hunt` `{ animal, count? }`
   - `return-home` `{ waypoint?, sleep? }`
-- `guard` 只与敌对生物战斗。
+- `guard` 只与敌对生物战斗。bot 没穿金盔甲时，猪灵算敌对；僵尸猪灵和末影人算中立。
 - `hunt` 从不攻击玩家或驯服的动物。
 - 新任务会替换当前任务，除非 `replace` 为 `false`。
 - 任何让机器人移动的命令都会暂停当前任务，回复里会说明。之后用 `resume-task` 或 `cancel-task`。
