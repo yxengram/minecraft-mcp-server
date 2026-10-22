@@ -46,7 +46,7 @@ The upstream project is a good, simple bridge: the LLM calls a tool, and the bot
 ### 3. Tested in the game, not only on paper
 - 820 unit tests.
 - A live test that exercises all 64 tools against a real server.
-- A scenario test that compares the bot with and without the Autopilot: zombie waves, being chased by zombies with bare hands, creepers, hunger, fire, drowning, diving on purpose, chat.
+- A scenario test that compares the bot with and without the Autopilot: zombie waves, being chased by zombies with bare hands, creepers, hunger, fire, drowning, diving on purpose, a lava shore, chat.
 - A 10-day survival test on Normal difficulty. The bot survived all ten nights without dying and built a 7×7 house with a door, eight glass windows, a bed, a chest, a crafting table, a furnace and torches.
 - A 5-day survival test on Hard difficulty, from an empty inventory. The bot survived all five nights without dying, sleeping in a sealed pit with a bed, and ended with iron armor and 14 cooked meals.
 
