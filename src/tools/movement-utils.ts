@@ -20,6 +20,16 @@ export function isBuiltBlock(name: string): boolean {
   return BUILT_BLOCKS.has(name) || BUILT_SUFFIXES.some(suffix => name.endsWith(suffix));
 }
 
+// Built blocks the world generates where nobody built anything: moss carpets (lush caves, pale gardens), Nether
+// fortresses, bastions and End cities. The pathfinder still never breaks them (M11), but scaffolding may go next to
+// them and what they stand on may be dug; otherwise the bot could not bridge across a fortress deck (E-019 review).
+const GENERATED_LOOKALIKE = /^(pale_)?moss_carpet$|nether_brick|polished_blackstone_brick|end_stone_brick/;
+
+/** A built block that is most likely the player's: what scaffolding must not touch (E-019). */
+export function isPlayerBuilt(name: string): boolean {
+  return isBuiltBlock(name) && !GENERATED_LOOKALIKE.test(name);
+}
+
 /** The fields of a block the pathfinder's Movements.getBlock returns that the door handling reads and sets. */
 export interface PathBlock {
   name?: string;
@@ -31,12 +41,78 @@ export interface PathBlock {
   getProperties?: () => Record<string, unknown>;
 }
 
+type PositionedBlock = { name: string; position?: { x: number; y: number; z: number } };
+
 interface ConfigurableMovements {
   canOpenDoors: boolean;
-  exclusionAreasBreak: ((block: { name: string }) => number)[];
+  exclusionAreasBreak: ((block: PositionedBlock) => number)[];
+  // Added cost for placing a scaffolding block in a cell; 100 or more and the pathfinder does not place it.
+  exclusionAreasPlace?: ((block: PositionedBlock) => number)[];
   // Added cost for each cell the bot would move through (mineflayer-pathfinder's exclusionStep).
   exclusionAreasStep?: ((block: { name: string; position?: unknown }) => number)[];
   getBlock: (...args: never[]) => PathBlock;
+  // Real Movements keep the bot; test fakes may not.
+  bot?: StateWorld;
+}
+
+/** Looks up the block at `pos` plus an offset, as mineflayer-pathfinder's Movements.getBlock does. */
+type CellLookup = (pos: { x: number; y: number; z: number }, dx: number, dy: number, dz: number) => { name?: string } | null;
+/** Whether the block at x, y, z is player-built (isPlayerBuilt). */
+export type BuiltAt = (x: number, y: number, z: number) => boolean;
+
+const AROUND: [number, number][] = [[1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [1, -1], [-1, 1], [-1, -1]];
+// A built block this far above a cell means the cell is under a roof: inside a house.
+export const ROOF_CHECK = 4;
+
+/**
+ * Whether a cell touches something the player built (E-019): a built block in one of the 8 cells around it at the
+ * same height, right below it, or up to ROOF_CHECK blocks above it. Scaffolding there stays behind as a step in a
+ * fence ring (a cow jumped out twice in the task test), dirt in a wall, or a block in a room.
+ */
+export function nearBuilt(builtAt: BuiltAt, { x, y, z }: { x: number; y: number; z: number }): boolean {
+  if (AROUND.some(([dx, dz]) => builtAt(x + dx, y, z + dz)) || builtAt(x, y - 1, z)) return true;
+  for (let dy = 1; dy <= ROOF_CHECK; dy++) if (builtAt(x, y + dy, z)) return true;
+  return false;
+}
+
+/**
+ * nearBuilt for a cell or the cell below it, in one pass over the cells the two share. mineflayer-pathfinder 2.4.5
+ * hands a bridging step (getMoveForward) the cell above the one it fills, so both are checked.
+ */
+export function placeNearBuilt(builtAt: BuiltAt, { x, y, z }: { x: number; y: number; z: number }): boolean {
+  if (AROUND.some(([dx, dz]) => builtAt(x + dx, y, z + dz) || builtAt(x + dx, y - 1, z + dz))) return true;
+  for (let dy = -2; dy <= ROOF_CHECK; dy++) if (builtAt(x, y + dy, z)) return true;
+  return false;
+}
+
+interface StateWorld {
+  registry?: { blocksArray?: { name: string; minStateId?: number; maxStateId?: number }[] };
+  world?: { getBlockStateId?: (pos: Vec3) => number | null | undefined };
+}
+
+/**
+ * A cheap isPlayerBuilt lookup for the planner, which asks about ~20 cells for every step it considers: block-state
+ * ids from the world, without building a Block (the review measured planning 1.9x slower with full lookups). Falls
+ * back to `lookup` when the bot has no world (test fakes).
+ */
+function builtLookup(bot: StateWorld | undefined, lookup: CellLookup): BuiltAt {
+  const world = bot?.world;
+  const blocks = bot?.registry?.blocksArray;
+  if (typeof world?.getBlockStateId === 'function' && blocks) {
+    const states = new Set<number>();
+    for (const block of blocks) {
+      if (!isPlayerBuilt(block.name) || block.minStateId === undefined) continue;
+      for (let id = block.minStateId; id <= (block.maxStateId ?? block.minStateId); id++) states.add(id);
+    }
+    const at = new Vec3(0, 0, 0);
+    return (x, y, z) => {
+      at.set(x, y, z);
+      const id = world.getBlockStateId!(at);
+      return typeof id === 'number' && states.has(id);
+    };
+  }
+  const origin = { x: 0, y: 0, z: 0 };
+  return (x, y, z) => isPlayerBuilt(lookup(origin, x, y, z)?.name ?? '');
 }
 
 // Extra path cost for walking over a magma block: avoided, but still used when there is no other way (100 forbids).
@@ -142,19 +218,91 @@ function flattenDoorsForPaths(bot: mineflayer.Bot): () => void {
   };
 }
 
-/** Pathfinder settings for the bot (E-013): walk through doors, and never break built blocks to get somewhere. */
+/**
+ * Pathfinder settings for the bot (E-013): walk through doors, never break built blocks or the blocks they stand on,
+ * and never leave scaffolding next to built blocks (E-019).
+ */
 export function configureMovements(movements: ConfigurableMovements): void {
   // Fence gates: the pathfinder's own "use" step. Doors are handled by adjustDoor and installDoorHelper.
   movements.canOpenDoors = true;
-  // A cost of 100 or more makes a block unbreakable for the pathfinder.
-  movements.exclusionAreasBreak.push(block => (isBuiltBlock(block.name) ? 100 : 0));
+  const getRaw = movements.getBlock as unknown as CellLookup;
+  const lookup: CellLookup = (pos, dx, dy, dz) => getRaw.call(movements, pos, dx, dy, dz);
+  const builtAt = builtLookup(movements.bot, lookup);
+  // A cost of 100 or more makes a block unbreakable for the pathfinder. A door drops when the block under it goes,
+  // as it did in the task test, and a hole under a fence is a way out of the ring (E-019).
+  movements.exclusionAreasBreak.push(block => {
+    if (isBuiltBlock(block.name)) return 100;
+    const cell = block.position;
+    return cell && builtAt(cell.x, cell.y + 1, cell.z) ? 100 : 0;
+  });
+  movements.exclusionAreasPlace?.push(block => (block.position && placeNearBuilt(builtAt, block.position) ? 100 : 0));
   // Magma burns whoever walks on it (hot_floor), and the bot crossed it three times in the Nether (E-017). The step
   // exclusion sees the cells the bot moves through, so it looks at the block below each one.
-  const below = movements.getBlock as unknown as (pos: unknown, dx: number, dy: number, dz: number) => { name?: string } | null;
   movements.exclusionAreasStep?.push(block =>
-    (block.position && below.call(movements, block.position, 0, -1, 0)?.name === 'magma_block' ? MAGMA_STEP_COST : 0));
+    (block.position && lookup(block.position as { x: number; y: number; z: number }, 0, -1, 0)?.name === 'magma_block' ? MAGMA_STEP_COST : 0));
   const getBlock = movements.getBlock.bind(movements);
   movements.getBlock = ((...args: never[]) => adjustDoor(getBlock(...args))) as ConfigurableMovements['getBlock'];
+}
+
+interface EditBlock {
+  name?: string;
+  type?: number;
+  position?: { x: number; y: number; z: number };
+}
+
+// Blocks listed per kind in a move's report; the rest are counted.
+export const EDIT_LIST_LIMIT = 6;
+
+function editList(edits: { name: string; at: string }[]): string {
+  const shown = edits.slice(0, EDIT_LIST_LIMIT).map(edit => `${edit.name} at ${edit.at}`);
+  if (edits.length > EDIT_LIST_LIMIT) shown.push(`and ${edits.length - EDIT_LIST_LIMIT} more`);
+  return shown.join(', ');
+}
+
+function cellText(position: { x: number; y: number; z: number }): string {
+  return `(${Math.floor(position.x)}, ${Math.floor(position.y)}, ${Math.floor(position.z)})`;
+}
+
+/**
+ * Records the blocks the bot digs and places while a move runs, which during a move is the pathfinder's scaffolding
+ * and the way it digs (E-019): in the task test it left blocks in a fence gap and in walls, and nothing said so.
+ * Returns a function that stops recording and gives the suffix for the tool's reply ('' when nothing changed).
+ */
+export function watchPathEdits(bot: mineflayer.Bot): () => string {
+  const dug: { name: string; at: string }[] = [];
+  const placed: { name: string; at: string }[] = [];
+  let stopped = false;
+  // Digs are seen by wrapping bot.dig, which the pathfinder looks up on every dig: it removes every diggingCompleted
+  // listener whenever it re-plans (removeAllListeners with a second argument, which Node ignores), so an event
+  // listener heard only the first dig of a move (E-019 review, seen live).
+  const originalDig = bot.dig;
+  const wrappedDig = typeof originalDig === 'function'
+    ? (function (this: unknown, block: EditBlock, ...rest: unknown[]) {
+      const digging = (originalDig as (...args: unknown[]) => Promise<void>).call(bot, block, ...rest);
+      return digging.then(result => {
+        if (!stopped && block?.position) dug.push({ name: block.name ?? 'a block', at: cellText(block.position) });
+        return result;
+      });
+    } as unknown as typeof bot.dig)
+    : null;
+  if (wrappedDig) bot.dig = wrappedDig;
+  const onPlaced = (_oldBlock: EditBlock | null, newBlock: EditBlock | null) => {
+    if (!stopped && newBlock?.position) placed.push({ name: newBlock.name ?? 'a block', at: cellText(newBlock.position) });
+  };
+  // Test fakes may have no event emitter.
+  const listens = typeof bot.on === 'function';
+  if (listens) bot.on('blockPlaced' as never, onPlaced as never);
+  return () => {
+    if (!stopped) {
+      stopped = true;
+      if (wrappedDig && bot.dig === wrappedDig) bot.dig = originalDig;
+      if (listens) bot.removeListener('blockPlaced' as never, onPlaced as never);
+    }
+    const parts: string[] = [];
+    if (dug.length > 0) parts.push(`dug ${dug.length} block(s): ${editList(dug)}`);
+    if (placed.length > 0) parts.push(`placed ${placed.length} block(s): ${editList(placed)}`);
+    return parts.length > 0 ? `; on the way the pathfinder ${parts.join('; ')}` : '';
+  };
 }
 
 // pathfinder.stop() only raises a flag that is cleared when the bot reaches its next path node.

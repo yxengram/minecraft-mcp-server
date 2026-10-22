@@ -6,7 +6,8 @@ import { ToolFactory } from '../tool-factory.js';
 import { WaypointStore } from '../waypoint-store.js';
 import { coerceCoordinates } from './coordinate-utils.js';
 import { Vec3 } from 'vec3';
-import { gotoWithTimeout, arrivalProblem, portalReport } from './movement-utils.js';
+import { gotoWithTimeout, arrivalProblem, portalReport, watchPathEdits } from './movement-utils.js';
+import { LEAVE_SHELTER_DESCRIPTION, leavingShelter, leftShelterNote, shelterRefusal, walledIn } from './position-tools.js';
 
 export function registerWaypointTools(factory: ToolFactory, getBot: () => mineflayer.Bot, store: WaypointStore): void {
   factory.registerTool(
@@ -89,13 +90,14 @@ export function registerWaypointTools(factory: ToolFactory, getBot: () => minefl
 
   factory.registerTool(
     "goto-waypoint",
-    "Walk to a saved waypoint. A waypoint inside a Nether portal is walked into (range 0) and the trip to the other dimension is reported",
+    "Walk to a saved waypoint. A waypoint inside a Nether portal is walked into (range 0) and the trip to the other dimension is reported. Reports the blocks the pathfinder dug and placed on the way. Refused while the bot is walled in on every side unless leaveShelter is true",
     {
       name: z.string().trim().min(1).describe("Waypoint name"),
       range: z.coerce.number().finite().min(0).optional().describe("How close to get, 0 for the exact block (default: 2, or 0 when the waypoint is in a Nether portal)"),
-      timeoutMs: z.number().int().min(50).optional().describe("Timeout in milliseconds before cancelling (default: no timeout)")
+      timeoutMs: z.number().int().min(50).optional().describe("Timeout in milliseconds before cancelling (default: no timeout)"),
+      leaveShelter: z.boolean().optional().describe(LEAVE_SHELTER_DESCRIPTION)
     },
-    async ({ name, range: givenRange, timeoutMs }) => {
+    async ({ name, range: givenRange, timeoutMs, leaveShelter = false }) => {
       const bot = getBot();
       const waypoint = store.get(name);
       if (!waypoint) {
@@ -110,10 +112,21 @@ export function registerWaypointTools(factory: ToolFactory, getBot: () => minefl
       // Stopping 2 blocks away from a portal waypoint left the bot outside the portal (E-017).
       const inPortal = bot.blockAt?.(new Vec3(waypoint.x, waypoint.y, waypoint.z).floored())?.name === 'nether_portal';
       const range = givenRange ?? (inPortal ? 0 : 2);
-      await gotoWithTimeout(bot, new goals.GoalNear(waypoint.x, waypoint.y, waypoint.z, range), timeoutMs);
+      const sheltered = leavingShelter(bot, waypoint, range);
+      if (sheltered && !leaveShelter) return factory.createErrorResponse(shelterRefusal(bot));
+      const left = () => (sheltered && !walledIn(bot) ? leftShelterNote(bot) : '');
+      const edits = watchPathEdits(bot);
+      try {
+        await gotoWithTimeout(bot, new goals.GoalNear(waypoint.x, waypoint.y, waypoint.z, range), timeoutMs);
+      } catch (error) {
+        const changed = edits() + left();
+        if (changed && error instanceof Error) error.message += changed;
+        throw error;
+      }
       const problem = arrivalProblem(bot, waypoint, range);
-      if (problem) return factory.createErrorResponse(`Did not reach waypoint '${store.normalizeName(name)}': ${problem}`);
-      return factory.createResponse(`Arrived near waypoint '${store.normalizeName(name)}' (${waypoint.x}, ${waypoint.y}, ${waypoint.z})${await portalReport(bot)}`);
+      if (problem) return factory.createErrorResponse(`Did not reach waypoint '${store.normalizeName(name)}': ${problem}${edits()}${left()}`);
+      const changed = edits() + left();
+      return factory.createResponse(`Arrived near waypoint '${store.normalizeName(name)}' (${waypoint.x}, ${waypoint.y}, ${waypoint.z})${changed}${await portalReport(bot)}`);
     }
   );
 }

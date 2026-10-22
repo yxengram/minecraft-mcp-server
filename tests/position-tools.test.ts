@@ -45,7 +45,7 @@ test('registerPositionTools registers move-to-position tool', (t) => {
   const moveToPositionCall = toolCalls.find(call => call.args[0] === 'move-to-position');
 
   t.truthy(moveToPositionCall);
-  t.is(moveToPositionCall!.args[1], 'Move the bot to a specific position. Ending in a Nether portal waits up to 10 s for the trip to the other dimension and reports it');
+  t.is(moveToPositionCall!.args[1], 'Move the bot to a specific position. Reports the blocks the pathfinder dug and placed on the way. Refused while the bot is walled in on every side unless leaveShelter is true. Ending in a Nether portal waits up to 10 s for the trip to the other dimension and reports it');
 });
 
 test('get-position returns current bot position', async (t) => {

@@ -11,7 +11,7 @@ import type { EventStore } from '../../event-store.js';
 import type { DecisionQuestion, DecisionResult } from '../../decisions/openrouter-client.js';
 import { stopPathfinder } from '../../tools/movement-utils.js';
 import { airLevel, armorPoints } from '../../tools/gamestate-tools.js';
-import { Attention, Chaser, Cue, DamageInfo, outranks, readCues } from './attention.js';
+import { Attention, Chaser, Cue, CueKind, CUE_URGENCY, DamageInfo, outranks, readCues } from './attention.js';
 import { assessThreats } from '../threats.js';
 import { bestWeaponName } from '../combat.js';
 import { buildMenu, MenuOption, OptionId } from './affordances.js';
@@ -71,6 +71,15 @@ const RECENT_ACTION_LIMIT = 5;
 const RUNS = new Set(['flee', 'run_from_creeper']);
 // A mob that came back counts as chasing the bot for this long (the 'chased' cue).
 const CHASE_MS = 30_000;
+// Cues that can kill within seconds (the first five of CUE_URGENCY). A slow answer about them gets a second, identical
+// request, and the first valid answer is used (E-019): in the task test one 1.5 s timeout at 5.3 health was fatal.
+export const HEDGE_CUES: CueKind[] = CUE_URGENCY.slice(0, 5);
+// The M5 probe: median 0.64 s, slowest 1.07 s over 198 calls.
+export const HEDGE_MS = 800;
+// Failures another request may not have; rate_limited and disabled would fail the same way again.
+const HEDGE_AFTER: Set<string> = new Set(['timeout', 'http_error', 'invalid_response']);
+
+type HedgedResult = DecisionResult & { second?: boolean };
 
 interface RecentAction {
   endedAt: number;
@@ -356,7 +365,8 @@ export class InstinctEngine {
     this.inFlightCues = cues;
     const episode = this.attention.episode;
     const seq = ++this.requestSeq;
-    this.options.decide(state, instinctQuestions(menu, { hasTask }))
+    const hedge = cues.some(cue => HEDGE_CUES.includes(cue.kind));
+    this.decide(state, instinctQuestions(menu, { hasTask }), hedge, seq, episode)
       .then(result => {
         if (seq !== this.requestSeq) {
           // A newer request about a new cue is out: this answer only goes on record.
@@ -371,6 +381,59 @@ export class InstinctEngine {
       .finally(() => {
         if (seq === this.requestSeq) this.inFlight = false;
       });
+  }
+
+  /**
+   * One decision, or for urgent cues up to two identical requests (E-019): the second goes out when the first has not
+   * answered within HEDGE_MS or failed before that, unless a newer request superseded this one, the engine stopped,
+   * the instinct was turned off or the danger ended. The first valid answer wins; when both fail, the result is the
+   * first request's failure.
+   */
+  private decide(state: Record<string, unknown>, questions: Record<string, DecisionQuestion>, hedge: boolean, seq: number, episode: number): Promise<HedgedResult> {
+    if (!hedge) return this.options.decide(state, questions);
+    return new Promise(resolve => {
+      let settled = false;
+      let pending = 0;
+      let second = false;
+      let failure: DecisionResult | null = null;
+      const settle = (result: HedgedResult) => {
+        settled = true;
+        clearTimeout(timer);
+        resolve(result);
+      };
+      const current = () => !this.stopped && seq === this.requestSeq && this.options.getPolicy().instinct.enabled &&
+        this.attention.inEpisode() && this.attention.episode === episode;
+      const launch = (isSecond: boolean) => {
+        pending++;
+        this.options.decide(state, questions)
+          .catch((error): DecisionResult => ({ ok: false, error: 'http_error', message: `request failed: ${error}`, latencyMs: 0 }))
+          .then(result => {
+            pending--;
+            if (settled) return;
+            if (result.ok) {
+              settle(isSecond ? { ...result, second: true } : result);
+              return;
+            }
+            // Only the first request's failure is kept as the reason: a second one refused by the budget says nothing
+            // about the danger.
+            if (!isSecond) failure = result;
+            if (!second && HEDGE_AFTER.has(result.error) && current()) {
+              startSecond();
+              return;
+            }
+            if (pending === 0) settle(failure ?? result);
+          });
+      };
+      const startSecond = () => {
+        second = true;
+        clearTimeout(timer);
+        launch(true);
+      };
+      const timer = setTimeout(() => {
+        if (!settled && !second && current()) startSecond();
+      }, HEDGE_MS);
+      launch(false);
+    });
   }
 
   private state(cues: Cue[], policy: Policy): Record<string, unknown> {
@@ -416,7 +479,7 @@ export class InstinctEngine {
       `${Math.round((now - past.endedAt) / 1000)}s ago: ${past.kinds}, ended with ${past.result}${past.task ? `; task ${past.task} afterwards` : ''}`);
   }
 
-  private handle(result: DecisionResult, menu: MenuOption[], cues: Cue[], episode: number): void {
+  private handle(result: HedgedResult, menu: MenuOption[], cues: Cue[], episode: number): void {
     if (this.stopped) return;
     const dangers = cues.map(cue => cue.detail).join('; ');
     if (!result.ok) {
@@ -440,7 +503,7 @@ export class InstinctEngine {
     const urgentP = urgentAnswer?.type === 'noul' ? urgentAnswer.noul : 0;
     const urgent = urgentP >= policy.urgentThreshold;
     const resumeText = resumeAnswer?.type === 'noul' ? `, resume task p=${resumeAnswer.noul.toFixed(2)}` : '';
-    const summary = `${choice} p=${p.toFixed(2)}, urgent p=${urgentP.toFixed(2)}${resumeText} (${result.model}; ${result.latencyMs}ms)`;
+    const summary = `${choice} p=${p.toFixed(2)}, urgent p=${urgentP.toFixed(2)}${resumeText} (${result.model}; ${result.latencyMs}ms${result.second ? ', second request' : ''})`;
 
     let taken: string;
     // The danger may be over by the time the answer arrives (e.g. the bot surfaced): record it, do nothing.

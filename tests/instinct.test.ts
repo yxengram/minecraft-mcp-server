@@ -637,7 +637,9 @@ test.serial('only one request is in flight; an answer that arrives after the dan
   engine.tick();
   await clock.tickAsync(store.get().instinct.reaskMs * 2);
   engine.tick();
-  t.true(decide.calledOnce, 'no second request while the first is open');
+  // Trapped under water is an urgent cue, so one identical second request goes out after HEDGE_MS (E-018); re-asking
+  // adds nothing while they are open.
+  t.is(decide.callCount, 2, 'no re-ask while a request is open; the second call is the hedge for an urgent cue');
 
   // The bot got out meanwhile (e.g. the AI player moved it).
   world.self.position = new Vec3(10.5, 70, 10.5);

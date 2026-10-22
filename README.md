@@ -93,6 +93,7 @@ Decision models are a kind of model that does not generate text. Given a state a
 - A creeper that is **already lit** 4 blocks away leaves about 0.7 s, and the decision API sometimes answers in 1.0–1.3 s. That case is a stress test, not a guarantee. A creeper that walks up is asked about from 10 blocks away and is handled.
 - Cornered at low health inside walls, the only option left is to run.
 - The pathfinder treats wooden doors as passable and a door helper opens and closes them; iron doors are not handled.
+- The pathfinder does not place scaffolding next to built blocks (fences, walls, doors, planks and the like, or under a roof) and does not dig the block a built block stands on. Near buildings it may therefore find no way where it used to tower up.
 
 The full design, the contract of every file, and the evidence behind each choice are in [docs/BLUEPRINT.md](docs/BLUEPRINT.md) and [docs/PLAN.md](docs/PLAN.md), both in Chinese.
 
@@ -163,7 +164,7 @@ Ask the LLM to do things in Minecraft. A few habits make it much better at the g
 
 ### Movement
 - `get-position`: the bot's position
-- `move-to-position`: walk to coordinates; reports an error if the pathfinder stops short, and the trip when it ends in a Nether portal
+- `move-to-position`: walk to coordinates; reports an error if the pathfinder stops short, the blocks it dug and placed on the way, and the trip when it ends in a Nether portal; refuses to move while the bot is walled in on every side (as after the instinct's dig_in) unless `leaveShelter: true` is passed, because the pathfinder would dig the shelter open
 - `move-in-direction`: walk in a direction for a while
 - `look-at`: look at coordinates
 - `jump`: jump
@@ -176,7 +177,7 @@ Ask the LLM to do things in Minecraft. A few habits make it much better at the g
 - `set-waypoint`: save a named place
 - `list-waypoints`: list waypoints with distances
 - `delete-waypoint`: delete one
-- `goto-waypoint`: walk to one (into the portal when the waypoint is in a Nether portal)
+- `goto-waypoint`: walk to one (into the portal when the waypoint is in a Nether portal); reports and refuses like move-to-position
 
 ### Inventory and crafting
 - `list-inventory`: items, with names, durability and enchantments
