@@ -3,6 +3,7 @@ import type mineflayer from 'mineflayer';
 import { Vec3 } from 'vec3';
 import { BotEntity, entityLabel, metadataValue } from '../tools/entity-utils.js';
 import { airLevel } from '../tools/gamestate-tools.js';
+import { inLavaNow } from './hazards.js';
 
 /** The policy's attack rules (F-014 combat group); callers pass the current policy's values. */
 export interface CombatRules {
@@ -174,9 +175,9 @@ function onFire(bot: mineflayer.Bot): boolean {
   return typeof flags === 'number' && (flags & ON_FIRE_FLAG) !== 0;
 }
 
+// The same check as the instinct's: the whole collision box, not only the middle column (E-018).
 function inLava(bot: mineflayer.Bot): boolean {
-  const feet = bot.entity.position.floored();
-  return bot.blockAt(feet)?.name === 'lava' || bot.blockAt(feet.offset(0, 1, 0))?.name === 'lava';
+  return inLavaNow(bot);
 }
 
 function awayFrom(self: Vec3, threats: Threat[]): Vec3 {

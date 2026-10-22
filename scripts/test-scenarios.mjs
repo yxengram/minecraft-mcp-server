@@ -251,6 +251,60 @@ const SCENARIOS = {
     }
   },
 
+  /**
+   * A lava pool let into the floor, level with it as the lake in the live death was (M16): 5 blocks wide (too wide to
+   * jump) and across the whole arena but for a 1-block path along the south wall, right beside the lava. The bot has
+   * cobblestone it could bridge with: before M16 the pathfinder bridged it. Then a target on the pool's west shore.
+   * Success: both moves arrive, with no lava damage, no death and no block placed into the pool.
+   */
+  async 'lava-shore'(s) {
+    const { cmd, call, arena } = s;
+    const { cx, y0, cz } = arena;
+    const r = ARENA_RADIUS - 1;
+    const pool = [cx - 2, cz - r, cx + 2, cz + r - 1];
+    const fillPool = async (y, block) => cmd(`/fill ${pool[0]} ${y} ${pool[1]} ${pool[2]} ${y} ${pool[3]} ${block}`);
+    // Out of the way first: the bot starts in the middle of the arena, where the pool goes.
+    await call('move-to-position', { x: cx - 6, y: y0, z: cz, range: 0, timeoutMs: 20000 });
+    // Stone under the pool so the lava cannot run out of the sky platform; the pool replaces the floor.
+    await fillPool(y0 - 2, 'stone');
+    await fillPool(y0 - 1, 'lava');
+    await cmd('/give @s cobblestone 32');
+    await sleep(500);
+    const since = await s.cursor();
+    const results = [];
+    let bridged = 0;
+    try {
+      for (const [name, x, z] of [['across', cx + 6, cz], ['back to the west shore', cx - 3, cz]]) {
+        let reply;
+        try {
+          reply = await call('move-to-position', { x, y: y0, z, range: 0, timeoutMs: 60000 }, { timeout: 90000 });
+        } catch (error) {
+          reply = `Failed: ${error.message}`;
+        }
+        results.push(`${name}: ${reply.startsWith('Successfully') ? 'arrived' : reply.slice(0, 120)}`);
+      }
+      // Bridging means placing blocks into the pool or into the air above it (where the pathfinder built its bridge once
+      // lava was no longer replaceable).
+      for (let x = pool[0]; x <= pool[2]; x++) {
+        for (let z = pool[1]; z <= pool[3]; z++) {
+          if (!(await call('get-block-info', { x, y: y0 - 1, z })).includes('Found lava')) bridged++;
+          if (!(await call('get-block-info', { x, y: y0, z })).includes('Found air')) bridged++;
+        }
+      }
+    } finally {
+      await fillPool(y0, 'air');
+      await fillPool(y0 - 1, 'stone');
+      await fillPool(y0 - 2, 'air');
+    }
+    const burns = (await s.eventsSince(since, ['damaged'])).filter(line => line.includes('(lava)')).length;
+    const died = await s.died(since);
+    const arrived = results.every(line => line.endsWith('arrived'));
+    return {
+      ok: arrived && burns === 0 && !died && bridged === 0,
+      detail: `${results.join('; ')}; lava damage ${burns} time(s); ${bridged} lava cell(s) bridged${died ? ', bot died' : ''}`
+    };
+  },
+
   /** A player asks the bot for help, then says "follow me"; success: chat_request within 3 s and no following. */
   async 'chat-triage'(s) {
     const helper = s.arena.helper;

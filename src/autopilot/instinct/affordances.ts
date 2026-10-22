@@ -7,7 +7,7 @@ import type { Vec3 } from 'vec3';
 import type { Cue } from './attention.js';
 import type { MacroName } from './macros.js';
 import type { Policy } from '../policy.js';
-import { columnAbove, describeSpot, DIG_IN_DEPTH, digInPlan, enclosedNow, inLavaNow, nearestAirPocket, nearestSafeSpot, nearestWater, safeToDigOut, touchingFire } from '../hazards.js';
+import { columnAbove, describeSpot, DIG_IN_DEPTH, digInPlan, enclosedNow, nearestAirPocket, nearestSafeSpot, nearestWater, safeToDigOut, touchingFire } from '../hazards.js';
 import { assessThreats, checkTarget, isPlayer } from '../threats.js';
 import { bestWeaponName, weaponStats } from '../combat.js';
 import { bestFood, label } from './motor.js';
@@ -183,7 +183,8 @@ export function buildMenu(bot: mineflayer.Bot, cues: Cue[], context: MenuContext
   const add = (more: MenuOption[]) => {
     for (const option of more) if (!options.some(existing => existing.id === option.id)) options.push(option);
   };
-  if (kinds.has('in_lava') && inLavaNow(bot)) add(lavaOptions(bot));
+  // The cue is enough: it also comes from lava damage the cells around the bot do not explain (E-018).
+  if (kinds.has('in_lava')) add(lavaOptions(bot));
   if (kinds.has('trapped_underwater') || kinds.has('low_air')) add(waterOptions(bot));
   if (kinds.has('on_fire')) add(fireOptions(bot));
   // Walled in on every side (after dig_in, say): running, fighting and digging in again all mean breaking out first.

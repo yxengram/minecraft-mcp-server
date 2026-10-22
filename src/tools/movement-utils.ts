@@ -51,6 +51,8 @@ interface ConfigurableMovements {
   // Added cost for each cell the bot would move through (mineflayer-pathfinder's exclusionStep).
   exclusionAreasStep?: ((block: { name: string; position?: unknown }) => number)[];
   getBlock: (...args: never[]) => PathBlock;
+  // Block ids the pathfinder may place a scaffolding block into (it includes lava and water).
+  replaceables?: Set<number>;
   // Real Movements keep the bot; test fakes may not.
   bot?: StateWorld;
 }
@@ -117,6 +119,16 @@ function builtLookup(bot: StateWorld | undefined, lookup: CellLookup): BuiltAt {
 
 // Extra path cost for walking over a magma block: avoided, but still used when there is no other way (100 forbids).
 export const MAGMA_STEP_COST = 20;
+// Extra path cost for a cell with lava beside it, below it, or below a neighbour (E-018): the bot is 0.6 blocks wide
+// and the pathfinder only looks at its column, so a way along a lava shore is taken only when there is no other. The
+// last case is the live one: the lake's surface was level with the shore's floor, one below the bot's feet. A target
+// on the shore itself stays reachable (100 would forbid it): in the lava-shore scenario the only way round is a 5-cell
+// shore path, and the pathfinder still takes it.
+export const LAVA_EDGE_COST = 40;
+const LAVA_EDGE_OFFSETS: [number, number, number][] = [
+  [1, 0, 0], [-1, 0, 0], [0, 0, 1], [0, 0, -1], [0, -1, 0],
+  [1, -1, 0], [-1, -1, 0], [0, -1, 1], [0, -1, -1]
+];
 
 /**
  * How the pathfinder should see a wooden door (iron doors need redstone): passable, open or closed; the door helper
@@ -222,6 +234,20 @@ function flattenDoorsForPaths(bot: mineflayer.Bot): () => void {
  * Pathfinder settings for the bot (E-013): walk through doors, never break built blocks or the blocks they stand on,
  * and never leave scaffolding next to built blocks (E-019).
  */
+// How far down overLava looks for the lava under a cell.
+const OVER_LAVA_DEPTH = 6;
+const OPEN_AIR = new Set(['air', 'cave_air', 'void_air']);
+
+/** Whether the first block under the cell (within OVER_LAVA_DEPTH) is lava: a fall from here lands in it. */
+function overLava(lookup: CellLookup, cell: { x: number; y: number; z: number }): boolean {
+  for (let dy = 1; dy <= OVER_LAVA_DEPTH; dy++) {
+    const name = lookup(cell, 0, -dy, 0)?.name;
+    if (name === 'lava') return true;
+    if (!name || !OPEN_AIR.has(name)) return false;
+  }
+  return false;
+}
+
 export function configureMovements(movements: ConfigurableMovements): void {
   // Fence gates: the pathfinder's own "use" step. Doors are handled by adjustDoor and installDoorHelper.
   movements.canOpenDoors = true;
@@ -240,6 +266,23 @@ export function configureMovements(movements: ConfigurableMovements): void {
   // exclusion sees the cells the bot moves through, so it looks at the block below each one.
   movements.exclusionAreasStep?.push(block =>
     (block.position && lookup(block.position as { x: number; y: number; z: number }, 0, -1, 0)?.name === 'magma_block' ? MAGMA_STEP_COST : 0));
+  movements.exclusionAreasStep?.push(block => {
+    const cell = block.position as { x: number; y: number; z: number } | undefined;
+    return cell && LAVA_EDGE_OFFSETS.some(([dx, dy, dz]) => lookup(cell, dx, dy, dz)?.name === 'lava') ? LAVA_EDGE_COST : 0;
+  });
+  // Bridging a lava pool was the riskiest step seen while reproducing the lava death (E-018): the bot then walks over
+  // the lava, safe only while every placement works. Without lava among the replaceables the pathfinder built the
+  // bridge one level up instead, in the air above the pool (lava-shore scenario), so neither is allowed.
+  const lava = (movements.bot as { registry?: { blocksByName?: Record<string, { id: number }> } } | undefined)?.registry?.blocksByName?.lava?.id;
+  if (lava !== undefined) movements.replaceables?.delete(lava);
+  // Forbidding only the cell right above the lava, the pathfinder built its bridge a level higher each time; a fall
+  // from any height over the pool ends in the lava, so no block goes where the first thing below is lava.
+  // (mineflayer-pathfinder passes the cell being filled when it jumps up but the cell above it when it steps forward
+  // onto a placed block; looking down from either finds the same lava.)
+  movements.exclusionAreasPlace?.push(block => {
+    const cell = block.position as { x: number; y: number; z: number } | undefined;
+    return cell && overLava(lookup, cell) ? 100 : 0;
+  });
   const getBlock = movements.getBlock.bind(movements);
   movements.getBlock = ((...args: never[]) => adjustDoor(getBlock(...args))) as ConfigurableMovements['getBlock'];
 }

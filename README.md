@@ -162,6 +162,8 @@ Ask the LLM to do things in Minecraft. A few habits make it much better at the g
 
 ## Tools (64)
 
+A command that moves or uses the bot's body stops when the bot dies, and its reply says where and why the bot died and where it respawned. The pathfinder keeps away from lava shores when it can and never bridges lava.
+
 ### Movement
 - `get-position`: the bot's position
 - `move-to-position`: walk to coordinates; reports an error if the pathfinder stops short, the blocks it dug and placed on the way, and the trip when it ends in a Nether portal; refuses to move while the bot is walled in on every side (as after the instinct's dig_in) unless `leaveShelter: true` is passed, because the pathfinder would dig the shelter open
@@ -262,7 +264,7 @@ Ask the LLM to do things in Minecraft. A few habits make it much better at the g
 
 ### Instinct
 **What it notices (cues):**
-- standing in lava, or burning;
+- standing in lava (any part of the bot touching it, or the server burning it with lava), or burning;
 - under water with a ceiling above, or low on air;
 - a creeper within 10 blocks, or swelling within 7;
 - being hit;

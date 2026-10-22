@@ -37,9 +37,24 @@ export function headInWater(bot: mineflayer.Bot): boolean {
   return isWater(bot.blockAt(bot.entity.position.floored().offset(0, 1, 0)));
 }
 
+// Half the bot's width: its collision box reaches this far from the middle in x and z.
+const HALF_WIDTH = 0.3;
+
+/**
+ * Whether any cell the bot's collision box touches, at the feet or the head, holds lava (E-018). Only the middle
+ * column was checked before: on a lava shore the box reached into the lava next to it, the server burned the bot,
+ * and the instinct heard only "on fire".
+ */
 export function inLavaNow(bot: mineflayer.Bot): boolean {
-  const feet = bot.entity.position.floored();
-  return bot.blockAt(feet)?.name === 'lava' || bot.blockAt(feet.offset(0, 1, 0))?.name === 'lava';
+  const position = bot.entity.position;
+  for (const dy of [0, 1]) {
+    for (const dx of [-HALF_WIDTH, HALF_WIDTH]) {
+      for (const dz of [-HALF_WIDTH, HALF_WIDTH]) {
+        if (bot.blockAt(position.offset(dx, dy, dz).floored())?.name === 'lava') return true;
+      }
+    }
+  }
+  return false;
 }
 
 export function burningNow(bot: mineflayer.Bot): boolean {

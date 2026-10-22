@@ -11,7 +11,7 @@ import type { EventStore } from '../../event-store.js';
 import type { DecisionQuestion, DecisionResult } from '../../decisions/openrouter-client.js';
 import { stopPathfinder } from '../../tools/movement-utils.js';
 import { airLevel, armorPoints } from '../../tools/gamestate-tools.js';
-import { Attention, Chaser, Cue, CueKind, CUE_URGENCY, DamageInfo, outranks, readCues } from './attention.js';
+import { Attention, burnedByLava, Chaser, Cue, CueKind, CUE_URGENCY, DamageInfo, outranks, readCues } from './attention.js';
 import { assessThreats } from '../threats.js';
 import { bestWeaponName } from '../combat.js';
 import { buildMenu, MenuOption, OptionId } from './affordances.js';
@@ -451,7 +451,9 @@ export class InstinctEngine {
         food: bot.food,
         air: airLevel(bot) ?? 'unknown',
         head_under_water: headInWater(bot),
-        in_lava: inLavaNow(bot),
+        // With only the damage cue, in_lava false made the model hesitate: leave_lava 0.37, continue 0.33; 0.97 once
+        // the fact agreed (M16 probe).
+        in_lava: inLavaNow(bot) || burnedByLava(this.damage),
         on_fire: burningNow(bot),
         held_item: bot.heldItem?.name ?? 'nothing',
         // Optional facts: one that cannot be read must not cost the whole decision.

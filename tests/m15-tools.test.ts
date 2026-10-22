@@ -426,14 +426,15 @@ test('configureMovements: walking over a magma block costs extra, but is not for
   const magma = below('magma_block');
   const lookup = magma.getBlock;
   configureMovements(magma as never);
-  t.is(magma.exclusionAreasStep.length, 1);
-  t.is(magma.exclusionAreasStep[0]({ name: 'air', position: { x: 0, y: 64, z: 0 } }), MAGMA_STEP_COST);
+  // The lava-edge cost (E-018) is another step exclusion; here no lava is near, so only magma adds.
+  const cost = (m: typeof magma) => m.exclusionAreasStep.reduce((sum, f) => sum + f({ name: 'air', position: { x: 0, y: 64, z: 0 } }), 0);
+  t.is(cost(magma), MAGMA_STEP_COST);
   t.true(MAGMA_STEP_COST < 100, '100 would make the pathfinder refuse the way entirely');
   t.deepEqual(lookup.firstCall.args.slice(1), [0, -1, 0], 'it looks at the block under the cell');
 
   const netherrack = below('netherrack');
   configureMovements(netherrack as never);
-  t.is(netherrack.exclusionAreasStep[0]({ name: 'air', position: { x: 0, y: 64, z: 0 } }), 0);
+  t.is(cost(netherrack), 0);
 });
 
 // ---------------------------------------------------------------- 8. piglins and the entity labels

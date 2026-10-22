@@ -3,6 +3,15 @@ import { z, ZodError, ZodRawShape, ZodType } from "zod";
 import { BotConnection } from './bot-connection.js';
 import type { Autopilot } from './autopilot/autopilot.js';
 import { PRIORITY } from './autopilot/action-arbiter.js';
+import { stopPathfinder } from './tools/movement-utils.js';
+import type mineflayer from 'mineflayer';
+
+// After a death, how long a stopped command may take to give up before its reply is replaced (E-018).
+export const DEATH_SETTLE_MS = 2000;
+// How long to wait for the respawn, to say where the bot is now.
+export const RESPAWN_WAIT_MS = 5000;
+// Damage this recent is named as the likely cause of a death.
+const DEATH_CAUSE_WINDOW_MS = 10000;
 
 type McpContent =
   | { type: "text"; text: string }
@@ -87,7 +96,7 @@ export class ToolFactory {
   private async runWithBody(name: string, run: () => Promise<McpResponse>): Promise<McpResponse> {
     const autopilot = this.autopilotProvider?.();
     if (!autopilot || !autopilot.isReady()) {
-      return run();
+      return this.stopOnDeath(name, run);
     }
 
     let interruptedBy: string | null = null;
@@ -106,7 +115,7 @@ export class ToolFactory {
     );
     let response: McpResponse;
     try {
-      response = await run();
+      response = await this.stopOnDeath(name, run);
     } finally {
       acquired.lease.release();
     }
@@ -114,6 +123,51 @@ export class ToolFactory {
     const notes = [report, interruptedBy ? `This command was interrupted by ${interruptedBy}.` : null].filter(Boolean);
     if (notes.length === 0) return response;
     return { ...response, content: [...response.content, { type: "text", text: notes.join('\n') }] };
+  }
+
+  /**
+   * Runs a body command, and stops it when the bot dies (E-018): in the live test a move-to-position walked the
+   * respawned bot back to where it had just burned to death and then reported success. On death the pathfinder and
+   * the controls stop at once, the command gets a moment to give up, and its reply says what happened instead.
+   */
+  private async stopOnDeath(name: string, run: () => Promise<McpResponse>): Promise<McpResponse> {
+    const bot = (this.connection as { getBot?: () => mineflayer.Bot | null }).getBot?.() ?? null;
+    if (!bot || typeof bot.once !== 'function') return run();
+    let died: { at: string; cause: string } | null = null;
+    let signalDeath: () => void = () => {};
+    const death = new Promise<void>(resolve => { signalDeath = resolve; });
+    let signalSpawn: () => void = () => {};
+    const respawned = new Promise<void>(resolve => { signalSpawn = resolve; });
+    const onDeath = () => {
+      // Listened for from the death on, so a respawn that comes quickly is not missed.
+      bot.once('spawn', signalSpawn);
+      const damage = (this.connection as { lastDamage?: () => { description: string; time: number } | null }).lastDamage?.();
+      died = {
+        at: cellText(bot.entity?.position),
+        cause: damage && Date.now() - damage.time <= DEATH_CAUSE_WINDOW_MS ? ` (${damage.description})` : ''
+      };
+      try {
+        stopPathfinder(bot);
+        bot.clearControlStates?.();
+      } catch {
+        // Stopping is best effort; the reply below still says the bot died.
+      }
+      signalDeath();
+    };
+    bot.once('death', onDeath);
+    try {
+      const running = run();
+      const first = await Promise.race([running, death.then(() => null)]);
+      if (!died) return first ?? await running;
+      await Promise.race([running.catch(() => undefined), delay(DEATH_SETTLE_MS)]);
+      await Promise.race([respawned, delay(RESPAWN_WAIT_MS)]);
+      bot.removeListener?.('spawn', signalSpawn);
+      const { at, cause } = died as { at: string; cause: string };
+      return this.createErrorResponse(
+        `The bot died during ${name} at ${at}${cause}; it respawned at ${cellText(bot.entity?.position)} and the command was stopped`);
+    } finally {
+      bot.removeListener?.('death', onDeath);
+    }
   }
 
   createResponse(text: string): McpResponse {
@@ -169,4 +223,10 @@ export class ToolFactory {
 
     return `Invalid tool arguments: ${details}`;
   }
+}
+
+const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+
+function cellText(position: { x: number; y: number; z: number } | undefined): string {
+  return position ? `(${Math.floor(position.x)}, ${Math.floor(position.y)}, ${Math.floor(position.z)})` : 'an unknown place';
 }

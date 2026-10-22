@@ -64,6 +64,8 @@ function describeDamager(entity: BotEntityLike | undefined): string | undefined 
 
 export class BotConnection {
   private bot: mineflayer.Bot | null = null;
+  // The latest damage to the bot, kept for the death report of a command that was running (E-018).
+  private latestDamage: { description: string; time: number } | null = null;
   private state: ConnectionState = 'disconnected';
   private config: BotConfig;
   private callbacks: ConnectionCallbacks;
@@ -79,6 +81,11 @@ export class BotConnection {
 
   getBot(): mineflayer.Bot | null {
     return this.bot;
+  }
+
+  /** What last hurt the bot ("lava", "mob_attack from zombie (id 12)"), and when. */
+  lastDamage(): { description: string; time: number } | null {
+    return this.latestDamage;
   }
 
   getState(): ConnectionState {
@@ -169,6 +176,7 @@ export class BotConnection {
       if (cause) description += ` from ${cause}`;
       if (direct) description += ` via ${direct.name ?? direct.type ?? 'projectile'}`;
       lastDamage = { description, time: Date.now() };
+      this.latestDamage = lastDamage;
       // The cause id is the attacker's entity id + 1, or 0 when nothing caused it (fall, fire, drowning).
       this.callbacks.onDamage?.({ attackerId: packet.sourceCauseId > 0 ? packet.sourceCauseId - 1 : undefined, type, time: lastDamage.time });
     });

@@ -41,6 +41,13 @@ export const CREEPER_SWELL_RADIUS = 7;
 export const CREEPER_NEAR_RADIUS = 10;
 // A hit is a cue for this long, so one fight is one danger and not a new one with every blow.
 export const ATTACK_CUE_MS = 3000;
+// Lava damage this recent means the bot is in lava even when no cell it touches reads as lava (E-018).
+export const LAVA_DAMAGE_CUE_MS = 1000;
+
+/** The server burned the bot with lava within LAVA_DAMAGE_CUE_MS: it is in lava, whatever the cells around it read. */
+export function burnedByLava(damage: DamageInfo | null, now = Date.now()): boolean {
+  return damage?.type === 'lava' && now - damage.time <= LAVA_DAMAGE_CUE_MS;
+}
 // Hunger changes slowly: asking about it every 1.5 s would only spend calls.
 const REASK_MS: Partial<Record<CueKind, number>> = { hungry: 20000 };
 
@@ -55,7 +62,11 @@ export function readCues(bot: mineflayer.Bot, policy: Policy, damage: DamageInfo
   const air = airLevel(bot);
   const airText = air === undefined ? 'air unknown' : `${air} air left`;
   const health = typeof bot.health === 'number' ? bot.health : undefined;
-  if (inLavaNow(bot)) cues.push({ kind: 'in_lava', detail: `standing in lava (health ${health ?? '?'})` });
+  if (inLavaNow(bot)) {
+    cues.push({ kind: 'in_lava', detail: `standing in lava (health ${health ?? '?'})` });
+  } else if (burnedByLava(damage, now)) {
+    cues.push({ kind: 'in_lava', detail: `taking lava damage (health ${health ?? '?'})` });
+  }
   if (headInWater(bot)) {
     const column = columnAbove(bot);
     if (!column.open && column.ceiling) {

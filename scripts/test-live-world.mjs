@@ -608,6 +608,23 @@ try {
     await sleep(1500);
   });
 
+  await step('a move stops when the bot dies (M16)', async () => {
+    await call('move-to-position', { x: cx - 8, y: y0, z: cz - 8, range: 0, timeoutMs: 20000 });
+    const moving = call('move-to-position', { x: cx + 8, y: y0, z: cz + 8, range: 0, timeoutMs: 30000 }, { expectError: true, timeout: 60000 });
+    await sleep(600);
+    await cmd('/kill @s');
+    const reply = await moving;
+    expectIncludes(reply, 'The bot died during move-to-position', 'move-to-position after a death');
+    expectIncludes(reply, 'the command was stopped', 'move-to-position after a death');
+    // The respawned bot must not walk on toward the old target.
+    const [ax, , az] = await position();
+    await sleep(3000);
+    const [bx, , bz] = await position();
+    expect(Math.hypot(bx - ax, bz - az) <= 2, `after the respawn the bot moved from ${ax}, ${az} to ${bx}, ${bz}`);
+    await cmd(`/tp @s ${cx} ${y0} ${cz}`);
+    await sleep(1000);
+  });
+
   await step('events: pickup, damage, death and respawn', async () => {
     const pickups = await call('get-events', { types: ['item_picked_up'], limit: 100 });
     expectIncludes(pickups, 'Picked up', 'item_picked_up events');
