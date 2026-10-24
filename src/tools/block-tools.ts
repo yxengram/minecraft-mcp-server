@@ -64,6 +64,9 @@ export function registerBlockTools(factory: ToolFactory, getBot: () => mineflaye
         }
       }
 
+      // The block to place is whatever the LLM put in the hand; the walk there can change that (the pathfinder equips
+      // its scaffolding blocks), and once a fence came out as "egg" (M18 field test).
+      const intended = bot.heldItem?.name ?? null;
       let lastError = '';
       for (const face of possibleFaces) {
         const referencePos = placePos.plus(face.vector);
@@ -82,6 +85,12 @@ export function registerBlockTools(factory: ToolFactory, getBot: () => mineflaye
           }
 
           await bot.lookAt(placePos, true);
+
+          if (intended && bot.heldItem?.name !== intended) {
+            const again = bot.inventory.items().find(item => item.name === intended);
+            if (!again) return factory.createErrorResponse(`No ${intended} left to place (the walk there used it up)`);
+            await bot.equip(again, 'hand');
+          }
 
           try {
             await bot.placeBlock(referenceBlock, face.vector.scaled(-1));

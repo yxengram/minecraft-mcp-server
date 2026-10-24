@@ -3,11 +3,12 @@
 import { z } from 'zod';
 import type mineflayer from 'mineflayer';
 import pathfinderPkg from 'mineflayer-pathfinder';
-const { goals } = pathfinderPkg;
+const { goals, Movements } = pathfinderPkg;
 import { Vec3 } from 'vec3';
+import minecraftData from 'minecraft-data';
 import { BehaviorDefinition, delay } from '../task-manager.js';
 import { BotEntity, refreshEntity } from '../../tools/entity-utils.js';
-import { stopPathfinder } from '../../tools/movement-utils.js';
+import { configureMovements, stopPathfinder } from '../../tools/movement-utils.js';
 import { describeTarget, needsTarget, resolveTarget, TARGET_REQUIRED, targetLabel, targetShape } from './target.js';
 import { collectNearbyDrops, DeadlineReached, StepContext, waitWhilePaused, walkTo } from './actions.js';
 
@@ -64,6 +65,29 @@ function itemCount(bot: mineflayer.Bot, name: string): number {
   return bot.inventory.items().filter(item => item.name === name).reduce((sum, item) => sum + item.count, 0);
 }
 
+// How far standableTarget moves a target up or down to find a cell to stand in.
+const TARGET_ADJUST = 3;
+
+/**
+ * The cell to lead to: the given one, or the nearest standable cell within 3 above or below it. In the field test the
+ * target was the grass block inside the pen (its floor one higher), the pathfinder found no way into a solid cell,
+ * and the bot wandered off.
+ */
+export function standableTarget(bot: mineflayer.Bot, target: Vec3): Vec3 {
+  const cell = target.floored();
+  const solid = (pos: Vec3) => {
+    const block = bot.blockAt?.(pos) as { boundingBox?: string } | null | undefined;
+    return block ? block.boundingBox === 'block' : null;
+  };
+  const standable = (pos: Vec3) => solid(pos) === false && solid(pos.offset(0, 1, 0)) === false && solid(pos.offset(0, -1, 0)) === true;
+  if (solid(cell) === null || standable(cell)) return cell;
+  for (let d = 1; d <= TARGET_ADJUST; d++) {
+    if (standable(cell.offset(0, d, 0))) return cell.offset(0, d, 0);
+    if (standable(cell.offset(0, -d, 0))) return cell.offset(0, -d, 0);
+  }
+  return cell;
+}
+
 /** The lure the bot would hold for this animal: the one asked for, or the first tempt item it has. */
 export function chooseLure(bot: mineflayer.Bot, animal: string, asked?: string): { item: string } | { error: string } {
   const tempts = TEMPT_ITEMS[animal] ?? [];
@@ -101,7 +125,7 @@ export const leadBehavior: BehaviorDefinition<LeadParams, Prepared> = {
   },
   async run(ctx) {
     const { bot, params, prepared, setStep, report } = ctx;
-    const target = new Vec3(params.x, params.y, params.z);
+    const target = standableTarget(bot, new Vec3(params.x, params.y, params.z));
     const deadline = Date.now() + params.timeoutMs;
     const started = Date.now();
     let animal = prepared.animal;
@@ -144,8 +168,19 @@ export const leadBehavior: BehaviorDefinition<LeadParams, Prepared> = {
 
       let best = toTarget(await live());
       let bestAt = Date.now();
+      // Walking to the animal is progress too, while the bot gets closer to it than ever before (field test: a cow
+      // 30 blocks up a hill counted as "stopped following" before the bot had set off). Walking back again to an
+      // animal that does not follow is not, so that one still ends as stopped following.
+      let closestGap = Infinity;
       for (;;) {
         if (!(await waitWhilePaused(ctx, deadline))) throw new Error(await timeUp());
+        // The pathfinder equips tools and blocks when it digs or builds (walking back, or an instinct action between
+        // strides): without the food in hand the animal stops following (field test).
+        if (method === 'lure' && bot.heldItem?.name !== prepared.lure) {
+          const food = bot.inventory.items().find(item => item.name === prepared.lure);
+          if (!food) throw new Error(`no ${prepared.lure} left to lure ${label} with`);
+          await bot.equip(food, 'hand');
+        }
         const entity = await live();
         const remaining = toTarget(entity);
         if (remaining <= params.range) {
@@ -174,8 +209,13 @@ export const leadBehavior: BehaviorDefinition<LeadParams, Prepared> = {
         }
         const waitFrom = method === 'leash' ? LEASH_WAIT_DISTANCE : LURE_FOLLOW_DISTANCE;
         if (method === 'lure' && gap > LURE_LOST_DISTANCE) {
+          if (gap < closestGap - 0.5) {
+            closestGap = gap;
+            bestAt = Date.now();
+          }
           setStep(`walking back to ${label} (${gap.toFixed(1)} blocks away)`);
-          await step(ctx, new goals.GoalNear(entity.position.x, entity.position.y, entity.position.z, APPROACH_RANGE), deadline);
+          // The usual settings: nothing follows the bot on the way back.
+          await step(ctx, new goals.GoalNear(entity.position.x, entity.position.y, entity.position.z, APPROACH_RANGE), deadline, { gentle: false });
           continue;
         }
         if (gap > waitFrom) {
@@ -214,21 +254,54 @@ export const leadBehavior: BehaviorDefinition<LeadParams, Prepared> = {
   }
 };
 
-/** One stride; a stride that times out or finds no path is not the end, the loop decides. */
-async function step(ctx: StepContext, goal: InstanceType<typeof goals.GoalNear>, deadline: number): Promise<void> {
+// How far down the bot may drop while an animal follows it.
+const ANIMAL_DROP_DOWN = 3;
+
+/**
+ * The pathfinder settings for a way an animal can follow (field test, M18): no digging, no scaffolding, no parkour
+ * jumps and no sprinting. With the usual settings the bot climbed a 6-block bank the chicken could not, and left it
+ * behind. Null when the bot has no pathfinder movements to start from (test fakes).
+ */
+function animalMovements(bot: mineflayer.Bot): unknown {
+  const current = (bot.pathfinder as { movements?: unknown } | undefined)?.movements;
+  if (!current || !(bot as { registry?: unknown }).registry) return null;
+  const movements = new Movements(bot, minecraftData(bot.version)) as unknown as {
+    canDig: boolean; allowParkour: boolean; allow1by1towers: boolean; allowSprinting: boolean; maxDropDown: number; scafoldingBlocks: number[];
+  };
+  configureMovements(movements as never);
+  movements.canDig = false;
+  movements.allowParkour = false;
+  movements.allow1by1towers = false;
+  movements.allowSprinting = false;
+  movements.maxDropDown = ANIMAL_DROP_DOWN;
+  movements.scafoldingBlocks = [];
+  return movements;
+}
+
+/**
+ * One stride, on animal-friendly settings that are put back afterwards (so an instinct action that takes the body
+ * between strides moves as usual). A stride that times out or finds no path is not the end, the loop decides.
+ */
+async function step(ctx: StepContext, goal: InstanceType<typeof goals.GoalNear>, deadline: number, { gentle: animalWay = true } = {}): Promise<void> {
+  const pathfinder = ctx.bot.pathfinder as { movements?: unknown; setMovements?: (movements: unknown) => void };
+  const usual = pathfinder.movements;
+  const gentle = animalWay ? animalMovements(ctx.bot) : null;
+  if (gentle) pathfinder.setMovements?.(gentle);
   try {
     await walkTo(ctx, goal, Math.min(deadline, Date.now() + STEP_TIMEOUT_MS));
   } catch (error) {
     ctx.signal.throwIfAborted();
     if (Date.now() > deadline) throw new DeadlineReached();
     if (!(error instanceof DeadlineReached)) await delay(TICK_MS, ctx.signal);
+  } finally {
+    if (gentle && usual) pathfinder.setMovements?.(usual);
   }
 }
 
 /** Walks up to the animal and puts the lead on; true when the lead count went down within a second. */
 async function attachLead(ctx: StepContext, animal: BotEntity, deadline: number, report: (text: string) => void): Promise<boolean> {
   const { bot } = ctx;
-  await step(ctx, new goals.GoalNear(animal.position.x, animal.position.y, animal.position.z, 2), deadline);
+  await step(ctx, new goals.GoalNear(animal.position.x, animal.position.y, animal.position.z, 2), deadline, { gentle: false });
   const before = itemCount(bot, LEAD_ITEM);
   await bot.equip(bot.inventory.items().find(item => item.name === LEAD_ITEM)!, 'hand');
   const entity = refreshEntity(bot, animal) ?? animal;

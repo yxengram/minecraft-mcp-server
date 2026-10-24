@@ -5,9 +5,10 @@ import test, { ExecutionContext } from 'ava';
 import sinon from 'sinon';
 import { Vec3 } from 'vec3';
 import { groundAt, groundPoints, registerVisionTools } from '../src/tools/vision-tools.js';
-import { chooseLure, leadBehavior, STUCK_MS, TEMPT_ITEMS } from '../src/autopilot/behaviors/lead.js';
+import { chooseLure, leadBehavior, standableTarget, STUCK_MS, TEMPT_ITEMS } from '../src/autopilot/behaviors/lead.js';
 import { BEHAVIORS } from '../src/autopilot/autopilot.js';
-import { asBot, createFactory } from './_helpers.js';
+import { asBot, createFactory, createFakeWorld } from './_helpers.js';
+import { registerBlockTools } from '../src/tools/block-tools.js';
 
 // ---------------------------------------------------------------- ground-height
 
@@ -30,11 +31,14 @@ const plains = (x: number, z: number, y: number) => (y < 68 ? 'dirt' : y === 68 
 test('groundAt surface: the ground and where to stand, through grass and tree tops, with the height against the bot', (t) => {
   const bot = groundBot((x, z, y) => {
     if (x === 3 && (y === 75 || y === 74)) return 'oak_leaves';
+    if (x === 4 && y === 75) return 'oak_leaves';
+    if (x === 4 && y >= 69 && y <= 74) return 'oak_log';
     return plains(x, z, y);
   });
   t.is(groundAt(bot as never, 10, 0, 'surface'), 'ground at y=68 (grass_block), stand at y=69 (1 lower than the bot)');
   t.is(groundAt(bot as never, 5, 0, 'surface'), 'ground at y=68 (grass_block), stand at y=69 (1 lower than the bot)', 'tall grass is passed through');
   t.is(groundAt(bot as never, 3, 0, 'surface'), 'ground at y=68 (grass_block), stand at y=69 (1 lower than the bot), under leaves at y=75');
+  t.is(groundAt(bot as never, 4, 0, 'surface'), 'ground at y=68 (grass_block), stand at y=69 (1 lower than the bot), under leaves at y=75', 'the trunk is looked through too');
 });
 
 test('groundAt surface: water surface, depth and floor; lava; an unloaded column', (t) => {
@@ -132,6 +136,16 @@ test('lead prepare: not an animal, a lead asked for but none, auto with a lead p
   t.true(BEHAVIORS.some(behavior => behavior.name === 'lead'), 'start-task offers it');
 });
 
+test('standableTarget: a target inside the ground or in the air moves to the cell to stand in, within 3', (t) => {
+  // Ground: solid up to y 77 at x 0, up to y 63 elsewhere.
+  const bot = { blockAt: (pos: Vec3) => ({ boundingBox: pos.y <= (pos.x === 0 ? 77 : 63) ? 'block' : 'empty' }) };
+  t.deepEqual(standableTarget(bot as never, new Vec3(0, 77, 0)).toArray(), [0, 78, 0], 'the grass block inside the pen: one up');
+  t.deepEqual(standableTarget(bot as never, new Vec3(5, 66, 0)).toArray(), [5, 64, 0], 'in the air: down to the floor');
+  t.deepEqual(standableTarget(bot as never, new Vec3(5, 64, 0)).toArray(), [5, 64, 0], 'already standable');
+  t.deepEqual(standableTarget(bot as never, new Vec3(5, 50, 0)).toArray(), [5, 50, 0], 'too deep: left as given');
+  t.deepEqual(standableTarget({ blockAt: () => null } as never, new Vec3(5, 50.7, 0)).toArray(), [5, 50, 0], 'unloaded: left as given');
+});
+
 // ---------------------------------------------------------------- lead: running
 
 function useClock(t: ExecutionContext) {
@@ -182,9 +196,26 @@ test.serial('lure: holds the wheat, walks the cow to the target in strides, and 
   t.true(settled.ok, settled.ok ? '' : settled.error.message);
   t.regex((settled as { value: string }).value, /^Led cow \(id 2\) to \(20, 64, 0\) by lure \(wheat\) in \d+s; it is \d\.\d blocks from the target$/);
   t.true(world.bot.equip.calledWithMatch({ name: 'wheat' }, 'hand'));
+  t.is(world.bot.heldItem?.name, 'wheat', 'still holding the lure at the end');
   t.true(steps.some(text => text.startsWith('walking cow (id 2) toward the target')));
   t.true(steps.some(text => text.startsWith('drawing cow (id 2) onto the target')), 'from the target the bot walks on past it');
   t.false(world.bot.activateEntity.called, 'no lead');
+});
+
+test.serial('lure: the food goes back in the hand when walking changed what the bot holds', async (t) => {
+  const clock = useClock(t);
+  const world = leadBot([{ name: 'wheat', count: 5 }, { name: 'dirt', count: 5 }]);
+  let strides = 0;
+  walking(world.bot, () => {
+    // The pathfinder placed a block on the first stride, so dirt is in the hand.
+    if (strides++ === 0) world.bot.heldItem = { name: 'dirt' };
+    const away = world.animal.position.minus(world.bot.entity.position);
+    world.animal.position = world.bot.entity.position.plus(away.scaled(2.5 / (away.norm() || 1)));
+  });
+  const { settled } = await runLead(t, clock, world);
+  t.true(settled.ok);
+  t.true(world.bot.equip.callCount >= 2, 'equipped again after the stride');
+  t.is(world.bot.heldItem?.name, 'wheat');
 });
 
 test.serial('lure: walks back to a cow left behind, and gives up when it stops following', async (t) => {
@@ -248,3 +279,25 @@ test.serial('leash: a lead that does not hold falls back to the lure with auto, 
   t.false(second.settled.ok);
   t.regex((second.settled as { error: Error }).error.message, /could not put the lead on cow \(id 2\)/);
 });
+
+// ---------------------------------------------------------------- place-block keeps the block the LLM chose
+
+test('place-block puts back in the hand the block chosen before the walk, when the walk changed it', async (t) => {
+  const { bot, blocks } = createFakeWorld({ '5,63,0': 'stone' });
+  const fence = { name: 'oak_fence', count: 1, type: 1 };
+  const egg = { name: 'egg', count: 1, type: 2 };
+  Object.assign(bot, { heldItem: fence, inventory: { items: () => [fence, egg] } });
+  // The approach swaps the hand, as the pathfinder's scaffolding did.
+  bot.pathfinder.goto.callsFake(async () => { bot.heldItem = egg; bot.entity.position = new Vec3(3, 64, 0); });
+  bot.equip.callsFake(async (item: unknown) => { bot.heldItem = item; });
+  bot.entity.position = new Vec3(20, 64, 0);
+  const { factory, getTool } = createFactory();
+  registerBlockTools(factory, asBot(bot));
+
+  const text = (await getTool('place-block')!.execute({ x: 5, y: 64, z: 0 })).content[0].text;
+
+  t.regex(text, /^Placed block at \(5, 64, 0\)/);
+  t.true(bot.equip.calledWith(fence, 'hand'));
+  t.is(blocks.get('5,64,0'), 'oak_fence', 'the fence was placed, not the egg');
+});
+

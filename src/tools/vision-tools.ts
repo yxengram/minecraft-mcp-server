@@ -481,6 +481,8 @@ export function groundAt(bot: mineflayer.Bot, x: number, z: number, view: Exclud
         canopy ??= y;
         continue;
       }
+      // Under the leaves, the trunk is not the ground either (the field test stood the bot "on" an oak log).
+      if (canopy !== null && /(_log|_wood|_stem|^bamboo)$/.test(block.name)) continue;
       if (block.name === 'lava') return `lava at y=${y}${under()}`;
       if (block.name === 'water' || isWaterLikeName(block.name)) {
         let floor = y - 1;
