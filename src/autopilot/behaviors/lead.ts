@@ -244,8 +244,16 @@ async function attachLead(ctx: StepContext, animal: BotEntity, deadline: number,
   return itemCount(bot, LEAD_ITEM) < before;
 }
 
-/** Takes the lead off (it drops) and picks it up again. */
+// A dropped item cannot be picked up for 10 ticks: standing on it at once picks up nothing (live test).
+const PICKUP_DELAY_MS = 700;
+const PICKUP_TRIES = 3;
+
+/** Takes the lead off (it drops) and picks it up again, trying a few times while the count is not back. */
 async function releaseLead(ctx: StepContext, animal: BotEntity, deadline: number): Promise<void> {
+  const before = itemCount(ctx.bot, LEAD_ITEM);
   await ctx.bot.activateEntity(animal);
-  await collectNearbyDrops(ctx, animal.position, deadline);
+  for (let attempt = 0; attempt < PICKUP_TRIES && itemCount(ctx.bot, LEAD_ITEM) <= before; attempt++) {
+    await delay(PICKUP_DELAY_MS, ctx.signal);
+    await collectNearbyDrops(ctx, animal.position, deadline);
+  }
 }
