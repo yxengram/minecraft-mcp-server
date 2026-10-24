@@ -394,6 +394,53 @@ try {
     await cmd('/kill @e[type=pig,distance=..16]');
   });
 
+  await step('ground-height (M18)', async () => {
+    await call('move-to-position', { x: cx, y: y0, z: cz, range: 0, timeoutMs: 20000 });
+    expectIncludes(await call('ground-height', { x: cx + 3, z: cz + 3 }), `ground at y=${y0 - 1} (stone), stand at y=${y0}`, 'ground-height on the arena floor');
+    expectIncludes(await call('ground-height', { x: cx + 3000, z: cz }), 'not loaded', 'ground-height far away');
+    const line = await call('ground-height', { direction: 'east', distance: 8, step: 4 });
+    expect(line.split('\n').filter(text => text.startsWith('- ')).length === 2, `ground-height along a line:\n${line}`);
+    await cmd(`/setblock ${cx + 4} ${y0} ${cz - 4} water`);
+    try {
+      await sleep(500);
+      expectIncludes(await call('ground-height', { x: cx + 4, z: cz - 4 }), `water surface at y=${y0}`, 'ground-height on water');
+    } finally {
+      await cmd(`/fill ${cx - 9} ${y0} ${cz - 9} ${cx + 9} ${y0 + 2} ${cz + 9} air replace water`);
+    }
+  });
+
+  await step('lead-animal: by lure and on a lead (M18)', async () => {
+    await call('move-to-position', { x: cx, y: y0, z: cz, range: 0, timeoutMs: 20000 });
+    await cmd('/kill @e[type=cow,distance=..32]');
+    await cmd('/clear @s wheat');
+    await cmd('/clear @s lead');
+    await cmd(`/summon cow ${cx - 6} ${y0} ${cz - 6}`);
+    await cmd('/give @s wheat 4');
+    await waitForCount('wheat', count => count >= 4, 'wheat');
+    await sleep(1000);
+    const cowNear = async (x, z) => {
+      const text = await call('list-entities', { type: 'cow', maxDistance: 32 });
+      const at = text.match(/cow \[animal\], id \d+, at \((-?\d+), (-?\d+), (-?\d+)\)/);
+      return at && Math.hypot(Number(at[1]) - x, Number(at[3]) - z) <= 3;
+    };
+    try {
+      expectIncludes(await call('lead-animal', { type: 'cow', x: cx + 6, y: y0, z: cz + 6, method: 'lure', timeoutMs: 120000 }, { timeout: 150000 }),
+        'by lure (wheat)', 'lead-animal by lure');
+      expect(await cowNear(cx + 6, cz + 6), 'the cow is not by the lure target');
+      await cmd('/give @s lead 1');
+      await waitForCount('lead', count => count >= 1, 'a lead');
+      expectIncludes(await call('lead-animal', { type: 'cow', x: cx - 6, y: y0, z: cz - 6, method: 'leash', timeoutMs: 120000 }, { timeout: 150000 }),
+        'on a lead', 'lead-animal on a lead');
+      expect(await cowNear(cx - 6, cz - 6), 'the cow is not by the lead target');
+      await waitForCount('lead', count => count >= 1, 'the lead back in the inventory');
+      await cmd('/clear @s lead');
+      expectIncludes(await call('lead-animal', { type: 'cow', x: cx, y: y0, z: cz, method: 'leash' }, { expectError: true }), 'No lead', 'lead-animal with no lead left');
+    } finally {
+      await cmd('/kill @e[type=cow,distance=..32]');
+      await cmd('/clear @s wheat');
+    }
+  });
+
   await step('tasks: guard the helper (kills hostiles, spares animals)', async () => {
     // The helper stays in creative mode (set up above), so the zombie cannot hurt it.
     await cmd(`/gamemode creative ${HELPER_NAME}`);

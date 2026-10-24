@@ -2,7 +2,7 @@
 
 **English** | [简体中文](README.zh-CN.md)
 
-A Minecraft bot that a large language model (for example Claude) plays through the [Model Context Protocol](https://modelcontextprotocol.io) (MCP). The bot runs on [Mineflayer](https://github.com/PrismarineJS/mineflayer). The LLM sees the world and acts in it through 64 MCP tools.
+A Minecraft bot that a large language model (for example Claude) plays through the [Model Context Protocol](https://modelcontextprotocol.io) (MCP). The bot runs on [Mineflayer](https://github.com/PrismarineJS/mineflayer). The LLM sees the world and acts in it through 66 MCP tools.
 
 What sets this fork apart is the **Autopilot**: background tasks for long jobs, and an **instinct** that reacts to danger within about a second. The instinct pairs a fast *decision model* with code that carries out the chosen move. Without it, the LLM would have to notice every creeper in time by itself.
 
@@ -25,7 +25,7 @@ The upstream project is a good, simple bridge: the LLM calls a tool, and the bot
 
 ## What changed
 
-### 1. More tools, and seeing like a player (23 → 64 tools)
+### 1. More tools, and seeing like a player (23 → 66 tools)
 - **Moving:** follow or flee from an entity, stop, saved waypoints.
 - **Building and mining:** collect a number of blocks, clear or fill a region, dig a tunnel, read and use containers.
 - **Interacting:** right-click blocks and entities, trade with villagers, sleep and wake, ride and dismount, attack.
@@ -37,7 +37,7 @@ The upstream project is a good, simple bridge: the LLM calls a tool, and the bot
   - `get-cursor-target`: what is under the crosshair.
 
 ### 2. The Autopilot
-- **Background tasks:** `follow`, `flee`, `guard`, `gather`, `hunt`, `return-home`. A tool call returns at once; progress arrives as events.
+- **Background tasks:** `follow`, `flee`, `guard`, `gather`, `hunt`, `return-home`, `lead`. A tool call returns at once; progress arrives as events.
 - **One body, one driver:** an action arbiter makes sure only one thing controls the bot's body at a time. A command from the LLM runs immediately, and the reply says what it interrupted.
 - **Instinct:** code senses danger and works out what the bot can do; a decision model on [OpenRouter](https://openrouter.ai) picks the option; code carries it out. See [Design](#design).
 - **Policy:** the LLM tunes the instinct, the combat rules, chat handling and the decision model with `get-policy` and `set-policy`. It can also say what it is up to (`instinct.intent`), so the instinct does not "rescue" the bot from something it is doing on purpose.
@@ -45,7 +45,7 @@ The upstream project is a good, simple bridge: the LLM calls a tool, and the bot
 
 ### 3. Tested in the game, not only on paper
 - 820 unit tests.
-- A live test that exercises all 64 tools against a real server.
+- A live test that exercises all 66 tools against a real server.
 - A scenario test that compares the bot with and without the Autopilot: zombie waves, being chased by zombies with bare hands, creepers, hunger, fire, drowning, diving on purpose, a lava shore, chat.
 - A 10-day survival test on Normal difficulty. The bot survived all ten nights without dying and built a 7×7 house with a door, eight glass windows, a bed, a chest, a crafting table, a furnace and torches.
 - A 5-day survival test on Hard difficulty, from an empty inventory. The bot survived all five nights without dying, sleeping in a sealed pit with a bed, and ended with iron armor and 14 cooked meals.
@@ -160,7 +160,7 @@ Ask the LLM to do things in Minecraft. A few habits make it much better at the g
 
 ---
 
-## Tools (64)
+## Tools (66)
 
 A command that moves or uses the bot's body stops when the bot dies, and its reply says where and why the bot died and where it respawned. The pathfinder keeps away from lava shores when it can and never bridges lava.
 
@@ -201,6 +201,7 @@ A command that moves or uses the bot's body stops when the bot dies, and its rep
 - `place-block`: place a block; walks to a spot from which it can see a face to click, never into the target
 - `dig-block`: dig a block with the best tool in the inventory; refuses when no tool the bot has makes it drop anything
 - `collect-block`: mine and pick up a number of blocks of one type (runs as a `gather` task; skips blocks next to lava or water)
+- `lead-animal`: lead one animal to a point, on a lead or holding a food it follows (runs as a `lead` task)
 - `clear-region`: dig out a box (up to 512 blocks)
 - `fill-region`: fill the empty cells of a box (up to 512 blocks)
 - `dig-tunnel`: dig a straight tunnel
@@ -230,6 +231,7 @@ A command that moves or uses the bot's body stops when the bot dies, and its rep
 - `get-events`: recent game events
 - `wait-for-event`: wait (up to 55 s) for an event, a hostile mob coming close, or health dropping
 - `scan-area`: the terrain in text: heights, slopes, surface, water and lava, notable blocks, entities
+- `ground-height`: the ground at faraway points (one, several, or a line in a direction): where to stand, water depth, lava; in the Nether, the standable levels near the bot's height
 - `render-map`: a PNG map, top-down or cross-section (needs a client and model that accept images)
 - `detect-gamemode`: the game mode
 
@@ -256,6 +258,7 @@ A command that moves or uses the bot's body stops when the bot dies, and its rep
   - `gather` `{ blockType, count? }`
   - `hunt` `{ animal, count? }`
   - `return-home` `{ waypoint?, sleep? }`
+  - `lead` `{ target | entityId, x, y, z, range?, method?, item? }`
 - `guard` fights hostile mobs only. Piglins count as hostile unless the bot wears a piece of gold armor; zombified piglins and endermen are neutral.
 - `hunt` never attacks players or tamed animals.
 - A new task replaces the current one, unless `replace` is `false`.

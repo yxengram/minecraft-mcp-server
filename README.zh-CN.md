@@ -2,7 +2,7 @@
 
 [English](README.md) | **简体中文**
 
-这是一个由大语言模型（例如 Claude）通过 [Model Context Protocol](https://modelcontextprotocol.io)（MCP）操控的 Minecraft 机器人。机器人基于 [Mineflayer](https://github.com/PrismarineJS/mineflayer)，LLM 通过 64 个 MCP 工具观察世界并在其中行动。
+这是一个由大语言模型（例如 Claude）通过 [Model Context Protocol](https://modelcontextprotocol.io)（MCP）操控的 Minecraft 机器人。机器人基于 [Mineflayer](https://github.com/PrismarineJS/mineflayer)，LLM 通过 66 个 MCP 工具观察世界并在其中行动。
 
 这个分支的特点是 **Autopilot**：用后台任务处理长时间的工作，再加上一个约一秒内对危险作出反应的**本能**。本能由一个快速的*决策模型*和执行所选动作的代码配合完成。没有它，LLM 就得自己及时注意到每一只苦力怕。
 
@@ -25,7 +25,7 @@
 
 ## 做了哪些改变
 
-### 1. 更多工具，像玩家一样看世界（23 → 64 个工具）
+### 1. 更多工具，像玩家一样看世界（23 → 66 个工具）
 - **移动：**跟随或逃离某个实体、停止、保存路点。
 - **建造与采集：**采集指定数量的方块、清空或填充一个区域、挖隧道、查看和使用容器。
 - **交互：**右键方块和实体、与村民交易、睡觉和起床、骑乘和下来、攻击。
@@ -37,7 +37,7 @@
   - `get-cursor-target`：准星下是什么。
 
 ### 2. Autopilot
-- **后台任务：**`follow`、`flee`、`guard`、`gather`、`hunt`、`return-home`。工具调用立即返回，进展以事件报告。
+- **后台任务：**`follow`、`flee`、`guard`、`gather`、`hunt`、`return-home`、`lead`。工具调用立即返回，进展以事件报告。
 - **一个身体，一个驾驶者：**动作仲裁器保证同一时间只有一方控制机器人的身体。LLM 的命令立即执行，回复会说明它打断了什么。
 - **本能：**代码感知危险并算出机器人现在能做什么；[OpenRouter](https://openrouter.ai) 上的决策模型从中选择；代码执行。见[设计理念](#设计理念)。
 - **策略：**LLM 用 `get-policy` 和 `set-policy` 调整本能、战斗规则、聊天处理和决策模型。它还可以说明自己在做什么（`instinct.intent`），这样本能就不会把它从有意为之的事情里“救”出来。
@@ -45,7 +45,7 @@
 
 ### 3. 在游戏里实测，而不只是纸面
 - 820 个单元测试。
-- 实机测试：在真实服务器上逐一运行全部 64 个工具。
+- 实机测试：在真实服务器上逐一运行全部 66 个工具。
 - 情景测试：比较有无 Autopilot 时机器人的表现，包括僵尸潮、空手被僵尸追赶、苦力怕、饥饿、着火、溺水、有意潜水、岩浆岸边和聊天。
 - 普通难度下的 10 天生存测试：机器人度过了全部十个夜晚，没有死亡，并建起一座 7×7 的房子，带门、八扇玻璃窗、床、箱子、工作台、熔炉和火把。
 - 困难难度下的 5 天生存测试，从空背包开始：机器人度过了全部五个夜晚，没有死亡；夜里睡在挖出的封闭坑里的床上，最后穿着铁甲，还剩 14 份熟食。
@@ -160,7 +160,7 @@ API key 只从环境变量 `OPENROUTER_API_KEY` 读取，不要把它写进仓�
 
 ---
 
-## 工具（64 个）
+## 工具（66 个）
 
 移动或使用 bot 身体的命令在 bot 死亡时会停止，回复说明 bot 死在哪里、因为什么、在哪里复活。寻路器能绕开岩浆岸边时就绕开，也不再往岩浆上搭方块走过去。
 
@@ -201,6 +201,7 @@ API key 只从环境变量 `OPENROUTER_API_KEY` 读取，不要把它写进仓�
 - `place-block`：放置方块；会走到能看到可点击的面的位置，绝不走进目标格
 - `dig-block`：用背包里最合适的工具挖方块；没有能让它掉落的工具时拒绝
 - `collect-block`：采集并拾取一定数量的同种方块（以 `gather` 任务运行；跳过挨着岩浆或水的方块）
+- `lead-animal`：把一只动物带到某处，用拴绳或手持它爱吃的食物（以 `lead` 任务运行）
 - `clear-region`：挖空一个长方体（最多 512 格）
 - `fill-region`：填满长方体中的空格（最多 512 格）
 - `dig-tunnel`：挖一条直隧道
@@ -230,6 +231,7 @@ API key 只从环境变量 `OPENROUTER_API_KEY` 读取，不要把它写进仓�
 - `get-events`：最近的游戏事件
 - `wait-for-event`：等待（最多 55 秒）某个事件、敌对生物靠近或生命下降
 - `scan-area`：用文字描述地形：高度、坡度、地表、水和岩浆、值得注意的方块、实体
+- `ground-height`：远处的地面高度（一个点、多个点或某个方向上的一串点）：在哪里能站、水有多深、哪里是岩浆；在下界给出 bot 所在高度附近能站的层
 - `render-map`：PNG 地图，俯视或剖面（需要支持图片的客户端和模型）
 - `detect-gamemode`：游戏模式
 
@@ -256,6 +258,7 @@ API key 只从环境变量 `OPENROUTER_API_KEY` 读取，不要把它写进仓�
   - `gather` `{ blockType, count? }`
   - `hunt` `{ animal, count? }`
   - `return-home` `{ waypoint?, sleep? }`
+  - `lead` `{ target | entityId, x, y, z, range?, method?, item? }`
 - `guard` 只与敌对生物战斗。bot 没穿金盔甲时，猪灵算敌对；僵尸猪灵和末影人算中立。
 - `hunt` 从不攻击玩家或驯服的动物。
 - 新任务会替换当前任务，除非 `replace` 为 `false`。

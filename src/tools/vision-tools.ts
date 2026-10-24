@@ -11,7 +11,7 @@ import {
 } from './block-colors.js';
 import {
   Column, SurfaceGrid, ViewMode, columnAt, compassDirection, describeOffset, isPassable,
-  scanSurface, surfaceName, worldBounds
+  resolveView, scanSurface, surfaceName, worldBounds
 } from './terrain-utils.js';
 
 const VIEW_MODES = ['auto', 'surface', 'current-level'] as const;
@@ -437,7 +437,146 @@ function renderSlice(bot: mineflayer.Bot, radius: number, axis: 'x' | 'z', showE
   return { png: canvas.png(), text: text.join('\n') };
 }
 
+// ---- ground-height (E-020) ----------------------------------------------------------------------------------------
+
+// The surface view looks down from this far above the bot's feet; current-level looks this far up and down.
+export const GROUND_SCAN_ABOVE = 64;
+export const LEVEL_SCAN_UP = 16;
+export const LEVEL_SCAN_DOWN = 32;
+export const MAX_GROUND_POINTS = 64;
+const MAX_EXTRA_LEVELS = 3;
+const UNSTANDABLE_FLOORS = new Set(['lava', 'magma_block', 'fire', 'soul_fire', 'campfire', 'soul_campfire', 'cactus', 'powder_snow']);
+const DIRECTION_VECTORS: Record<string, [number, number]> = {
+  north: [0, -1], northeast: [1, -1], east: [1, 0], southeast: [1, 1],
+  south: [0, 1], southwest: [-1, 1], west: [-1, 0], northwest: [-1, -1]
+};
+export const GROUND_DIRECTIONS = Object.keys(DIRECTION_VECTORS) as [string, ...string[]];
+
+type BlockAt = (pos: Vec3) => { name: string; boundingBox?: string } | null;
+
+/**
+ * The ground at column (x, z), as one line (E-020): the first block that is not passable looking down from above
+ * (surface), or the standable cells near the bot's own level (current-level: under a roof, as in the Nether, the
+ * first solid block from above is the roof). Reads loaded blocks only.
+ */
+export function groundAt(bot: mineflayer.Bot, x: number, z: number, view: Exclude<ViewMode, 'auto'>): string {
+  const blockAt: BlockAt = pos => bot.blockAt(pos, false) as ReturnType<BlockAt>;
+  const feet = bot.entity.position.floored();
+  const { minY, maxY } = worldBounds(bot);
+  const dy = (y: number) => {
+    const d = y - feet.y;
+    return d === 0 ? 'level with the bot' : `${Math.abs(d)} ${d > 0 ? 'higher' : 'lower'} than the bot`;
+  };
+  const cell = (y: number) => blockAt(new Vec3(x, y, z));
+
+  if (view === 'surface') {
+    // Tree tops are not the ground: look through the leaves and say how high they are.
+    let canopy: number | null = null;
+    const under = () => (canopy === null ? '' : `, under leaves at y=${canopy}`);
+    for (let y = Math.min(maxY, feet.y + GROUND_SCAN_ABOVE); y >= minY; y--) {
+      const block = cell(y);
+      if (!block) return 'not loaded (beyond what the bot can see)';
+      if (isPassable(block as never)) continue;
+      if (block.name.endsWith('_leaves')) {
+        canopy ??= y;
+        continue;
+      }
+      if (block.name === 'lava') return `lava at y=${y}${under()}`;
+      if (block.name === 'water' || isWaterLikeName(block.name)) {
+        let floor = y - 1;
+        while (floor >= minY && cell(floor) && isWaterLikeName(cell(floor)!.name)) floor--;
+        const bottom = cell(floor);
+        return `water surface at y=${y}, ${y - floor} deep, floor at y=${floor} (${bottom ? surfaceName(bottom.name) : 'not loaded'})${under()}`;
+      }
+      return `ground at y=${y} (${surfaceName(block.name)}), stand at y=${y + 1} (${dy(y + 1)})${under()}`;
+    }
+    return `no ground down to y=${minY}`;
+  }
+
+  const top = Math.min(maxY, feet.y + LEVEL_SCAN_UP);
+  const bottom = Math.max(minY, feet.y - LEVEL_SCAN_DOWN);
+  const levels: number[] = [];
+  let loaded = false;
+  for (let y = top; y >= bottom; y--) {
+    const floor = cell(y);
+    if (!floor) continue;
+    loaded = true;
+    if (isPassable(floor as never) || UNSTANDABLE_FLOORS.has(floor.name) || isWaterLikeName(floor.name)) continue;
+    const feetCell = cell(y + 1);
+    const headCell = cell(y + 2);
+    if (feetCell && headCell && isPassable(feetCell as never) && isPassable(headCell as never)) levels.push(y + 1);
+  }
+  if (!loaded) return 'not loaded (beyond what the bot can see)';
+  if (levels.length === 0) return `no standable cell between y=${bottom} and y=${top}`;
+  levels.sort((a, b) => Math.abs(a - feet.y) - Math.abs(b - feet.y) || b - a);
+  const [best, ...others] = levels;
+  const floorName = surfaceName(cell(best - 1)!.name);
+  const also = others.length > 0 ? ` (also standable at y=${others.slice(0, MAX_EXTRA_LEVELS).join(', y=')})` : '';
+  return `stand at y=${best} on ${floorName} (${dy(best)})${also}`;
+}
+
+function isWaterLikeName(name: string): boolean {
+  return name === 'water' || name === 'bubble_column' || name === 'kelp' || name === 'kelp_plant' || name === 'seagrass' || name === 'tall_seagrass';
+}
+
+/** The columns ground-height asks about, as absolute x, z. */
+export function groundPoints(bot: mineflayer.Bot, args: {
+  x?: number; z?: number; points?: { x: number; z: number }[]; relative?: boolean;
+  direction?: string; distance?: number; step?: number;
+}): { error: string } | { points: { x: number; z: number }[] } {
+  const feet = bot.entity.position.floored();
+  const modes = [args.x !== undefined || args.z !== undefined, args.points !== undefined, args.direction !== undefined].filter(Boolean).length;
+  if (modes !== 1) return { error: 'Give x and z, or points, or direction (exactly one of them)' };
+  const offset = (p: { x: number; z: number }) => (args.relative ? { x: feet.x + Math.floor(p.x), z: feet.z + Math.floor(p.z) } : { x: Math.floor(p.x), z: Math.floor(p.z) });
+  if (args.direction !== undefined) {
+    const [ux, uz] = DIRECTION_VECTORS[args.direction];
+    const distance = args.distance ?? 64;
+    const step = args.step ?? 8;
+    const points: { x: number; z: number }[] = [];
+    // Diagonal steps count along the diagonal, so `distance` is the distance walked.
+    const scale = ux !== 0 && uz !== 0 ? Math.SQRT1_2 : 1;
+    for (let d = step; d <= distance && points.length < MAX_GROUND_POINTS; d += step) {
+      points.push({ x: feet.x + Math.round(ux * d * scale), z: feet.z + Math.round(uz * d * scale) });
+    }
+    return { points };
+  }
+  if (args.points !== undefined) return { points: args.points.map(offset) };
+  if (args.x === undefined || args.z === undefined) return { error: 'Give both x and z' };
+  return { points: [offset({ x: args.x, z: args.z })] };
+}
+
 export function registerVisionTools(factory: ToolFactory, getBot: () => mineflayer.Bot): void {
+  factory.registerTool(
+    "ground-height",
+    "Find the ground at faraway points without walking there: where to stand, water surface and depth, or lava. Give one point (x, z), several (points), or a direction and distance to sample a line every few blocks. Under a roof, as in the Nether, it finds the standable levels near the bot's own height instead. Only blocks the bot has loaded (about 160 blocks around it) can be read",
+    {
+      x: z.coerce.number().optional().describe("X of one point"),
+      z: z.coerce.number().optional().describe("Z of one point"),
+      points: z.array(z.object({ x: z.coerce.number(), z: z.coerce.number() })).min(1).max(MAX_GROUND_POINTS).optional()
+        .describe(`Several points (max ${MAX_GROUND_POINTS})`),
+      relative: z.boolean().optional().describe("x, z and points are offsets from the bot (default: false)"),
+      direction: z.enum(GROUND_DIRECTIONS).optional().describe("Sample a line from the bot in this direction instead"),
+      distance: z.coerce.number().int().min(1).max(160).optional().describe("How far the line goes (default: 64)"),
+      step: z.coerce.number().int().min(1).max(32).optional().describe("Blocks between samples on the line (default: 8)"),
+      view: viewSchema
+    },
+    async (args: { x?: number; z?: number; points?: { x: number; z: number }[]; relative?: boolean; direction?: string; distance?: number; step?: number; view?: ViewMode }) => {
+      const bot = getBot();
+      const chosen = groundPoints(bot, args);
+      if ('error' in chosen) return factory.createErrorResponse(chosen.error);
+      // The Nether's bedrock roof can be far above the head, out of sight of isUnderRoof's few blocks (E-020).
+      const roofed = bot.game?.dimension?.replace(/^minecraft:/, '') === 'the_nether';
+      const view = (args.view ?? 'auto') === 'auto' && roofed ? 'current-level' : resolveView(bot, args.view ?? 'auto');
+      const feet = bot.entity.position.floored();
+      const lines = chosen.points.map(({ x, z }) => {
+        const where = describeOffset(x - feet.x, z - feet.z);
+        return `- (${x}, ${z}), ${where}: ${groundAt(bot, x, z, view)}`;
+      });
+      const header = `Ground ${view === 'surface' ? 'from above' : "near the bot's level (under a roof)"}, from the bot at (${feet.x}, ${feet.y}, ${feet.z}) in ${bot.game?.dimension ?? 'unknown dimension'}:`;
+      return factory.createResponse([header, ...lines].join('\n'));
+    }
+  );
+
   factory.registerTool(
     "scan-area",
     "Describe the terrain around the bot in text: ground height and slope in each direction, surface blocks, cliffs, water and lava, notable blocks (ores, chests, beds, trees, spawners) and nearby entities",

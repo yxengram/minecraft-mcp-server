@@ -9,6 +9,7 @@ import { guardBehavior } from './behaviors/guard.js';
 import { gatherBehavior } from './behaviors/gather.js';
 import { huntBehavior } from './behaviors/hunt.js';
 import { returnHomeBehavior } from './behaviors/return-home.js';
+import { leadBehavior } from './behaviors/lead.js';
 import { PolicyStore } from './policy.js';
 import { OpenRouterClient, OpenRouterClientOptions } from '../decisions/openrouter-client.js';
 import { ChatCommand, ChatCommandOutcome, DecisionHooks, planChatCommand } from '../decisions/decision-hooks.js';
@@ -21,7 +22,7 @@ import type { WaypointStore } from '../waypoint-store.js';
 import { stopPathfinder } from '../tools/movement-utils.js';
 
 export const BEHAVIORS = [
-  followBehavior, fleeBehavior, guardBehavior, gatherBehavior, huntBehavior, returnHomeBehavior
+  followBehavior, fleeBehavior, guardBehavior, gatherBehavior, huntBehavior, returnHomeBehavior, leadBehavior
 ] as unknown as BehaviorDefinition<never, never>[];
 
 export interface AutopilotOptions {
