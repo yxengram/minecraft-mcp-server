@@ -740,6 +740,11 @@ function wallInPocket(world: World) {
   world.set(3, 65, 0, 'air');
 }
 
+/** Walls in the start cell (x 0, z 0, feet at y 64 under the stone ceiling) on every side, the bot still in the water. */
+function wallInStart(world: World) {
+  for (const [x, z] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) for (const y of [64, 65]) world.set(x, y, z, 'stone');
+}
+
 for (const resume of [0.9, 0.2]) {
   test.serial(`an action that ends with the bot walled in holds the task, never resumed (resume task p=${resume}; E-048)`, async (t) => {
     const clock = useClock(t);
@@ -775,13 +780,120 @@ test.serial('turning the instinct off while the bot is walled in holds the task 
   t.is(holder()?.holder, 'instinct swim_to_air');
 
   // Walled in where it is, still swimming, when the AI player turns the instinct off.
-  for (const [x, z] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) for (const y of [64, 65]) world.set(x, y, z, 'stone');
+  wallInStart(world);
   t.true(store.update({ instinct: { enabled: false } }, 'llm').ok);
   engine.tick();
   await clock.tickAsync(100);
   t.is(holder(), null);
   t.regex(tasks.currentTask()?.pauseReason ?? '', /^held by the instinct after swim_to_air: the bot is walled in/);
   t.deepEqual(taskEvents(), ['task_started', 'task_paused', 'task_paused']);
+});
+
+test.serial('an action that fails with the bot walled in holds the task as well (E-048)', async (t) => {
+  const clock = useClock(t);
+  const world = createWorld({ terrain: pool({ pocket: true }), position: new Vec3(0.5, 64.2, 0.5) });
+  const decide = sinon.stub().resolves(answer('swim_to_air', 0.9));
+  const { engine, tasks, messages, taskEvents } = createEngine(t, world, decide);
+  t.true((await tasks.start('idle', {})).ok);
+  engine.tick();
+  await clock.tickAsync(0);
+
+  // Walled in after it started: the swim gets no closer to the pocket and fails.
+  wallInStart(world);
+  decide.resolves(answer('continue', 0.9));
+  for (let i = 0; i < 6; i++) {
+    engine.tick();
+    await clock.tickAsync(1000);
+  }
+  t.true(messages().some(message => /^swim_to_air → failed: could not get closer to the air pocket/.test(message)));
+  t.is(tasks.currentTask()?.pauseReason,
+    'held by the instinct after swim_to_air: the bot is walled in, and resuming the task would dig it out of its shelter (waiting for resume-task or cancel-task)');
+  t.deepEqual(taskEvents(), ['task_started', 'task_paused', 'task_paused']);
+});
+
+test.serial('suspend_task while the bot is walled in holds the task once, with the model\'s reason (E-048)', async (t) => {
+  const clock = useClock(t);
+  const world = createWorld({ terrain: pool({ pocket: true }) });
+  const decide = sinon.stub().resolves(answer('swim_to_air', 0.9));
+  const { engine, tasks, holder, taskEvents, store } = createEngine(t, world, decide);
+  t.true((await tasks.start('idle', {})).ok);
+  engine.tick();
+  await clock.tickAsync(0);
+
+  wallInStart(world);
+  decide.resolves(answer('suspend_task', 0.8));
+  await clock.tickAsync(store.get().instinct.reaskMs);
+  engine.tick();
+  await clock.tickAsync(0);
+  t.is(holder(), null);
+  t.regex(tasks.currentTask()?.pauseReason ?? '', /^paused by the instinct \(suspend_task\): under water /);
+  t.deepEqual(taskEvents(), ['task_started', 'task_paused', 'task_paused'], 'one hold: the task was no longer waiting for the body');
+});
+
+test.serial('a command from the AI player that takes over in the shelter is not turned into a hold (E-048)', async (t) => {
+  const clock = useClock(t);
+  const world = createWorld({ terrain: pool({ pocket: true }) });
+  const decide = sinon.stub().resolves(answer('swim_to_air', 0.9));
+  const { engine, arbiter, tasks, holder } = createEngine(t, world, decide);
+  t.true((await tasks.start('idle', {})).ok);
+  engine.tick();
+  await clock.tickAsync(0);
+  t.is(holder()?.holder, 'instinct swim_to_air');
+
+  wallInStart(world);
+  const manual = await arbiter.acquire({ holder: 'manual dig-block', priority: PRIORITY.MANUAL });
+  t.true(manual.ok);
+  t.is(holder()?.holder, 'manual dig-block');
+  t.false((tasks.currentTask()?.pauseReason ?? '').startsWith('held by the instinct'), tasks.currentTask()?.pauseReason);
+  if (manual.ok) manual.lease.release();
+});
+
+test.serial('a task the AI player resumed in the shelter is not held again when an action that started there ends (E-048)', async (t) => {
+  const clock = useClock(t);
+  const world = createWorld({ terrain: pool({ pocket: true }), position: new Vec3(0.5, 64.2, 0.5) });
+  const decide = sinon.stub().resolves(answer('swim_to_air', 0.9));
+  const { engine, tasks, holder, messages, taskEvents } = createEngine(t, world, decide);
+  t.true((await tasks.start('idle', {})).ok);
+  engine.tick();
+  await clock.tickAsync(0);
+  wallInPocket(world);
+  world.self.position = new Vec3(3.5, 65, 0.5);
+  await clock.tickAsync(100);
+  t.is(tasks.currentTask()?.status, 'paused', 'held after the escape, as above');
+
+  // The AI player carries on from inside. Then the bot gets hungry and the instinct eats; this fake has no consume, so
+  // eating fails, which ends the action all the same.
+  t.true(tasks.resume('t1').ok);
+  world.bot.food = 10;
+  world.bot.inventory.items = () => [{ name: 'bread', count: 3 }];
+  decide.resolves(answer('eat', 0.9));
+  engine.tick();
+  await clock.tickAsync(0);
+  t.is(holder()?.holder, 'instinct eat');
+  await clock.tickAsync(6000);
+  t.true(messages().some(message => message.startsWith('eat → ') && !message.includes('held for the AI player')));
+  t.is(holder()?.holder, 'task t1 idle', 'the task the AI player resumed gets the body back');
+  t.is(tasks.currentTask()?.status, 'running');
+  t.deepEqual(taskEvents(), ['task_started', 'task_paused', 'task_paused', 'task_resumed', 'task_paused', 'task_resumed']);
+});
+
+test.serial('a world that cannot be read counts as not walled in: the task gets the body back (E-048)', async (t) => {
+  const clock = useClock(t);
+  const world = createWorld({ terrain: pool({ pocket: true }) });
+  const decide = sinon.stub().resolves(answer('swim_to_air', 0.9));
+  const { engine, store, tasks, holder, taskEvents } = createEngine(t, world, decide);
+  t.true((await tasks.start('idle', {})).ok);
+  engine.tick();
+  await clock.tickAsync(0);
+  t.is(holder()?.holder, 'instinct swim_to_air');
+
+  world.bot.blockAt = () => { throw new Error('chunk gone'); };
+  t.true(store.update({ instinct: { enabled: false } }, 'llm').ok);
+  engine.tick();
+  await clock.tickAsync(100);
+  t.is(holder()?.holder, 'task t1 idle');
+  t.is(tasks.currentTask()?.status, 'running');
+  t.deepEqual(taskEvents(), ['task_started', 'task_paused', 'task_resumed']);
 });
 
 test.serial('a new cue supersedes the request in flight: a lit creeper is asked about at once, and the stale answer is not acted on', async (t) => {

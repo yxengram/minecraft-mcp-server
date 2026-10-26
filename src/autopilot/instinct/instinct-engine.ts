@@ -23,7 +23,7 @@ import { FLEE_DISTANCE } from './affordances.js';
 export interface InstinctEngineOptions {
   bot: mineflayer.Bot;
   arbiter: ActionArbiter;
-  tasks: Pick<TaskManager, 'currentTask' | 'hold' | 'describe'>;
+  tasks: Pick<TaskManager, 'currentTask' | 'hold' | 'describe' | 'resumesOnRelease'>;
   getPolicy: () => Policy;
   events: EventStore;
   /** A decision request on the instinct's own budget (F-015). */
@@ -52,6 +52,11 @@ interface Running {
   reason: string;
   /** The latest answer said the task should not carry on afterwards: hold it for the LLM when the action ends. */
   holdTaskAfter: boolean;
+  /**
+   * The bot was walled in already when the action started (eating in a dig_in hole, say): getting out is then not this
+   * action's doing, and a task the AI player resumed or started in there must not be held again (E-048).
+   */
+  walledInAtStart: boolean;
   started: number;
   controller: AbortController;
   lease: Lease;
@@ -575,6 +580,7 @@ export class InstinctEngine {
       option,
       reason,
       holdTaskAfter,
+      walledInAtStart: this.walledIn(),
       started: Date.now(),
       controller,
       lease,
@@ -613,12 +619,13 @@ export class InstinctEngine {
     clearTimeout(run.timer);
     run.controller.abort(new InstinctAbort(text));
     // Hold the task before letting go of the body, so it does not resume for a moment and walk back into the danger.
-    // Walled in, the body is never handed back however the action ended: in the M18 field test the resumed lead task
-    // dug the bot out of its dig_in hole and a skeleton shot it (E-048). Leaving is the AI player's call, as with
-    // leaveShelter (M17).
+    // An action that leaves the bot walled in never hands the body back to the task, however it ended: in the M18 field
+    // test the resumed lead task dug the bot out of its dig_in hole and a skeleton shot it (E-048). Leaving is the AI
+    // player's call, as with leaveShelter (M17). Only a task that is waiting for the body is held, so a task already
+    // held (suspend_task, a manual command) keeps its own reason.
     let held = '';
     const task = this.options.tasks.currentTask();
-    const sheltered = Boolean(task) && !keepBody && this.walledIn();
+    const sheltered = Boolean(task) && !keepBody && !run.walledInAtStart && this.options.tasks.resumesOnRelease() && this.walledIn();
     const why = sheltered
       ? 'the bot is walled in, and resuming the task would dig it out of its shelter'
       : run.holdTaskAfter && outcome !== 'interrupted' ? 'the task kept leading the bot back into this danger' : null;

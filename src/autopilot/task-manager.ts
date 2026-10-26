@@ -127,6 +127,15 @@ export class TaskManager {
     return [...this.behaviors.keys()];
   }
 
+  /**
+   * Whether the current task takes the body back when its holder lets go: it waits behind that holder (suspended or
+   * queued), not held for resume-task or cancel-task (E-048).
+   */
+  resumesOnRelease(): boolean {
+    const task = this.current;
+    return Boolean(task && !this.isFinal(task) && task.lease?.state === 'suspended');
+  }
+
   currentTask(): TaskRecord | null {
     return this.current ? { ...this.current.record } : null;
   }

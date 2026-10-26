@@ -72,6 +72,50 @@ async function lightForNight(s, { runway = false } = {}) {
 
 const clearPhantoms = s => s.cmd('/kill @e[type=phantom,distance=..64]');
 
+/** zombie-chase (M14), optionally with a follow task running (E-048); see the two scenarios. */
+async function zombieChase(s, { task }) {
+  const { cmd, call, arena } = s;
+  const { cx, y0, cz } = arena;
+  const dirt = async (x1, z1, x2, z2) => {
+    await cmd(`/fill ${x1} ${y0 - 5} ${z1} ${x2} ${y0 - 2} ${z2} dirt`);
+    await cmd(`/fill ${x1} ${y0 - 1} ${z1} ${x2} ${y0 - 1} ${z2} grass_block`);
+  };
+  const r = ARENA_RADIUS - 1;
+  await dirt(cx - r, cz - r, cx + r, cz + r);
+  return withRunway(s, (far, near) => dirt(far, cz - 5, near, cz + 5), async () => {
+    await lightForNight(s, { runway: true });
+    await cmd('/time set midnight');
+    const since = await s.cursor();
+    const id = task ? (await call('start-task', { behavior: 'follow', params: { target: HELPER_NAME, range: 3 } })).match(/task (t\d+)/)?.[1] : undefined;
+    for (const dz of [-2, 2]) await cmd(`/summon zombie ${cx + 6} ${y0} ${cz + dz} {PersistenceRequired:1b}`);
+    const t0 = Date.now();
+    while (Date.now() - t0 < 45000 && !(await s.died(since))) {
+      await clearPhantoms(s);
+      await sleep(1000);
+    }
+    const died = await s.died(since);
+    if (id) await call('cancel-task', { id }).catch(() => {});
+    const lines = await s.eventsSince(since, ['instinct', 'task_paused', 'task_resumed']);
+    const instinct = lines.filter(line => line.includes('[instinct]'));
+    // E-048: after a dig_in ended, the task must stay paused (held) while the bot is in the hole.
+    const dugIn = lines.findIndex(line => /\[instinct\] dig_in → dug in/.test(line));
+    const resumed = dugIn >= 0 && lines.slice(dugIn).some(line => line.includes('[task_resumed]'));
+    // The hold is written just before the line that reports the dig_in result.
+    const held = dugIn >= 0 ? lines.slice(0, dugIn).reverse().find(line => line.includes('[task_paused]'))?.match(/: (held by the instinct[^(]*)/)?.[1]?.trim() : undefined;
+    // What the instinct started and how its actions ended, in order: "flee, flee done, dig_in, dig_in done".
+    const steps = instinct.map(line => {
+      const chose = line.match(/→ (\w+) p=[\d.]+.*→ started/);
+      if (chose) return chose[1];
+      const ended = line.match(/\[instinct\] (\w+) → (timeout|failed|interrupted)?/);
+      return ended ? `${ended[1]} ${ended[2] ?? 'done'}` : null;
+    }).filter(Boolean);
+    await cmd('/kill @e[type=zombie,distance=..120]');
+    await cmd('/time set day');
+    const taskDetail = !task ? '' : dugIn < 0 ? '; no dig_in, so the hold was not exercised' : resumed ? '; the task RESUMED after dig_in' : `; task held after dig_in${held ? ` (${held})` : ''}`;
+    return { ok: !died && !resumed, detail: `${died ? 'bot died' : 'alive after 45 s'}; instinct: ${steps.join(', ') || 'nothing'}${taskDetail}; health ${await s.health()}` };
+  });
+}
+
 const SCENARIOS = {
   /**
    * A guard task against three zombies with AI, at night as zombie waves are in the game; success: all dead within 60 s
@@ -111,39 +155,16 @@ const SCENARIOS = {
    * the bot cannot fight two. The arena and the runway stand on 5 blocks of dirt. Success: alive after 45 s (M14:
    * dig_in).
    */
-  async 'zombie-chase'(s) {
-    const { cmd, arena } = s;
-    const { cx, y0, cz } = arena;
-    const dirt = async (x1, z1, x2, z2) => {
-      await cmd(`/fill ${x1} ${y0 - 5} ${z1} ${x2} ${y0 - 2} ${z2} dirt`);
-      await cmd(`/fill ${x1} ${y0 - 1} ${z1} ${x2} ${y0 - 1} ${z2} grass_block`);
-    };
-    const r = ARENA_RADIUS - 1;
-    await dirt(cx - r, cz - r, cx + r, cz + r);
-    return withRunway(s, (far, near) => dirt(far, cz - 5, near, cz + 5), async () => {
-      await lightForNight(s, { runway: true });
-      await cmd('/time set midnight');
-      const since = await s.cursor();
-      for (const dz of [-2, 2]) await cmd(`/summon zombie ${cx + 6} ${y0} ${cz + dz} {PersistenceRequired:1b}`);
-      const t0 = Date.now();
-      while (Date.now() - t0 < 45000 && !(await s.died(since))) {
-        await clearPhantoms(s);
-        await sleep(1000);
-      }
-      const died = await s.died(since);
-      const instinct = await s.eventsSince(since, ['instinct']);
-      // What the instinct started and how its actions ended, in order: "flee, flee done, dig_in, dig_in done".
-      const steps = instinct.map(line => {
-        const chose = line.match(/→ (\w+) p=[\d.]+.*→ started/);
-        if (chose) return chose[1];
-        const ended = line.match(/\[instinct\] (\w+) → (timeout|failed|interrupted)?/);
-        return ended ? `${ended[1]} ${ended[2] ?? 'done'}` : null;
-      }).filter(Boolean);
-      await cmd('/kill @e[type=zombie,distance=..120]');
-      await cmd('/time set day');
-      return { ok: !died, detail: `${died ? 'bot died' : 'alive after 45 s'}; instinct: ${steps.join(', ') || 'nothing'}; health ${await s.health()}` };
-    });
-  },
+  'zombie-chase': s => zombieChase(s, { task: false }),
+
+  /**
+   * zombie-chase with a follow task running (the helper, in creative so the zombies leave it alone, stands 7 blocks
+   * north), which the instinct pauses to run (E-048): in the M18 field test a lead task resumed after dig_in closed the
+   * hole, its pathfinder dug the bot out on the way back to the cow, and a skeleton shot it. A guard task is not used:
+   * it walks the bot into the zombies, so survival would hang on the fight. Success: alive after 45 s, and the task
+   * never resumed after a dig_in.
+   */
+  'zombie-chase-task': s => zombieChase(s, { task: true }),
 
   /**
    * An unlit creeper about 9 blocks away walks up to the bot, as creepers do in the game. The arena wall on the far side

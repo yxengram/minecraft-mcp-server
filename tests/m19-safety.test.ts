@@ -158,6 +158,22 @@ test('E-022: a target that vanishes during the look is not hit, and that is not 
   t.false(result.content[0].text.includes('stopped:'));
 });
 
+test('E-022: a player that vanishes during the look, with attackPlayers on, ends as "target is gone", not a refusal', async (t) => {
+  const { factory, getTool } = createFactory();
+  const target = player();
+  const bot = fakeBot({ 5: target });
+  const { policy, getAutopilot } = autopilotWith();
+  allowPlayers(policy, true);
+  bot.lookAt.callsFake(async () => { target.isValid = false; });
+  registerEntityTools(factory, asBot(bot), getAutopilot);
+
+  const result = await getTool('attack-entity')!.execute({ entityId: 5, times: 3 });
+
+  t.falsy(result.isError);
+  t.false(bot.attack.called);
+  t.true(result.content[0].text.startsWith('Attacked MCPHelper (id 5) 0 time(s); target is gone'));
+});
+
 test('E-022: with the Autopilot wired in, a hostile mob by id is still attacked as before', async (t) => {
   const { factory, getTool } = createFactory();
   const target = zombie();

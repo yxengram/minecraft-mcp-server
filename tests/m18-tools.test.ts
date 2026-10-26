@@ -421,7 +421,7 @@ test.serial('lead-animal: a lead task refused at the start replies as before and
   const result = await world.lead({ entityId: 99 });
 
   t.true(result.isError);
-  t.false(result.content[0].text.includes('on the way'));
+  t.is(result.content[0].text, 'Failed: No entity with id 99 is currently loaded', 'the task manager\'s refusal, nothing added');
   t.is(world.bot.dig, ownDig);
   t.is(world.bot.listenerCount('blockPlaced'), 0);
 });
