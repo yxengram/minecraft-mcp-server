@@ -1397,16 +1397,16 @@
     - attack-entity `type: player`（MCPHelper 在 1 格内，默认策略）：回复 “MCPHelper is a player; players are never attacked; attack-entity did not attack”，没有 attack 或 damaged 事件。
     - `/kick ClaudeBot`：kicked 事件 “Kicked by an operator”；下一次调用 get-position 时重新连上并回复位置。
     - 同名登录：原来的 bot 收到 kicked “You logged in from another location: Another player or bot named ClaudeBot joined (maybe you, if the bot has your name). Give the bot its own --username”；第二个实例退出后，下一次调用重新连上。
+  - CI（用户批准后把 extra-tools 快进到 eb93dd1 并推送）：推送没有触发 CI Build（这个工作流以前也从没运行过，原因未查明，下次推送时再看）；改用 workflow_dispatch 手动运行 40334245083，4 个作业全部通过：ubuntu-latest Node 22.x 与 24.x、macos-latest、windows-latest，含 lint、类型检查、构建、单元测试与冒烟测试；ubuntu Node 22.x 另外打包、在空项目里安装并对安装后的包做冒烟测试，上传了 npm-package 制品。
   - 情景测试（有 key）：
     - 23271cb 上，用 guard 任务的第一版 zombie-chase-task 跑 2 轮：第 1 轮 bot 死亡（本能 fight → flee，guard 任务把 bot 带向僵尸，没有 dig_in），第 2 轮通过，dig_in 之后任务被挂起。由此把任务改成 follow（跟着创造模式的 MCPHelper），见 E-048。zombie-chase 1 轮通过（flee → dig_in）。
     - 最终代码（118f863）：**zombie-chase-task 2 轮都通过**，每轮都是 flee → dig_in，结果写着 “task held after dig_in (held by the instinct after dig_in: the bot is walled in, and resuming the task would dig it out of its shelter)”，bot 满血；zombie-chase 1 轮通过（flee → dig_in）。llm-only 与 no-key 两种对照配置照旧死亡。
 - **没有检查的**：
-  - CI 三平台矩阵（分支推送后才会运行）。
   - 同一个 Port Number 两次对局域网开放、全新原版世界里的离线账号（需要所有者操作）。
   - 版本不符、白名单、封禁、在线模式、服务器已满几种失败（只有单元测试）；Windows 的日志路径（来自 MCP 文档）。
   - E-049 的实机报告：全量实机测试的 lead-animal 一步通过，但没有检查回复里有没有寻路器的改动。
   - M18 实地测试中 E-048 的原场景（坡上、雷雨、带牛）没有重跑。
 - **遗留**：src/bot-connection.ts 的 SETUP_LINE 仍指向上游仓库，留给 E-024；跑全部测试时 tests/motor.test.ts 有 sinon 的 leak 警告（以前就有；tests/instinct.test.ts 的同类警告已通过每个假世界各用一个 sandbox 消除）。
 - **另外的实测**（下界，2026-10-26，用 fabd4a0 的构建）：ground-height 的 current-level 在东、东南、西、北都找到能站的点；向东南第一个点 (-152, 69, -35) 28 秒走到；第二个点 (-146, 63, -29) 60 秒超时。能站不等于走得到（可能是封闭的空腔），ground-height 只说明哪里能站。
-- **文件状态**：F-047、F-048、F-050 为 verified（部分）；F-053 为 verified（部分失败种类只有单元测试）；F-051 为 implemented-unverified（CI 未运行）。E 行没有状态栏，状态见本条与 M19 节的“状态与证据”。
+- **文件状态**：F-047、F-048、F-050 为 verified（部分）；F-053 为 verified（部分失败种类只有单元测试）；F-051 为 verified（--pack-report 与 --compare-lock 要等 E-024）。E 行没有状态栏，状态见本条与 M19 节的“状态与证据”。
 

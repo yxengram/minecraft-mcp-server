@@ -1207,7 +1207,7 @@ src/main.ts（现有，改动）--创建并注册--> src/autopilot/autopilot.ts�
 
 ### F-051 · `scripts/test-smoke.mjs`
 
-- **模块**：M-VER 验证　**里程碑**：M19　**状态**：implemented-unverified（2026-10-26：本地 macOS 9/9 通过；CI 三平台还没有运行，分支未推送；--pack-report 与 --compare-lock 已实现，在 E-024 加入 files 之前会失败，CI 中暂时注释掉）　**设计**：已确定；时限暂定，在三个平台的 CI 上实测后调整
+- **模块**：M-VER 验证　**里程碑**：M19　**状态**：verified（2026-10-26：本地 macOS 9/9 通过；CI 运行 40334245083 在 ubuntu（Node 22、24）、macOS、Windows 上全部通过，包括安装后的包的冒烟测试；--pack-report 与 --compare-lock 已实现，在 E-024 加入 files 之前会失败，CI 中暂时注释掉，要在 E-024 之后再验证）　**设计**：已确定；时限暂定，在三个平台的 CI 上实测后调整
 - **职责**：不需要游戏的冒烟测试，检查构建或打包后的服务器能启动、按 MCP 回复并退出。有三种用法。
   - **`node scripts/test-smoke.mjs [入口]`**
     - **入口**：一个 main.js 的路径，默认 dist/main.js。也可以是从 tarball 装好的 `<目录>/node_modules/<包名>/dist/main.js`，或解开的 .mcpb 中的 dist/main.js。
