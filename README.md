@@ -319,6 +319,7 @@ A command that moves or uses the bot's body stops when the bot dies, and its rep
 - `hunt` never attacks players or tamed animals.
 - A new task replaces the current one, unless `replace` is `false`.
 - Any command that moves the bot pauses the current task, and its reply says so. Use `resume-task` or `cancel-task` afterwards.
+- The instinct pauses the task while it acts and gives it back afterwards, unless it leaves the decision to you or its action left the bot walled in (after digging in): then the task stays held, and the bot stays in its shelter, until `resume-task` or `cancel-task`. A `lead-animal` or `collect-block` call whose task is held keeps waiting until its time limit.
 - Events: `task_started`, `task_progress`, `task_paused`, `task_resumed`, `task_done`, `task_failed`, `task_cancelled`.
 
 ### Instinct

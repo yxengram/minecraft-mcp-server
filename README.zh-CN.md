@@ -319,6 +319,7 @@ API key 只从环境变量 `OPENROUTER_API_KEY` 读取，不要把它写进仓�
 - `hunt` 从不攻击玩家或驯服的动物。
 - 新任务会替换当前任务，除非 `replace` 为 `false`。
 - 任何让机器人移动的命令都会暂停当前任务，回复里会说明。之后用 `resume-task` 或 `cancel-task`。
+- 本能行动时暂停任务，行动结束后把身体交还给任务；如果它把决定交给你，或者它的动作让机器人被围住（躲进地下之后），任务就保持挂起、机器人留在躲避处，直到 `resume-task` 或 `cancel-task`。任务被挂起时，`lead-animal`、`collect-block` 的调用会一直等到自己的时限。
 - 事件：`task_started`、`task_progress`、`task_paused`、`task_resumed`、`task_done`、`task_failed`、`task_cancelled`。
 
 ### 本能
