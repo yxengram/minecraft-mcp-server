@@ -3,10 +3,31 @@ version: 2
 updates:
 - package-ecosystem: "npm"
   directory: "/"
+  target-branch: "extra-tools"
   schedule:
     interval: "weekly"
   open-pull-requests-limit: 10
   versioning-strategy: increase
+  groups:
+    # The code uses bot._client packets, mineflayer-pathfinder internals and fixes to minecraft-data's tables,
+    # so these three move together in one PR (minecraft-protocol and prismarine-* follow in its regenerated
+    # lockfile). Such a PR needs the live tests before it is merged (CONTRIBUTING.md).
+    mineflayer-stack:
+      patterns:
+        - "mineflayer"
+        - "mineflayer-pathfinder"
+        - "minecraft-data"
+    # Everything else: minor and patch updates share one PR, and each major update gets its own.
+    minor-and-patch:
+      patterns:
+        - "*"
+      exclude-patterns:
+        - "mineflayer"
+        - "mineflayer-pathfinder"
+        - "minecraft-data"
+      update-types:
+        - "minor"
+        - "patch"
 
 - package-ecosystem: "github-actions"
   directory: "/"

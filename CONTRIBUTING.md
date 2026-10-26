@@ -97,6 +97,17 @@ The [MCP Inspector](https://modelcontextprotocol.io/docs/tools/inspector) is an 
 
 To use the MCP Inspector with your development branch, follow the guide at: https://modelcontextprotocol.io/docs/tools/inspector
 
+## Dependency versions
+
+`mineflayer`, `mineflayer-pathfinder` and `minecraft-data` are pinned to exact versions in `package.json`. The server reads packets from `bot._client`, relies on mineflayer-pathfinder internals and corrects some of minecraft-data's tables, so a new release of any of them can break the bot in game while every unit test still passes. `tests/release.test.ts` fails if one of them becomes a range or differs from `package-lock.json`.
+
+- Commit `package-lock.json` only, and do not run `npm shrinkwrap` in the repository. npm ignores the `package-lock.json` of a published package, so CI and the release workflow run `npm shrinkwrap` just before packing; the `npm-shrinkwrap.json` it produces ships in the package, and npm installs the locked tree from it when the package comes from the registry. It is listed in `.gitignore`.
+- A pull request that changes the version of `mineflayer`, `mineflayer-pathfinder`, `minecraft-data`, `minecraft-protocol` or any `prismarine-*` package, in `package.json` or in `package-lock.json`, needs these runs before it is merged, in a throwaway world with cheats on:
+  1. `npm run test:live:world -- <LAN_PORT> --allow-world-changes` twice: once without `OPENROUTER_API_KEY` and once with it;
+  2. `npm run test:scenarios -- <LAN_PORT> --allow-world-changes`.
+
+  Record the results in `docs/PLAN.md`. Dependabot opens one `mineflayer-stack` PR for the three pinned packages, and that PR falls under this rule.
+
 ## Submitting Changes
 
 Once you're happy with your changes:

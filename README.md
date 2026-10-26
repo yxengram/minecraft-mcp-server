@@ -7,7 +7,7 @@ A Minecraft bot that a large language model (for example Claude) plays through t
 What sets this fork apart is the **Autopilot**: background tasks for long jobs, and an **instinct** that reacts to danger within about a second. The instinct pairs a fast *decision model* with code that carries out the chosen move. Without it, the LLM would have to notice every creeper in time by itself.
 
 > [!IMPORTANT]
-> Verified with **Minecraft Java Edition 26.1.2** (protocol 775) and Mineflayer 4.39 or later. Other versions may not work.
+> Verified with **Minecraft Java Edition 26.1.2** (protocol 775) and mineflayer 4.39.0, which the package pins. Other versions may not work.
 
 ---
 
