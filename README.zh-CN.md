@@ -44,7 +44,7 @@
 - **聊天分拣：**决策模型对聊天分类，只有发给机器人的消息才会以 `chat_request` 事件唤醒 LLM。除非 LLM 允许，任何人都不能通过聊天指挥机器人。
 
 ### 3. 在游戏里实测，而不只是纸面
-- 820 个单元测试。
+- 1045 个单元测试。
 - 实机测试：在真实服务器上逐一运行全部 66 个工具。
 - 情景测试：比较有无 Autopilot 时机器人的表现，包括僵尸潮、空手被僵尸追赶、苦力怕、饥饿、着火、溺水、有意潜水、岩浆岸边和聊天。
 - 普通难度下的 10 天生存测试：机器人度过了全部十个夜晚，没有死亡，并建起一座 7×7 的房子，带门、八扇玻璃窗、床、箱子、工作台、熔炉和火把。
@@ -116,7 +116,11 @@ npm run build
 ```
 
 ### 2. 对局域网开放世界
-进入一个世界，选择 `ESC → 对局域网开放`，记下 Minecraft 在聊天栏显示的端口。如果要运行实机测试，请开启作弊。
+进入一个世界，选择 `ESC → 对局域网开放`（英文界面为 Open to LAN）。如果要运行实机测试，请开启作弊。
+
+打开后的局域网世界界面（LAN World）有一栏 **Port Number**（端口号），可以填 1024～65535。建议填一个固定端口，例如 `25565`：以后每次对局域网开放，端口都相同，第 3 步里的 `--port` 就不用再改。
+
+这一栏留空时，Minecraft 每次另选一个端口，并在聊天栏显示，英文界面是 `Local game hosted on port N`。把这个 N 写进 `--port`，然后完全重启客户端：服务器只在启动时读取 `--port`。
 
 ### 3. 在 MCP 客户端中添加服务器
 在 Claude Desktop 中进入 `Settings → Developer → Edit Config`，在 `claude_desktop_config.json` 中添加：
@@ -138,9 +142,11 @@ npm run build
 }
 ```
 
+例子里机器人叫 `ClaudeBot`；不传 `--username` 时它叫 `LLMBot`。这个名字会出现在聊天里，玩家也用它和机器人说话：聊天分拣按机器人的名字判断一句话是不是对它说的（没有 key 时，报告私聊和提到机器人名字的消息）。请给机器人起一个它自己的名字，见[账号（Accounts）](#账号accounts)。
+
 去掉 `env` 即可在没有决策模型的情况下运行：其他功能都正常，只是本能处于离线状态。
 
-完全重启客户端。客户端启动服务器后，机器人会加入世界。
+完全重启客户端。客户端启动服务器后，机器人会加入世界。如果没有加入，见[故障排查（Troubleshooting）](#故障排查troubleshooting)。
 
 | 选项 | 默认值 | 含义 |
 |---|---|---|
@@ -157,6 +163,56 @@ API key 只从环境变量 `OPENROUTER_API_KEY` 读取，不要把它写进仓�
 - 长时间的工作用 `start-task`，然后用 `wait-for-event` 等待（例如 `task_done`、`task_failed`、`instinct`、`chat_request`），不要轮询。
 - 快速查看用 `get-observation`，了解地形用 `scan-area` 或 `render-map`。
 - 有意做危险的事之前先设置意图，例如 `set-policy { "instinct": { "intent": "exploring an underwater cave on purpose" } }`。
+
+## 账号（Accounts）
+机器人用**离线账号**加入游戏。它的名字就是 `--username`；它不需要、也不使用任何 Microsoft 账号或密码。所以它只能加入允许离线账号的地方：对局域网开放的世界，或 `server.properties` 里 `online-mode=false` 的服务器。
+
+`online-mode=true` 的服务器会核对 Microsoft 账号，以 `Failed to verify username!` 拒绝机器人。这时工具回复是 `The server checks Microsoft accounts (online mode); this bot joins with an offline account. See Accounts in the README`。
+
+离线账号的 UUID 只由名字决定。请给机器人起一个它自己的名字，不要用你自己或其他玩家的名字：同名时，机器人可能和那位玩家共用背包和位置，或者把对方挤下线。
+
+## 故障排查（Troubleshooting）
+
+### 去哪里看
+- **工具回复。**机器人断开时调用任何工具，都会先重新连接；连不上时，回复会说明原因。
+- **`get-events`。**机器人进入游戏之后被踢出，会记为一个 `kicked` 事件。
+- **MCP 客户端的日志。**服务器把日志写到 stderr，格式是 `<时间> [minecraft] [mcp-server] [<级别>] <内容>`，例如 `Bot error [ECONNREFUSED]: …` 或 `Bot was kicked from server: …`。Claude Desktop 把它保存在 `~/Library/Logs/Claude/mcp-server-<key>.log`（macOS）和 `%APPDATA%\Claude\logs\mcp-server-<key>.log`（Windows），其中 `<key>` 是这个服务器在 `mcpServers` 下的键名（上面的例子里是 `minecraft`）。
+
+### 机器人连不上
+回复以 `Cannot connect to Minecraft server at <host>:<port>:` 开头，接着说明出了什么问题、该怎么做，括号里是依据的错误代码或消息。回复是英文的，下表原样引用；`<host>`、`<port>`、`<name>` 分别代表你的 `--host`、`--port`、`--username`。
+
+| 回复内容 | 括号里 | 说明 |
+|---|---|---|
+| `Nothing is listening on <host>:<port>. Open the world to LAN (Esc → Open to LAN) and use the port it prints in chat as --port` | `ECONNREFUSED` | 世界没有对局域网开放，或者 `--port` 不是它的端口。在 Port Number 填固定端口可以避免这种情况（见[第 2 步](#2-对局域网开放世界)）。改了 `--port` 之后要完全重启客户端。如果端口没错、只是世界当时还没开放，开放之后再调用一次任意工具即可 |
+| `The host name '<host>' was not found. Check --host (localhost for a world on this computer)` | `ENOTFOUND`、`EAI_AGAIN` | |
+| `No answer from <host>:<port>. Check the address, the network and the firewall` | `ETIMEDOUT`、`EHOSTUNREACH`、`ENETUNREACH`，或 `no spawn within 30 s` | 最后一种：服务器接受了连接，但 30 秒后机器人仍没有进入游戏 |
+| `<host>:<port> closed the connection during login. Check that it is a Minecraft Java server and that the port is right` | `ECONNRESET`、`EPIPE`、`socketClosed` | |
+| `The server checks Microsoft accounts (online mode); this bot joins with an offline account. See Accounts in the README` | `multiplayer.disconnect.unverified_username` | 见[账号（Accounts）](#账号accounts) |
+| `Another player or bot named <name> joined (maybe you, if the bot has your name). Give the bot its own --username` | `multiplayer.disconnect.duplicate_login`、`multiplayer.disconnect.name_taken` | 见[账号（Accounts）](#账号accounts) |
+| `The server runs Minecraft <version>; this bot is verified with 26.1.2`，或 `The server runs another version of Minecraft; this bot is verified with 26.1.2` | 版本错误的原文，或 `multiplayer.disconnect.outdated_client`、`multiplayer.disconnect.outdated_server`、`multiplayer.disconnect.incompatible` | 请使用 Minecraft Java 版 26.1.2 |
+| `<name> is not on the whitelist: run /whitelist add <name> on the server` | `multiplayer.disconnect.not_whitelisted` | |
+| `<name> is banned from this server: run /pardon <name> on the server`；封禁写了原因时，“server” 后面多一段 `(reason: …)` | `multiplayer.disconnect.banned`、`multiplayer.disconnect.banned.reason` | |
+| `The IP address of this computer is banned from this server: run /pardon-ip <address> on the server` | `multiplayer.disconnect.ip_banned` | |
+| `The server is full: wait for a player to leave, or raise max-players in server.properties` | `multiplayer.disconnect.server_full` | |
+
+服务器发来的是纯文字而不是翻译键时，说明相同，括号里是它的原文。其他原因按原样给出，用服务器或系统自己的文字，有错误代码时附上代码。
+
+另外两种回复：
+- `Bot is connecting to the Minecraft server. Please wait a moment and try again.`：正在连接。等几秒再调用。
+- `Cannot connect to Minecraft server at <host>:<port>` 后面接 `Please ensure:` 和一份检查清单：大约 7 秒后这次连接既没有进入游戏，也没有失败，例如还在登录。连接会继续进行，过几秒再调用。
+
+### 机器人进过游戏，后来离开了
+连接断开或机器人被踢出后，什么都不会发生，直到下一次工具调用重新连接。被踢出会记为一个 `kicked` 事件，内容是服务器的原文。online mode、同名、版本不符、白名单和封禁这几种，原文后面会加一个冒号和上表中的说明，例如 `You are not white-listed on this server!: <name> is not on the whitelist: run /whitelist add <name> on the server`。`Kicked by an operator` 表示有人执行了 `/kick`。
+
+### 本能离线
+没有可用的决策模型时，机器人不会自己躲避、逃跑或进食。本能离线期间，每个危险只以一个 `instinct` 事件报告一次：`instinct offline (<error>: <message>): <dangers>; the bot does not act on its own, decide what to do`，由 LLM 来应对。在策略里关闭本能时，连报告也没有。`get-policy` 的 `Instinct:` 一行说明是哪种情况：
+
+| `get-policy` 显示 | 怎么做 |
+|---|---|
+| `Instinct: offline (no OPENROUTER_API_KEY); dangers are only reported as instinct events, the bot does not act on them` | key 没有传到服务器。把它写进客户端配置的 `env`（见[第 3 步](#3-在-mcp-客户端中添加服务器)），然后完全重启客户端 |
+| `Instinct: offline (decisions are turned off in the policy); dangers are only reported as instinct events, the bot does not act on them` | `set-policy { "decisions": { "enabled": true } }` |
+| `Instinct: turned off in the policy` | `set-policy { "instinct": { "enabled": true } }` |
+| `Instinct: offline at the last request (<error>: <message>); dangers are left to you` | 上一次请求失败了。`timeout`：没有及时回答。`http_error`：请求失败，或 OpenRouter 返回了错误；消息里有 HTTP 状态码和返回内容，请检查 key 和 OpenRouter 账户的余额。`rate_limited`：本能一分钟内询问的次数超过了 `instinct.maxCallsPerMinute`。下一次请求成功后，这一行会重新显示 `online` |
 
 ---
 
@@ -300,7 +356,7 @@ API key 只从环境变量 `OPENROUTER_API_KEY` 读取，不要把它写进仓�
 ## 测试
 
 ```bash
-npm test             # 820 个单元测试
+npm test             # 1045 个单元测试
 npm run lint
 npm run test:live -- <局域网端口>                                 # 对世界做只读检查
 npm run test:live:world -- <局域网端口> --allow-world-changes      # 在开启作弊的一次性世界中运行每个工具
@@ -317,7 +373,7 @@ npm run test:scenarios -- <局域网端口> --allow-world-changes       # Autopi
 
 ## 项目文档
 - [docs/BLUEPRINT.md](docs/BLUEPRINT.md)：设计、每个文件的契约、跨模块约定和安全不变量
-- [docs/PLAN.md](docs/PLAN.md)：里程碑 M1–M11、未决问题，以及每一次实际运行过的检查的记录
+- [docs/PLAN.md](docs/PLAN.md)：里程碑（M1–M18 已完成，M19 进行中）、未决问题，以及每一次实际运行过的检查的记录
 - [AGENTS.md](AGENTS.md)：在本仓库工作的编码代理须遵守的规则
 - [CONTRIBUTING.md](CONTRIBUTING.md)：如何贡献（来自上游，英文）
 

@@ -44,7 +44,7 @@ The upstream project is a good, simple bridge: the LLM calls a tool, and the bot
 - **Chat triage:** the decision model sorts chat. Only messages meant for the bot wake the LLM, as `chat_request` events. Nobody can command the bot by chat unless the LLM allows it.
 
 ### 3. Tested in the game, not only on paper
-- 820 unit tests.
+- 1045 unit tests.
 - A live test that exercises all 66 tools against a real server.
 - A scenario test that compares the bot with and without the Autopilot: zombie waves, being chased by zombies with bare hands, creepers, hunger, fire, drowning, diving on purpose, a lava shore, chat.
 - A 10-day survival test on Normal difficulty. The bot survived all ten nights without dying and built a 7×7 house with a door, eight glass windows, a bed, a chest, a crafting table, a furnace and torches.
@@ -116,7 +116,11 @@ npm run build
 ```
 
 ### 2. Open a world to LAN
-Start a world and choose `ESC → Open to LAN`. Note the port that Minecraft prints in chat. Turn cheats on if you want to run the live tests.
+Start a world and choose `ESC → Open to LAN`. Turn cheats on if you want to run the live tests.
+
+The LAN World screen has a **Port Number** box that takes 1024–65535. Enter a fixed port, for example `25565`: the world then gets the same port every time you open it to LAN, and the `--port` in step 3 never has to change.
+
+If you leave the box empty, Minecraft picks a different port each time and prints it in chat as `Local game hosted on port N`. Put that N in `--port` and restart the client completely: the server reads `--port` only when it starts.
 
 ### 3. Add the server to your MCP client
 For Claude Desktop, go to `Settings → Developer → Edit Config`, then add an entry to `claude_desktop_config.json`:
@@ -138,9 +142,11 @@ For Claude Desktop, go to `Settings → Developer → Edit Config`, then add an 
 }
 ```
 
+The example names the bot `ClaudeBot`; without `--username` it is `LLMBot`. The name appears in chat, and players use it to talk to the bot: chat triage goes by the bot's name to tell whether a message is meant for it (without a key, whispers and messages that name the bot are reported). Give the bot a name of its own; see [Accounts](#accounts).
+
 Leave out `env` to run without a decision model: everything else works, but the instinct is offline.
 
-Restart the client completely. The bot joins the world once the client starts the server.
+Restart the client completely. The bot joins the world once the client starts the server. If it does not, see [Troubleshooting](#troubleshooting).
 
 | Option | Default | Meaning |
 |---|---|---|
@@ -157,6 +163,56 @@ Ask the LLM to do things in Minecraft. A few habits make it much better at the g
 - Use `start-task` for long jobs, then `wait-for-event` (for example on `task_done`, `task_failed`, `instinct`, `chat_request`) instead of polling.
 - Use `get-observation` for a quick look, and `scan-area` or `render-map` to understand the terrain.
 - Before doing something risky on purpose, set the intent, for example `set-policy { "instinct": { "intent": "exploring an underwater cave on purpose" } }`.
+
+## Accounts
+The bot joins with an **offline account**. Its name is the `--username`; it needs no Microsoft account or password and uses none. So it can join only where offline accounts are let in: a world opened to LAN, or a server with `online-mode=false` in `server.properties`.
+
+A server with `online-mode=true` checks Microsoft accounts and turns the bot away with `Failed to verify username!`. The tool reply then says `The server checks Microsoft accounts (online mode); this bot joins with an offline account. See Accounts in the README`.
+
+The UUID of an offline account is worked out from the name alone. Give the bot a name of its own, never yours or another player's: with the same name the bot can share that player's inventory and position, or push them off the server.
+
+## Troubleshooting
+
+### Where to look
+- **The tool reply.** A tool call made while the bot is disconnected first tries to connect again. If that fails, the reply says why.
+- **`get-events`.** A kick after the bot has joined is a `kicked` event.
+- **The MCP client's log.** The server writes its log to stderr as `<time> [minecraft] [mcp-server] [<level>] <message>`, for example `Bot error [ECONNREFUSED]: …` or `Bot was kicked from server: …`. Claude Desktop keeps it in `~/Library/Logs/Claude/mcp-server-<key>.log` on macOS and in `%APPDATA%\Claude\logs\mcp-server-<key>.log` on Windows, where `<key>` is the server's key under `mcpServers` (`minecraft` in the example above).
+
+### The bot cannot connect
+The reply starts with `Cannot connect to Minecraft server at <host>:<port>:`, then says what went wrong and what to do, with the code or message it is based on in parentheses. Below, `<host>`, `<port>` and `<name>` stand for your `--host`, `--port` and `--username`.
+
+| The reply says | In parentheses | Notes |
+|---|---|---|
+| `Nothing is listening on <host>:<port>. Open the world to LAN (Esc → Open to LAN) and use the port it prints in chat as --port` | `ECONNREFUSED` | The world is not open to LAN, or `--port` is not its port. A fixed Port Number avoids this ([step 2](#2-open-a-world-to-lan)). After changing `--port`, restart the client completely. If the port is right and the world was just not open yet, open it and call any tool again |
+| `The host name '<host>' was not found. Check --host (localhost for a world on this computer)` | `ENOTFOUND`, `EAI_AGAIN` | |
+| `No answer from <host>:<port>. Check the address, the network and the firewall` | `ETIMEDOUT`, `EHOSTUNREACH`, `ENETUNREACH`, or `no spawn within 30 s` | The last one: the server took the connection, but the bot was not in the game 30 s later |
+| `<host>:<port> closed the connection during login. Check that it is a Minecraft Java server and that the port is right` | `ECONNRESET`, `EPIPE`, `socketClosed` | |
+| `The server checks Microsoft accounts (online mode); this bot joins with an offline account. See Accounts in the README` | `multiplayer.disconnect.unverified_username` | See [Accounts](#accounts) |
+| `Another player or bot named <name> joined (maybe you, if the bot has your name). Give the bot its own --username` | `multiplayer.disconnect.duplicate_login`, `multiplayer.disconnect.name_taken` | See [Accounts](#accounts) |
+| `The server runs Minecraft <version>; this bot is verified with 26.1.2`, or `The server runs another version of Minecraft; this bot is verified with 26.1.2` | The version error, or `multiplayer.disconnect.outdated_client`, `multiplayer.disconnect.outdated_server`, `multiplayer.disconnect.incompatible` | Use Minecraft Java Edition 26.1.2 |
+| `<name> is not on the whitelist: run /whitelist add <name> on the server` | `multiplayer.disconnect.not_whitelisted` | |
+| `<name> is banned from this server: run /pardon <name> on the server`, with `(reason: …)` after "server" when the ban has a reason | `multiplayer.disconnect.banned`, `multiplayer.disconnect.banned.reason` | |
+| `The IP address of this computer is banned from this server: run /pardon-ip <address> on the server` | `multiplayer.disconnect.ip_banned` | |
+| `The server is full: wait for a player to leave, or raise max-players in server.properties` | `multiplayer.disconnect.server_full` | |
+
+A server that sends plain text instead of a translation key gets the same explanations; the parentheses then hold its text. Any other reason is given as it came, in the server's or the system's own words, with its code when there is one.
+
+Two other replies:
+- `Bot is connecting to the Minecraft server. Please wait a moment and try again.`: an attempt is under way. Wait a few seconds and call again.
+- `Cannot connect to Minecraft server at <host>:<port>` followed by `Please ensure:` and a checklist: after about 7 seconds the attempt had neither joined nor failed, for example because it was still logging in. It carries on; call again in a few seconds.
+
+### The bot was in the game and left
+When the connection drops or the bot is kicked, nothing happens until the next tool call, which connects again. A kick is a `kicked` event with the server's text. For online mode, a name clash, a version mismatch, the whitelist and bans, the explanation from the table follows after a colon, for example `You are not white-listed on this server!: <name> is not on the whitelist: run /whitelist add <name> on the server`. `Kicked by an operator` means someone ran `/kick`.
+
+### The instinct is offline
+Without a working decision model the bot does not dodge, flee or eat by itself. While the instinct is offline, it reports each danger once as an `instinct` event, `instinct offline (<error>: <message>): <dangers>; the bot does not act on its own, decide what to do`, and the LLM has to act. Turned off in the policy, it reports nothing. The `Instinct:` line of `get-policy` says which case it is:
+
+| `get-policy` says | What to do |
+|---|---|
+| `Instinct: offline (no OPENROUTER_API_KEY); dangers are only reported as instinct events, the bot does not act on them` | The key did not reach the server. Put it in `env` in the client config ([step 3](#3-add-the-server-to-your-mcp-client)) and restart the client completely |
+| `Instinct: offline (decisions are turned off in the policy); dangers are only reported as instinct events, the bot does not act on them` | `set-policy { "decisions": { "enabled": true } }` |
+| `Instinct: turned off in the policy` | `set-policy { "instinct": { "enabled": true } }` |
+| `Instinct: offline at the last request (<error>: <message>); dangers are left to you` | The last request failed. `timeout`: no answer in time. `http_error`: the request failed or OpenRouter answered with an error; the message has the HTTP status and the reply, so check the key and the credit on your OpenRouter account. `rate_limited`: the instinct asked more than `instinct.maxCallsPerMinute` times in a minute. The line says `online` again after the next request that succeeds |
 
 ---
 
@@ -300,7 +356,7 @@ The policy lives in memory only, and goes back to these defaults whenever the bo
 ## Testing
 
 ```bash
-npm test             # 820 unit tests
+npm test             # 1045 unit tests
 npm run lint
 npm run test:live -- <LAN_PORT>                                 # read-only check against a world
 npm run test:live:world -- <LAN_PORT> --allow-world-changes      # every tool, in a throwaway world with cheats on
@@ -317,7 +373,7 @@ npm run test:scenarios -- <LAN_PORT> --allow-world-changes       # the Autopilot
 
 ## Project documents
 - [docs/BLUEPRINT.md](docs/BLUEPRINT.md): the design, the contract of every file, the cross-module rules and the safety invariants (in Chinese)
-- [docs/PLAN.md](docs/PLAN.md): milestones M1–M11, open questions and the log of every check that was actually run (in Chinese)
+- [docs/PLAN.md](docs/PLAN.md): milestones (M1–M18 done, M19 in progress), open questions and the log of every check that was actually run (in Chinese)
 - [AGENTS.md](AGENTS.md): rules for coding agents working on this repository (in Chinese)
 - [CONTRIBUTING.md](CONTRIBUTING.md): how to contribute (from upstream)
 
