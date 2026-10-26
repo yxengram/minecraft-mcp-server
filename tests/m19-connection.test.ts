@@ -7,6 +7,7 @@ import { Vec3 } from 'vec3';
 import minecraftData from 'minecraft-data';
 import type mineflayer from 'mineflayer';
 import { BotConnection, CONNECT_TIMEOUT_MS } from '../src/bot-connection.js';
+import { explainFailure, kickInfo } from '../src/connection-errors.js';
 
 // ---------------------------------------------------------------------------------------------------------------
 // E-021: an attempt that fails before spawning ends in disconnected, so the next tool call connects again.
@@ -14,8 +15,8 @@ import { BotConnection, CONNECT_TIMEOUT_MS } from '../src/bot-connection.js';
 
 const CONFIG = { host: 'localhost', port: 25565, username: 'Bot' };
 const RECONNECT_DELAY_MS = 10;
-// checkConnectionAndReconnect polls every 100 ms for the reconnect delay plus 5 s before it gives up (unchanged
-// until E-028), so it replies at the first poll after that.
+// checkConnectionAndReconnect polls every 100 ms for the reconnect delay plus 5 s before it gives up. Since E-028 it
+// replies at the first poll after a failure, so waiting this long covers both kinds of reply.
 const CALL_WAIT_MS = RECONNECT_DELAY_MS + 5000 + 100;
 const CANNOT_CONNECT = 'Cannot connect to Minecraft server at localhost:25565';
 // The spawn handler builds pathfinder settings from a real registry.
@@ -382,3 +383,365 @@ test.serial('E-021 cleanup lets go of a connecting bot with bot.end("Server shut
   await s.clock.tickAsync(CONNECT_TIMEOUT_MS);
   t.true(s.callbacks.onEvent.neverCalledWith('disconnected'), 'the watchdog does not fire after shutdown');
 });
+
+// ---------------------------------------------------------------------------------------------------------------
+// E-028 (F-053): what went wrong, in words the user can act on, and kick reasons as plain text.
+// ---------------------------------------------------------------------------------------------------------------
+
+// Different from CONFIG, so that each of H, P and U is seen to be filled in.
+const TARGET = { host: 'mc.example.test', port: 41234, username: 'Helper' };
+const KEY = 'multiplayer.disconnect.';
+
+// The texts of the F-053 table, with H, P and U filled in.
+const NOTHING_LISTENING = 'Nothing is listening on mc.example.test:41234. Open the world to LAN (Esc → Open to LAN) and use the port it prints in chat as --port';
+const HOST_NOT_FOUND = "The host name 'mc.example.test' was not found. Check --host (localhost for a world on this computer)";
+const NO_ANSWER = 'No answer from mc.example.test:41234. Check the address, the network and the firewall';
+const CLOSED_DURING_LOGIN = 'mc.example.test:41234 closed the connection during login. Check that it is a Minecraft Java server and that the port is right';
+const ONLINE_MODE = 'The server checks Microsoft accounts (online mode); this bot joins with an offline account. See Accounts in the README';
+const SAME_NAME = 'Another player or bot named Helper joined (maybe you, if the bot has your name). Give the bot its own --username';
+const serverVersion = (version: string) => `The server runs Minecraft ${version}; this bot is verified with 26.1.2`;
+// F-053: "another version" when the version cannot be read.
+const ANOTHER_VERSION = 'The server runs another version of Minecraft; this bot is verified with 26.1.2';
+const NOT_WHITELISTED = 'Helper is not on the whitelist: run /whitelist add Helper on the server';
+
+const errorRows: { code: string; message: string; explanation: string; shown: string }[] = [
+  { code: 'ECONNREFUSED', message: 'connect ECONNREFUSED 127.0.0.1:41234', explanation: NOTHING_LISTENING, shown: 'ECONNREFUSED' },
+  { code: 'ENOTFOUND', message: 'getaddrinfo ENOTFOUND mc.example.test', explanation: HOST_NOT_FOUND, shown: 'ENOTFOUND' },
+  { code: 'EAI_AGAIN', message: 'getaddrinfo EAI_AGAIN mc.example.test', explanation: HOST_NOT_FOUND, shown: 'EAI_AGAIN' },
+  { code: 'ETIMEDOUT', message: 'connect ETIMEDOUT 10.0.0.9:41234', explanation: NO_ANSWER, shown: 'ETIMEDOUT' },
+  { code: 'EHOSTUNREACH', message: 'connect EHOSTUNREACH 10.0.0.9:41234', explanation: NO_ANSWER, shown: 'EHOSTUNREACH' },
+  { code: 'ENETUNREACH', message: 'connect ENETUNREACH 10.0.0.9:41234', explanation: NO_ANSWER, shown: 'ENETUNREACH' },
+  // The E-021 watchdog: the parentheses show its message rather than its code.
+  { code: 'SPAWN_TIMEOUT', message: 'no spawn within 30 s', explanation: NO_ANSWER, shown: 'no spawn within 30 s' },
+  { code: 'ECONNRESET', message: 'read ECONNRESET', explanation: CLOSED_DURING_LOGIN, shown: 'ECONNRESET' },
+  { code: 'EPIPE', message: 'write EPIPE', explanation: CLOSED_DURING_LOGIN, shown: 'EPIPE' }
+];
+
+for (const { code, message, explanation, shown } of errorRows) {
+  test(`E-028 explainFailure: ${code}`, (t) => {
+    t.like(explainFailure({ code, message }, TARGET), { explanation, code: shown });
+  });
+}
+
+// Errors without a code: the end of a login, and the four version errors E-021 ends an attempt on.
+const messageRows: { name: string; message: string; explanation: string }[] = [
+  { name: "an end('socketClosed') during login", message: 'socketClosed', explanation: CLOSED_DURING_LOGIN },
+  {
+    name: 'Unsupported protocol version (a protocol number, not a Minecraft version)',
+    message: "Unsupported protocol version '776'; try updating your packages with 'npm update'",
+    explanation: ANOTHER_VERSION
+  },
+  { name: 'No data available for version', message: 'No data available for version 26.2', explanation: serverVersion('26.2') },
+  {
+    name: "Server version '…' is not supported",
+    message: "Server version '26.2' is not supported. Latest supported version is '26.1.2'.",
+    explanation: serverVersion('26.2')
+  },
+  {
+    name: 'This server is version',
+    message: 'This server is version 1.21.8, you are using version 26.1.2, please specify the correct version in the options.',
+    explanation: serverVersion('1.21.8')
+  }
+];
+
+for (const { name, message, explanation } of messageRows) {
+  test(`E-028 explainFailure: ${name}`, (t) => {
+    t.like(explainFailure({ message }, TARGET), { explanation, code: message });
+  });
+}
+
+// Kicks as the server sends them at login: a JSON string. The parentheses show the whole translation key.
+const kickRows: { key: string; args?: string[]; explanation: string }[] = [
+  { key: 'unverified_username', explanation: ONLINE_MODE },
+  { key: 'duplicate_login', explanation: SAME_NAME },
+  { key: 'name_taken', explanation: SAME_NAME },
+  { key: 'outdated_client', args: ['26.2'], explanation: serverVersion('26.2') },
+  { key: 'outdated_server', args: ['1.21.8'], explanation: serverVersion('1.21.8') },
+  { key: 'incompatible', args: ['26.2'], explanation: serverVersion('26.2') },
+  { key: 'incompatible', explanation: ANOTHER_VERSION },
+  { key: 'banned', explanation: 'Helper is banned from this server: run /pardon Helper on the server' },
+  { key: 'banned.reason', args: ['Griefing'], explanation: 'Helper is banned from this server (reason: Griefing): run /pardon Helper on the server' },
+  { key: 'ip_banned', explanation: 'The IP address of this computer is banned from this server: run /pardon-ip <address> on the server' },
+  { key: 'not_whitelisted', explanation: NOT_WHITELISTED },
+  { key: 'server_full', explanation: 'The server is full: wait for a player to leave, or raise max-players in server.properties' },
+  { key: 'kicked', explanation: 'An operator kicked the bot' }
+];
+
+for (const { key, args, explanation } of kickRows) {
+  test(`E-028 explainFailure: kick ${key}${args ? ` (${args.join(', ')})` : ''}`, (t) => {
+    const kickReason = JSON.stringify(args ? { translate: KEY + key, with: args } : { translate: KEY + key });
+    t.like(explainFailure({ message: kickReason, kickReason }, TARGET), { explanation, code: KEY + key });
+    // F-053 uses only keys checked to exist in the 26.1.2 language.json; a missing one would come back as itself.
+    t.not(kickInfo(kickReason).text, KEY + key);
+  });
+}
+
+const nbtString = (value: string) => ({ type: 'string', value });
+
+/** A translatable component as network NBT, the way kick_disconnect carries it since 1.20.3. */
+function nbtTranslate(key: string, args: string[] = []) {
+  const value: Record<string, unknown> = { translate: nbtString(key) };
+  if (args.length > 0) value.with = { type: 'list', value: { type: 'string', value: args } };
+  return { type: 'compound', value };
+}
+
+test('E-028 kickInfo: a JSON string and network NBT give the same key and plain text', (t) => {
+  const expected = { key: `${KEY}kicked`, text: 'Kicked by an operator' };
+  t.deepEqual(kickInfo('{"translate":"multiplayer.disconnect.kicked"}'), expected);
+  t.deepEqual(kickInfo(nbtTranslate(`${KEY}kicked`)), expected);
+  t.deepEqual(kickInfo({ translate: `${KEY}kicked` }), expected, 'an object works too');
+});
+
+test('E-028 kickInfo: %s takes the with arguments, from JSON and from NBT', (t) => {
+  const expected = { key: `${KEY}incompatible`, text: 'Incompatible client! Please use 26.2' };
+  t.deepEqual(kickInfo('{"translate":"multiplayer.disconnect.incompatible","with":["26.2"]}'), expected);
+  t.deepEqual(kickInfo(nbtTranslate(`${KEY}incompatible`, ['26.2'])), expected);
+  // Mixed argument lists are compounds with an empty key; positional %1$s and %2$s are filled in order too.
+  const mixed = {
+    type: 'compound',
+    value: {
+      translate: nbtString('death.attack.arrow'),
+      with: { type: 'list', value: { type: 'compound', value: [{ '': nbtString('Helper') }, { text: nbtString('Skeleton') }] } }
+    }
+  };
+  t.deepEqual(kickInfo(mixed), { key: 'death.attack.arrow', text: 'Helper was shot by Skeleton' });
+});
+
+test('E-028 kickInfo: translated arguments and extra parts, on one line', (t) => {
+  const reason = {
+    translate: `${KEY}banned.reason`,
+    with: [{ translate: `${KEY}banned.reason.default` }],
+    extra: [{ translate: `${KEY}banned.expiration`, with: ['2026-11-01'] }]
+  };
+  t.deepEqual(kickInfo(reason), {
+    key: `${KEY}banned.reason`,
+    text: 'You are banned from this server. Reason: Banned by an operator. Your ban will be removed on 2026-11-01'
+  });
+});
+
+test('E-028 kickInfo: without a key the text is the component\'s own text', (t) => {
+  t.deepEqual(kickInfo('{"text":"Go and build ","extra":[{"text":"your own house"}]}'), { text: 'Go and build your own house' });
+  t.deepEqual(kickInfo(nbtString('Server restarting')), { text: 'Server restarting' });
+});
+
+test('E-028 kickInfo: a reason that is neither JSON nor a component is String(reason) without a key', (t) => {
+  t.deepEqual(kickInfo('Server restarting'), { text: 'Server restarting' });
+  t.deepEqual(kickInfo('{not json'), { text: '{not json' });
+  t.deepEqual(kickInfo(42), { text: '42' });
+});
+
+test('E-028 kickInfo: a key missing from language.json is its own text', (t) => {
+  t.deepEqual(kickInfo({ translate: `${KEY}no_such_reason` }), { key: `${KEY}no_such_reason`, text: `${KEY}no_such_reason` });
+});
+
+test('E-028 explainFailure: an unrecognised kick keeps its key and text', (t) => {
+  const result = explainFailure({ message: 'x', kickReason: nbtTranslate(`${KEY}idling`) }, TARGET);
+  t.deepEqual(result, { explanation: 'You have been idle for too long!', code: `${KEY}idling` });
+});
+
+test('E-028 explainFailure: a /kick with a reason sends only that text, which stays as it is', (t) => {
+  const result = explainFailure({ message: 'x', kickReason: '{"text":"Go and build your own house"}' }, TARGET);
+  t.deepEqual(result, { explanation: 'Go and build your own house' });
+});
+
+test('E-028 explainFailure: an unrecognised error keeps its code and message', (t) => {
+  t.deepEqual(explainFailure({ code: 'EPROTO', message: 'unexpected packet' }, TARGET), { explanation: 'unexpected packet', code: 'EPROTO' });
+  t.deepEqual(explainFailure({ message: 'Invalid username' }, TARGET), { explanation: 'Invalid username' });
+});
+
+test('E-028 explainFailure: without a key, a reason that is word for word the English text of a table key is matched', (t) => {
+  t.like(explainFailure({ message: 'x', kickReason: '{"text":"You are not white-listed on this server!"}' }, TARGET), { explanation: NOT_WHITELISTED });
+  t.like(explainFailure({ message: 'x', kickReason: 'Incompatible client! Please use 26.2' }, TARGET), { explanation: serverVersion('26.2') });
+});
+
+// --- In BotConnection: the reply of checkConnectionAndReconnect, and the kicked event ---------------------------
+
+const CANNOT_CONNECT_BECAUSE = `${CANNOT_CONNECT}: `;
+const SETUP_LINE_START = 'For setup instructions, visit: ';
+
+/** Starts a tool call while disconnected and says whether it has replied yet. */
+async function startCall(s: Setup) {
+  const call = { settled: false, reply: undefined as unknown as Promise<{ connected: boolean; message?: string }> };
+  call.reply = s.connection.checkConnectionAndReconnect().then((result) => {
+    call.settled = true;
+    return result;
+  });
+  await s.clock.tickAsync(RECONNECT_DELAY_MS);
+  return call;
+}
+
+test.serial('E-028 a failed attempt replies at the next poll, with the explanation, then the setup line', async (t) => {
+  const s = setup();
+  t.teardown(() => s.clock.restore());
+  const call = await startCall(s);
+  s.bots[0].emit('error', errno('ECONNREFUSED', 'connect ECONNREFUSED 127.0.0.1:25565'));
+  await s.clock.tickAsync(100);
+  t.true(call.settled, 'no waiting out the reconnect delay plus 5 s');
+
+  const result = await call.reply;
+  t.false(result.connected);
+  const [first, ...rest] = result.message!.split('\n');
+  t.is(first, `${CANNOT_CONNECT_BECAUSE}Nothing is listening on localhost:25565. Open the world to LAN (Esc → Open to LAN) and use the port it prints in chat as --port (ECONNREFUSED)`);
+  t.true(rest.some(line => line.startsWith(SETUP_LINE_START)), 'the setup line follows');
+  t.false(result.message!.includes('Please ensure'));
+});
+
+const replyCases: { name: string; fail: (bot: FakeBot) => void; first: string }[] = [
+  {
+    name: 'ENOTFOUND',
+    fail: bot => {
+      bot.emit('error', errno('ENOTFOUND', 'getaddrinfo ENOTFOUND localhost'));
+      bot.emit('end', 'socketClosed');
+    },
+    first: "The host name 'localhost' was not found. Check --host (localhost for a world on this computer) (ENOTFOUND)"
+  },
+  {
+    name: "an end('socketClosed') during login",
+    fail: bot => bot.emit('end', 'socketClosed'),
+    first: 'localhost:25565 closed the connection during login. Check that it is a Minecraft Java server and that the port is right (socketClosed)'
+  },
+  {
+    name: 'a version error',
+    fail: bot => bot.emit('error', new Error('No data available for version 26.2')),
+    first: 'The server runs Minecraft 26.2; this bot is verified with 26.1.2 (No data available for version 26.2)'
+  },
+  {
+    name: 'createBot throwing',
+    fail: () => {},
+    first: 'Invalid username'
+  }
+];
+
+for (const { name, fail, first } of replyCases) {
+  test.serial(`E-028 the reply after ${name} starts with "${CANNOT_CONNECT_BECAUSE}"`, async (t) => {
+    const createBot = name === 'createBot throwing' ? sinon.stub().throws(new Error('Invalid username')) : undefined;
+    const s = setup(createBot);
+    t.teardown(() => s.clock.restore());
+    const call = await startCall(s);
+    if (s.bots.length > 0) fail(s.bots[0]);
+    await s.clock.tickAsync(100);
+    t.true(call.settled);
+    t.is((await call.reply).message!.split('\n')[0], CANNOT_CONNECT_BECAUSE + first);
+  });
+}
+
+test.serial('E-028 an attempt that neither joins nor fails in time still gets the checklist after the full wait', async (t) => {
+  const s = setup();
+  t.teardown(() => s.clock.restore());
+  const call = await startCall(s);
+  await s.clock.tickAsync(4000);
+  t.false(call.settled, 'still waiting while the attempt is in progress');
+  await s.clock.tickAsync(CALL_WAIT_MS);
+  t.true(call.settled);
+  const message = (await call.reply).message!;
+  t.true(message.startsWith(`${CANNOT_CONNECT}\n`));
+  t.true(message.includes('Please ensure'));
+  t.is(s.connection.getState(), 'connecting', 'the attempt goes on after the reply');
+});
+
+test.serial('E-028 an error outside the E-021 list does not end the call early; the end after it does', async (t) => {
+  const s = setup();
+  t.teardown(() => s.clock.restore());
+  const call = await startCall(s);
+  s.bots[0].emit('error', errno('EPROTO', 'unexpected packet'));
+  await s.clock.tickAsync(500);
+  t.false(call.settled, 'recorded while the attempt is still connecting');
+  s.bots[0].emit('end', 'socketClosed');
+  await s.clock.tickAsync(100);
+  t.true(call.settled);
+  t.is((await call.reply).message!.split('\n')[0], `${CANNOT_CONNECT_BECAUSE}unexpected packet (EPROTO)`);
+});
+
+test.serial('E-028 a failure recorded before the call does not end the call early', async (t) => {
+  const s = setup();
+  t.teardown(() => s.clock.restore());
+  s.connection.connect();
+  s.bots[0].emit('error', errno('ENOTFOUND', 'getaddrinfo ENOTFOUND localhost'));
+  t.is(s.connection.lastFailure()?.code, 'ENOTFOUND');
+
+  const call = await startCall(s);
+  t.is(s.bots.length, 2, 'the call starts a new attempt');
+  await s.clock.tickAsync(1000);
+  t.false(call.settled, 'the earlier attempt\'s failure is not this attempt\'s');
+  await s.clock.tickAsync(CALL_WAIT_MS);
+  t.true((await call.reply).message!.includes('Please ensure'));
+});
+
+function kickedEvents(s: Setup): string[] {
+  return s.callbacks.onEvent.getCalls().filter(call => call.args[0] === 'kicked').map(call => call.args[1] as string);
+}
+
+test.serial('E-028 a kick during login: the reply explains it, and the kicked event is plain text with the explanation', async (t) => {
+  const s = setup();
+  t.teardown(() => s.clock.restore());
+  const call = await startCall(s);
+  const bot = s.bots[0];
+  bot.quit = sinon.stub();
+  // At login the reason is a JSON string.
+  bot.emit('kicked', '{"translate":"multiplayer.disconnect.not_whitelisted"}', false);
+  bot.emit('end', 'socketClosed');
+  await s.clock.tickAsync(100);
+  t.true(call.settled);
+  t.is((await call.reply).message!.split('\n')[0],
+    `${CANNOT_CONNECT_BECAUSE}Bot is not on the whitelist: run /whitelist add Bot on the server (multiplayer.disconnect.not_whitelisted)`);
+  t.deepEqual(kickedEvents(s), ['You are not white-listed on this server!: Bot is not on the whitelist: run /whitelist add Bot on the server']);
+});
+
+test.serial('E-028 kicked by an operator after spawn: the event and log are just "Kicked by an operator", and the next call reconnects', async (t) => {
+  const s = setup();
+  t.teardown(() => s.clock.restore());
+  s.connection.connect();
+  const bot = s.bots[0];
+  bot.emit('spawn');
+  bot.quit = sinon.stub();
+  // In play the reason is network NBT.
+  bot.emit('kicked', nbtTranslate(`${KEY}kicked`), true);
+  t.deepEqual(kickedEvents(s), ['Kicked by an operator']);
+  t.true(s.callbacks.onLog.calledWith('error', 'Bot was kicked from server: Kicked by an operator'));
+  bot.emit('end', 'socketClosed');
+
+  await startCall(s);
+  t.is(s.bots.length, 2, 'being kicked does not stop the next call from reconnecting');
+  await s.clock.tickAsync(CALL_WAIT_MS);
+});
+
+const kickedEventCases: { name: string; reason: unknown; event: string }[] = [
+  {
+    name: 'another login with the same name',
+    reason: nbtTranslate(`${KEY}duplicate_login`),
+    event: 'You logged in from another location: Another player or bot named Bot joined (maybe you, if the bot has your name). Give the bot its own --username'
+  },
+  {
+    name: 'a version mismatch',
+    reason: nbtTranslate(`${KEY}incompatible`, ['26.2']),
+    event: 'Incompatible client! Please use 26.2: The server runs Minecraft 26.2; this bot is verified with 26.1.2'
+  },
+  {
+    name: 'online mode',
+    reason: nbtTranslate(`${KEY}unverified_username`),
+    event: 'Failed to verify username!: The server checks Microsoft accounts (online mode); this bot joins with an offline account. See Accounts in the README'
+  },
+  { name: 'a ban', reason: nbtTranslate(`${KEY}banned`), event: 'You are banned from this server: Bot is banned from this server: run /pardon Bot on the server' },
+  {
+    name: 'an IP ban',
+    reason: nbtTranslate(`${KEY}ip_banned`),
+    event: 'You have been IP banned from this server: The IP address of this computer is banned from this server: run /pardon-ip <address> on the server'
+  },
+  // Not among the reasons E-028 explains in the event: the text says enough, or nothing is known beyond it.
+  { name: 'a full server', reason: nbtTranslate(`${KEY}server_full`), event: 'The server is full!' },
+  { name: 'a /kick with a reason', reason: { type: 'compound', value: { text: nbtString('Go and build your own house') } }, event: 'Go and build your own house' },
+  { name: 'an unrecognised key', reason: nbtTranslate(`${KEY}idling`), event: 'You have been idle for too long!' }
+];
+
+for (const { name, reason, event } of kickedEventCases) {
+  test.serial(`E-028 kicked event after spawn, ${name}`, (t) => {
+    const s = setup();
+    t.teardown(() => s.clock.restore());
+    s.connection.connect();
+    const bot = s.bots[0];
+    bot.emit('spawn');
+    bot.quit = sinon.stub();
+    bot.emit('kicked', reason, true);
+    t.deepEqual(kickedEvents(s), [event]);
+  });
+}

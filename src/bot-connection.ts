@@ -4,6 +4,7 @@ const { pathfinder, Movements } = pathfinderPkg;
 import minecraftData from 'minecraft-data';
 import { formatStat } from './format.js';
 import { componentToText } from './text-component.js';
+import { explainFailure, kickInfo, type FailureKind } from './connection-errors.js';
 import type { MessageKind } from './message-store.js';
 import { serverRegistryName, trackServerRegistries } from './server-registries.js';
 import { describeOffset, wokeUpInsideBlock } from './tools/terrain-utils.js';
@@ -39,6 +40,11 @@ const VERSION_FAILURE = /Unsupported protocol version|No data available for vers
 function endsAttempt(failure: { code?: string; message: string }): boolean {
   return (failure.code !== undefined && ATTEMPT_ENDING_CODES.has(failure.code)) || VERSION_FAILURE.test(failure.message);
 }
+
+// Kicks whose text does not say what to do get the explanation after it in the kicked event (E-028). "Kicked by an
+// operator" and "The server is full!" say enough by themselves.
+const EXPLAINED_KICKS: ReadonlySet<FailureKind> = new Set<FailureKind>(['online_mode', 'same_name', 'version', 'not_whitelisted', 'banned', 'ip_banned']);
+const SETUP_LINE = 'For setup instructions, visit: https://github.com/yuniko-software/minecraft-mcp-server';
 
 interface BotConfig {
   host: string;
@@ -413,9 +419,11 @@ export class BotConnection {
     });
 
     bot.on('kicked', (reason) => {
+      // The message stays raw: the disconnected event of a kick during login is built from it (E-021).
       this.recordFailure(bot, { message: this.formatError(reason), kickReason: reason });
-      this.callbacks.onEvent?.('kicked', this.formatError(reason));
-      this.callbacks.onLog('error', `Bot was kicked from server: ${this.formatError(reason)}`);
+      const description = this.describeKick(reason);
+      this.callbacks.onEvent?.('kicked', description);
+      this.callbacks.onLog('error', `Bot was kicked from server: ${description}`);
       this.state = 'disconnected';
       bot.quit();
     });
@@ -494,26 +502,36 @@ export class BotConnection {
     const currentState = this.state;
 
     if (currentState === 'disconnected') {
+      // Every record made from here on belongs to the attempt this call starts; an older one says nothing about it.
+      const earlierFailure = this.failure;
       this.attemptReconnect();
 
       const maxWaitTime = this.reconnectDelayMs + 5000;
       const pollInterval = 100;
       const startTime = Date.now();
+      // An error outside E-021's list is recorded while the attempt goes on, so the state has to say it ended too.
+      const failureOfThisAttempt = () => (this.state === 'disconnected' && this.failure !== earlierFailure ? this.failure : null);
 
       while (Date.now() - startTime < maxWaitTime) {
         if (this.state === 'connected') {
           return { connected: true };
         }
+        // Reply as soon as the attempt has failed, with the reason, instead of waiting out the full time (E-028).
+        const failure = failureOfThisAttempt();
+        if (failure) return { connected: false, message: this.describeFailure(failure) };
         await new Promise(resolve => setTimeout(resolve, pollInterval));
       }
+      const failure = failureOfThisAttempt();
+      if (failure) return { connected: false, message: this.describeFailure(failure) };
 
+      // Neither joined nor failed yet, for example still in the handshake: only the general checklist is known.
       const errorMessage =
         `Cannot connect to Minecraft server at ${this.config.host}:${this.config.port}\n\n` +
         `Please ensure:\n` +
         `1. Minecraft server is running on ${this.config.host}:${this.config.port}\n` +
         `2. Server is accessible from this machine\n` +
         `3. Server version is compatible (latest supported: ${SUPPORTED_MINECRAFT_VERSION})\n\n` +
-        `For setup instructions, visit: https://github.com/yuniko-software/minecraft-mcp-server`;
+        SETUP_LINE;
 
       return { connected: false, message: errorMessage };
     }
@@ -533,6 +551,19 @@ export class BotConnection {
     if (this.bot) {
       this.releaseBot(this.bot, 'Server shutting down');
     }
+  }
+
+  /** The reply when this call's attempt failed: the usual first line, then what went wrong and what to do (E-028). */
+  private describeFailure(failure: Readonly<ConnectionFailure>): string {
+    const { explanation, code } = explainFailure(failure, this.config);
+    return `Cannot connect to Minecraft server at ${this.config.host}:${this.config.port}: ${explanation}${code === undefined ? '' : ` (${code})`}\n\n${SETUP_LINE}`;
+  }
+
+  /** The kick reason as plain text rather than JSON or NBT, so the LLM can read it in get-events (E-028). */
+  private describeKick(reason: unknown): string {
+    const { text } = kickInfo(reason);
+    const { kind, explanation } = explainFailure({ message: text, kickReason: reason }, this.config);
+    return kind !== undefined && EXPLAINED_KICKS.has(kind) ? `${text}: ${explanation}` : text;
   }
 
   private formatError(error: unknown): string {
