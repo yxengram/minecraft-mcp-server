@@ -27,7 +27,8 @@
     "lint:fix": "eslint \"{src,tests}/**/*.ts\" --fix",
     "test:live": "node scripts/test-live.mjs",
     "test:live:world": "node scripts/test-live-world.mjs",
-    "test:scenarios": "node scripts/test-scenarios.mjs"
+    "test:scenarios": "node scripts/test-scenarios.mjs",
+    "test:smoke": "node scripts/test-smoke.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.27.1",

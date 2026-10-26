@@ -1,14 +1,33 @@
 name: CI Build
 
+# extra-tools is the release branch (E-024), so its commits are checked as well as main's.
 on:
   push:
-    branches: [ main ]
+    branches: [ extra-tools, main ]
   pull_request:
-    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    name: ${{ matrix.os }}, Node ${{ matrix.node }}
+    runs-on: ${{ matrix.os }}
+
+    # macOS and Windows minutes count 10 and 2 times while the repository is private (E-026).
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            node: '22.x'
+          - os: ubuntu-latest
+            node: '24.x'
+          - os: macos-latest
+            node: '22.x'
+          - os: windows-latest
+            node: '22.x'
 
     steps:
     - uses: actions/checkout@v6
@@ -16,7 +35,7 @@ jobs:
     - name: Setup Node.js
       uses: actions/setup-node@v6
       with:
-        node-version: '22.x'
+        node-version: ${{ matrix.node }}
         cache: 'npm'
 
     - name: Install dependencies
@@ -33,3 +52,45 @@ jobs:
 
     - name: Test
       run: npm test
+
+    # No game: the server only meets a closed port on 127.0.0.1 (F-051).
+    - name: Smoke test
+      run: npm run test:smoke
+
+    # The package checks run once. --ignore-scripts: Build has already made dist/, and the output of prepare
+    # would end up in the JSON on stdout.
+    - name: Pack
+      if: matrix.os == 'ubuntu-latest' && matrix.node == '22.x'
+      run: |
+        npm shrinkwrap
+        npm pack --json --ignore-scripts --pack-destination "$RUNNER_TEMP" > "$RUNNER_TEMP/pack.json"
+        echo "PACKAGE_TGZ=$RUNNER_TEMP/$(node -p "require(process.env.RUNNER_TEMP + '/pack.json')[0].filename")" >> "$GITHUB_ENV"
+        echo "PACKAGE_NAME=$(node -p "require('./package.json').name")" >> "$GITHUB_ENV"
+
+    # TODO(E-024): add `node scripts/test-smoke.mjs --pack-report "$RUNNER_TEMP/pack.json"` once package.json has the
+    # files list. Until then the package also carries src/, tests/, docs/, .d.ts files and no npm-shrinkwrap.json.
+
+    # An empty project without a lockfile, as a user's npx would see it; npm installs the dependencies from the registry.
+    - name: Install the package
+      if: matrix.os == 'ubuntu-latest' && matrix.node == '22.x'
+      run: |
+        mkdir "$RUNNER_TEMP/install"
+        cd "$RUNNER_TEMP/install"
+        npm init -y
+        npm install --no-audit --no-fund "$PACKAGE_TGZ"
+
+    # TODO(E-024): add `node scripts/test-smoke.mjs --compare-lock "$RUNNER_TEMP/install"` once the files list carries
+    # npm-shrinkwrap.json into the package. Without it npm resolves minecraft-protocol and prismarine-* afresh, and
+    # some of them are newer than the lockfile (2026-10-26).
+
+    - name: Smoke test the installed package
+      if: matrix.os == 'ubuntu-latest' && matrix.node == '22.x'
+      run: npm run test:smoke -- "$RUNNER_TEMP/install/node_modules/$PACKAGE_NAME/dist/main.js"
+
+    - name: Upload the package
+      if: matrix.os == 'ubuntu-latest' && matrix.node == '22.x'
+      uses: actions/upload-artifact@v6
+      with:
+        name: npm-package
+        path: ${{ env.PACKAGE_TGZ }}
+        retention-days: 14
