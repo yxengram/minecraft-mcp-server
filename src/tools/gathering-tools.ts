@@ -3,11 +3,13 @@ import { ToolFactory } from '../tool-factory.js';
 import type { Autopilot } from '../autopilot/autopilot.js';
 import { DEFAULT_GATHER_TIMEOUT_MS, MAX_GATHER_COUNT } from '../autopilot/behaviors/gather.js';
 import { DEFAULT_LEAD_TIMEOUT_MS, MAX_LEAD_TIMEOUT_MS } from '../autopilot/behaviors/lead.js';
+import { watchPathEdits } from './movement-utils.js';
 
 // Extra time on top of timeoutMs before collect-block gives up waiting, e.g. when its task never got to run.
 const WAIT_GRACE_MS = 5000;
 
-// collect-block runs a gather task and waits for it (BLUEPRINT E-004); its arguments and replies stay the same.
+// collect-block runs a gather task and waits for it (BLUEPRINT E-004); its arguments and replies stay the same. It does
+// not report the pathfinder's edits as lead-animal does (E-049): the blocks a gather digs are the task itself.
 export function registerGatheringTools(factory: ToolFactory, getAutopilot: () => Autopilot): void {
   factory.registerTool(
     "collect-block",
@@ -60,25 +62,37 @@ export function registerGatheringTools(factory: ToolFactory, getAutopilot: () =>
     },
     async ({ entityId, type, maxDistance, x, y, z, range, method, item, timeoutMs = DEFAULT_LEAD_TIMEOUT_MS }) => {
       if (entityId === undefined && type === undefined) return factory.createErrorResponse('Give entityId or type');
-      const tasks = getAutopilot().tasks;
+      const autopilot = getAutopilot();
+      const tasks = autopilot.tasks;
       const previous = tasks.currentTask();
       const params = { entityId, target: type, maxDistance, x, y, z, range, method, item, timeoutMs };
-      const started = await tasks.start('lead', params, { source: 'tool' });
-      if (!started.ok) return factory.createErrorResponse(started.error);
-      const replaced = previous ? `\nReplaced ${tasks.describe(previous)}: it was cancelled.` : '';
+      // The lead task walks with the pathfinder, which digs and places blocks on the way: in the M18 field test it left
+      // a cobblestone inside the pen, seen only on the map (E-049). Without a bot (test fakes) nothing is recorded.
+      const bot = autopilot.boundBot();
+      const stopEdits = bot ? watchPathEdits(bot) : () => '';
+      try {
+        const started = await tasks.start('lead', params, { source: 'tool' });
+        if (!started.ok) return factory.createErrorResponse(started.error);
+        const replaced = previous ? `\nReplaced ${tasks.describe(previous)}: it was cancelled.` : '';
 
-      const id = started.task.id;
-      let timer: ReturnType<typeof setTimeout> | undefined;
-      const gaveUp = new Promise<null>(resolve => { timer = setTimeout(() => resolve(null), timeoutMs + WAIT_GRACE_MS); });
-      let final = await Promise.race([tasks.waitForEnd(id), gaveUp]).finally(() => clearTimeout(timer));
-      if (!final) {
-        await tasks.cancel(id, 'time limit reached');
-        final = await tasks.waitForEnd(id);
+        const id = started.task.id;
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const gaveUp = new Promise<null>(resolve => { timer = setTimeout(() => resolve(null), timeoutMs + WAIT_GRACE_MS); });
+        let final = await Promise.race([tasks.waitForEnd(id), gaveUp]).finally(() => clearTimeout(timer));
+        if (!final) {
+          await tasks.cancel(id, 'time limit reached');
+          final = await tasks.waitForEnd(id);
+        }
+        // On the reply's first line, before the line about the replaced task, as the move tools do (M17).
+        const edits = stopEdits();
+        if (final.status === 'done') return factory.createResponse(`${final.result ?? ''}${edits}${replaced}`);
+        if (final.status === 'failed') return factory.createErrorResponse(`${final.result ?? 'lead task failed'}${edits}${replaced}`);
+        const progress = final.progress ? `; progress: ${final.progress}` : '';
+        return factory.createErrorResponse(`Leading stopped: task ${final.id} was cancelled (${final.result})${progress}${edits}${replaced}`);
+      } finally {
+        // Also when the start was refused or threw: bot.dig gets its own function back.
+        stopEdits();
       }
-      if (final.status === 'done') return factory.createResponse(`${final.result ?? ''}${replaced}`);
-      if (final.status === 'failed') return factory.createErrorResponse(`${final.result ?? 'lead task failed'}${replaced}`);
-      const progress = final.progress ? `; progress: ${final.progress}` : '';
-      return factory.createErrorResponse(`Leading stopped: task ${final.id} was cancelled (${final.result})${progress}${replaced}`);
     }
   );
 }

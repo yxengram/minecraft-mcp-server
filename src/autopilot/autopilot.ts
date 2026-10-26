@@ -89,6 +89,14 @@ export class Autopilot {
     return this.bot !== null;
   }
 
+  /**
+   * The bound bot, or null (read-only). For tools that watch what a task does with the bot, such as the blocks the
+   * pathfinder digs and places during a lead task (E-049); unlike the services below, no bot is not an error there.
+   */
+  boundBot(): mineflayer.Bot | null {
+    return this.bot;
+  }
+
   get arbiter(): ActionArbiter {
     if (!this.arbiterInstance) throw new AutopilotNotReady();
     return this.arbiterInstance;

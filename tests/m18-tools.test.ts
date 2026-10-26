@@ -1,14 +1,17 @@
 // Contract: docs/BLUEPRINT.md F-045, F-046, E-020 (M18): ground-height (the ground at faraway points) and the lead
-// behavior behind lead-animal (leading an animal on a lead or by holding its food). Expected values come from the
-// contract.
+// behavior behind lead-animal (leading an animal on a lead or by holding its food); E-049 (M19): lead-animal reports
+// the blocks the pathfinder dug and placed during the lead task. Expected values come from the contract.
 import test, { ExecutionContext } from 'ava';
 import sinon from 'sinon';
+import { EventEmitter } from 'node:events';
 import { Vec3 } from 'vec3';
 import { groundAt, groundPoints, registerVisionTools } from '../src/tools/vision-tools.js';
 import { chooseLure, leadBehavior, standableTarget, STUCK_MS, TEMPT_ITEMS } from '../src/autopilot/behaviors/lead.js';
-import { BEHAVIORS } from '../src/autopilot/autopilot.js';
+import { Autopilot, BEHAVIORS } from '../src/autopilot/autopilot.js';
+import { EventStore } from '../src/event-store.js';
 import { asBot, createFactory, createFakeWorld } from './_helpers.js';
 import { registerBlockTools } from '../src/tools/block-tools.js';
+import { registerGatheringTools } from '../src/tools/gathering-tools.js';
 
 // ---------------------------------------------------------------- ground-height
 
@@ -278,6 +281,131 @@ test.serial('leash: a lead that does not hold falls back to the lure with auto, 
   const second = await runLead(t, clock, only, { method: 'leash' });
   t.false(second.settled.ok);
   t.regex((second.settled as { error: Error }).error.message, /could not put the lead on cow \(id 2\)/);
+});
+
+// ---------------------------------------------------------------- lead-animal: the pathfinder's edits (E-049)
+
+type ToolReply = { content: { text: string }[]; isError?: boolean };
+
+/**
+ * lead-animal on an Autopilot bound to leadBot's bot, which also gets events (blockPlaced) and a dig for the
+ * pathfinder to call. No decision key, so binding reaches no network.
+ */
+function leadAnimal(t: ExecutionContext, inventory: { name: string; count: number }[]) {
+  const world = leadBot(inventory);
+  const emitter = new EventEmitter();
+  const bot = Object.assign(world.bot, {
+    version: '1.20.4',
+    dig: sinon.stub().resolves(),
+    clearControlStates: sinon.stub(),
+    on: emitter.on.bind(emitter),
+    removeListener: emitter.removeListener.bind(emitter),
+    emit: emitter.emit.bind(emitter),
+    listenerCount: emitter.listenerCount.bind(emitter)
+  });
+  const autopilot = new Autopilot({
+    events: new EventStore(),
+    decisions: { getKey: () => undefined, fetch: sinon.stub().rejects(new Error('no network in tests')) }
+  });
+  autopilot.bind(bot as never);
+  t.teardown(() => autopilot.unbind('test over'));
+  const { factory, getTool } = createFactory();
+  registerGatheringTools(factory, () => autopilot);
+  const lead = (extra: Record<string, unknown> = {}) =>
+    getTool('lead-animal')!.execute({ entityId: 2, x: 20, y: 64, z: 0, ...extra }) as Promise<ToolReply>;
+  return { ...world, bot, autopilot, lead };
+}
+
+/** Advances the fake clock until the tool replies. */
+async function reply(clock: sinon.SinonFakeTimers, pending: Promise<ToolReply>, onTick: (tick: number) => void = () => {}) {
+  let result: ToolReply | null = null;
+  void pending.then(value => { result = value; });
+  for (let i = 0; i < 4000 && !result; i++) {
+    onTick(i);
+    await clock.tickAsync(100);
+  }
+  return result as unknown as ToolReply;
+}
+
+/** A cow that follows the wheat: it stops 2.5 blocks behind the bot. */
+function following(world: ReturnType<typeof leadBot>) {
+  const away = world.animal.position.minus(world.bot.entity.position);
+  world.animal.position = world.bot.entity.position.plus(away.scaled(2.5 / (away.norm() || 1)));
+}
+
+test.serial('lead-animal: a block the pathfinder placed during the lead task is listed after the reply', async (t) => {
+  const clock = useClock(t);
+  const world = leadAnimal(t, [{ name: 'wheat', count: 5 }]);
+  const ownDig = world.bot.dig;
+  let strides = 0;
+  walking(world.bot, () => {
+    // Scaffolding on the first stride, as the pathfinder did inside the pen in the M18 field test.
+    if (strides++ === 0) world.bot.emit('blockPlaced', null, { name: 'cobblestone', position: new Vec3(5, 64, 0) });
+    following(world);
+  });
+
+  const result = await reply(clock, world.lead());
+
+  t.falsy(result.isError);
+  t.regex(result.content[0].text,
+    /^Led cow \(id 2\) to \(20, 64, 0\) by lure \(wheat\) in \d+s; it is \d\.\d blocks from the target; on the way the pathfinder placed 1 block\(s\): cobblestone at \(5, 64, 0\)$/);
+  // Stopped when the task ended: bot.dig is the bot's own again and nothing listens for placements.
+  t.is(world.bot.dig, ownDig);
+  t.is(world.bot.listenerCount('blockPlaced'), 0);
+});
+
+test.serial('lead-animal: with nothing dug or placed the reply is the lead task\'s result, unchanged', async (t) => {
+  const clock = useClock(t);
+  const world = leadAnimal(t, [{ name: 'wheat', count: 5 }]);
+  walking(world.bot, () => following(world));
+
+  const result = await reply(clock, world.lead());
+
+  t.falsy(result.isError);
+  const text = result.content[0].text;
+  t.regex(text, /^Led cow \(id 2\) to \(20, 64, 0\) by lure \(wheat\) in \d+s; it is \d\.\d blocks from the target$/);
+  t.is(text, world.autopilot.tasks.list().history[0]?.result ?? '(no task record)');
+  t.false(text.includes('on the way'));
+});
+
+test.serial('lead-animal: a failed lead task lists what the pathfinder dug too', async (t) => {
+  const clock = useClock(t);
+  const world = leadAnimal(t, [{ name: 'wheat', count: 5 }]);
+  world.animal.position = new Vec3(-9.5, 64, 0.5);
+  let strides = 0;
+  // A cow that never moves; the pathfinder digs through a block on the first stride (bot.dig, as it does).
+  walking(world.bot, () => {
+    if (strides++ === 0) void world.bot.dig({ name: 'dirt', position: new Vec3(3, 64, 0) } as never);
+  });
+
+  const result = await reply(clock, world.lead({ timeoutMs: 120000 }));
+
+  t.true(result.isError);
+  const text = result.content[0].text;
+  t.regex(text, new RegExp(`^Failed: cow \\(id 2\\) stopped following: no closer to the target for ${STUCK_MS / 1000}s`));
+  t.true(text.endsWith('; on the way the pathfinder dug 1 block(s): dirt at (3, 64, 0)'), text);
+  t.is(world.bot.listenerCount('blockPlaced'), 0);
+});
+
+test.serial('lead-animal: a cancelled lead task lists the blocks placed before it was cancelled', async (t) => {
+  const clock = useClock(t);
+  const world = leadAnimal(t, [{ name: 'wheat', count: 5 }]);
+  let strides = 0;
+  walking(world.bot, () => {
+    if (strides++ === 0) world.bot.emit('blockPlaced', null, { name: 'cobblestone', position: new Vec3(5, 64, 0) });
+    following(world);
+  });
+
+  const result = await reply(clock, world.lead(), tick => {
+    const task = world.autopilot.tasks.currentTask();
+    if (tick === 1 && task) void world.autopilot.tasks.cancel(task.id, 'cancelled by the test');
+  });
+
+  t.true(result.isError);
+  const text = result.content[0].text;
+  t.regex(text, /^Failed: Leading stopped: task t\d+ was cancelled \(cancelled by the test\)/);
+  t.true(text.endsWith('; on the way the pathfinder placed 1 block(s): cobblestone at (5, 64, 0)'), text);
+  t.is(world.bot.listenerCount('blockPlaced'), 0);
 });
 
 // ---------------------------------------------------------------- place-block keeps the block the LLM chose
