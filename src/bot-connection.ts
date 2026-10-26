@@ -11,10 +11,34 @@ import { configureMovements, installDoorHelper } from './tools/movement-utils.js
 import { fixToolMaterials } from './tools/block-utils.js';
 
 const SUPPORTED_MINECRAFT_VERSION = '26.1.2';
+/** How long an attempt may take to spawn before it counts as failed (E-021). */
+export const CONNECT_TIMEOUT_MS = 30_000;
 // The server moves the player off the bed right after waking; look at where the head ended up after that (E-014).
 const WAKE_CHECK_DELAY_MS = 1000;
 
 type ConnectionState = 'connected' | 'connecting' | 'disconnected';
+
+/** Why the latest attempt failed before spawning, or why the bot was kicked (E-021); E-028 explains it to the user. */
+export interface ConnectionFailure {
+  /** The error code (ENOTFOUND), SPAWN_TIMEOUT for the watchdog; absent for an error without one and for an end. */
+  code?: string;
+  message: string;
+  /** The kick reason as the server sent it (JSON text or NBT). */
+  kickReason?: unknown;
+  time: number;
+}
+
+type CreateBot = (options: mineflayer.BotOptions) => mineflayer.Bot;
+
+// Socket failures end the attempt at once. mineflayer sends an end as well, but before or after the error depending
+// on how the socket failed, and the state used to stay at connecting when the end came first (E-021).
+const ATTEMPT_ENDING_CODES = new Set(['ECONNREFUSED', 'ETIMEDOUT', 'ENOTFOUND', 'EAI_AGAIN', 'EHOSTUNREACH', 'ENETUNREACH', 'ECONNRESET', 'EPIPE']);
+// Version failures arrive as an error without a code and with no end after it; the socket stays open (E-021).
+const VERSION_FAILURE = /Unsupported protocol version|No data available for version|Server version '.*' is not supported|This server is version/;
+
+function endsAttempt(failure: { code?: string; message: string }): boolean {
+  return (failure.code !== undefined && ATTEMPT_ENDING_CODES.has(failure.code)) || VERSION_FAILURE.test(failure.message);
+}
 
 interface BotConfig {
   host: string;
@@ -71,12 +95,20 @@ export class BotConnection {
   private callbacks: ConnectionCallbacks;
   private isReconnecting = false;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  // An attempt that is never answered sends no event at all, so only a timer can end it (E-021).
+  private connectTimer: ReturnType<typeof setTimeout> | null = null;
+  private failure: ConnectionFailure | null = null;
+  // The instance whose attempt already has a record: the first error or kick of an attempt says the most.
+  private failureRecordedFor: mineflayer.Bot | null = null;
   private readonly reconnectDelayMs: number;
+  private readonly createBot: CreateBot;
 
-  constructor(config: BotConfig, callbacks: ConnectionCallbacks, reconnectDelayMs = 2000) {
+  /** options.createBot is only for tests (E-021). */
+  constructor(config: BotConfig, callbacks: ConnectionCallbacks, reconnectDelayMs = 2000, options: { createBot?: CreateBot } = {}) {
     this.config = config;
     this.callbacks = callbacks;
     this.reconnectDelayMs = reconnectDelayMs;
+    this.createBot = options.createBot ?? (botOptions => mineflayer.createBot(botOptions));
   }
 
   getBot(): mineflayer.Bot | null {
@@ -90,6 +122,11 @@ export class BotConnection {
 
   getState(): ConnectionState {
     return this.state;
+  }
+
+  /** Why the latest attempt failed or the bot was kicked; cleared when the bot spawns (E-021). */
+  lastFailure(): Readonly<ConnectionFailure> | null {
+    return this.failure;
   }
 
   getConfig(): BotConfig {
@@ -108,15 +145,87 @@ export class BotConnection {
       plugins: { pathfinder },
     };
 
-    this.bot = mineflayer.createBot(botOptions);
+    this.clearConnectTimer();
+    let bot: mineflayer.Bot;
+    try {
+      bot = this.createBot(botOptions);
+    } catch (err) {
+      // Left at connecting, or with isReconnecting set, attemptReconnect would never try again (E-021).
+      this.bot = null;
+      this.failure = { code: (err as { code?: string }).code, message: err instanceof Error ? err.message : String(err), time: Date.now() };
+      this.failureRecordedFor = null;
+      this.state = 'disconnected';
+      this.isReconnecting = false;
+      this.callbacks.onLog('error', `Could not create the bot: ${this.failure.message}`);
+      return;
+    }
+    this.bot = bot;
     this.state = 'connecting';
     this.isReconnecting = false;
 
-    this.registerEventHandlers(this.bot);
+    this.registerEventHandlers(bot);
+    this.connectTimer = setTimeout(() => {
+      this.failAttempt(bot, { code: 'SPAWN_TIMEOUT', message: `no spawn within ${CONNECT_TIMEOUT_MS / 1000} s` });
+    }, CONNECT_TIMEOUT_MS);
+  }
+
+  private clearConnectTimer(): void {
+    if (this.connectTimer) {
+      clearTimeout(this.connectTimer);
+      this.connectTimer = null;
+    }
+  }
+
+  /** Keeps the first record of the current instance's attempt; events of an instance already let go are ignored. */
+  private recordFailure(bot: mineflayer.Bot, failure: Omit<ConnectionFailure, 'time'>): void {
+    if (this.bot !== bot || this.failureRecordedFor === bot) return;
+    this.failure = { ...failure, time: Date.now() };
+    this.failureRecordedFor = bot;
+  }
+
+  /**
+   * Ends an attempt that failed before the bot spawned (E-021), so the next tool call reconnects instead of
+   * replying "please wait" until the client restarts. onBotEnd is not called: the Autopilot binds only at spawn.
+   */
+  private failAttempt(bot: mineflayer.Bot, failure: Omit<ConnectionFailure, 'time'>): void {
+    if (this.bot !== bot) return;
+    this.clearConnectTimer();
+    this.recordFailure(bot, failure);
+    this.state = 'disconnected';
+    this.bot = null;
+    this.releaseBot(bot, 'Connection attempt failed');
+
+    const recorded = this.failure ?? { ...failure, time: Date.now() };
+    const detail = recorded.code && !recorded.message.includes(recorded.code) ? `${recorded.code}: ${recorded.message}` : recorded.message;
+    this.callbacks.onEvent?.('disconnected', `Could not join ${this.config.host}:${this.config.port}: ${detail}`);
+    this.callbacks.onLog('error', `Connection attempt failed before spawn: ${detail}`);
+  }
+
+  /**
+   * Lets go of an instance. The no-op error listener stays because ping can report a second error after the other
+   * listeners are gone, and an error nobody listens to is thrown. bot.end rather than bot.quit: quit comes with the
+   * kick plugin, which is not loaded before inject_allowed (E-021).
+   */
+  private releaseBot(bot: mineflayer.Bot, reason?: string): void {
+    bot.removeAllListeners();
+    bot.on('error', () => {});
+    try {
+      bot.end(reason);
+    } catch (err) {
+      this.callbacks.onLog('warn', `Error while letting go of the bot: ${this.formatError(err)}`);
+    }
   }
 
   private registerEventHandlers(bot: mineflayer.Bot): void {
+    // Before the first spawn, failures end the attempt (E-021); after it, they keep their old handling.
+    let spawned = false;
+
     bot.once('spawn', async () => {
+      // First, so that a throw in the setup below cannot leave the watchdog running.
+      spawned = true;
+      this.clearConnectTimer();
+      this.failure = null;
+      this.failureRecordedFor = null;
       this.state = 'connected';
       this.callbacks.onLog('info', 'Bot spawned in world');
 
@@ -304,6 +413,7 @@ export class BotConnection {
     });
 
     bot.on('kicked', (reason) => {
+      this.recordFailure(bot, { message: this.formatError(reason), kickReason: reason });
       this.callbacks.onEvent?.('kicked', this.formatError(reason));
       this.callbacks.onLog('error', `Bot was kicked from server: ${this.formatError(reason)}`);
       this.state = 'disconnected';
@@ -316,6 +426,14 @@ export class BotConnection {
 
       this.callbacks.onLog('error', `Bot error [${errorCode}]: ${errorMsg}`);
 
+      if (!spawned) {
+        // Other errors may still be followed by an end or a kick; until then they wait in lastFailure.
+        const failure = { code: (err as { code?: string }).code, message: errorMsg };
+        if (endsAttempt(failure)) this.failAttempt(bot, failure);
+        else this.recordFailure(bot, failure);
+        return;
+      }
+
       if (errorCode === 'ECONNREFUSED' || errorCode === 'ETIMEDOUT') {
         this.state = 'disconnected';
       }
@@ -326,6 +444,14 @@ export class BotConnection {
     });
 
     bot.on('end', (reason) => {
+      // A late end from an older instance must not touch the state of the newer one.
+      if (this.bot !== bot) return;
+      if (!spawned) {
+        // An earlier error or kick of this attempt says more than "socketClosed"; recordFailure keeps it.
+        this.failAttempt(bot, { message: typeof reason === 'string' ? reason : this.formatError(reason) });
+        return;
+      }
+
       this.callbacks.onEvent?.('disconnected', this.formatError(reason));
       this.callbacks.onBotEnd?.(this.formatError(reason));
       this.callbacks.onLog('info', `Bot disconnected: ${this.formatError(reason)}`);
@@ -334,15 +460,9 @@ export class BotConnection {
         this.state = 'disconnected';
       }
 
-      if (this.bot === bot) {
-        try {
-          bot.removeAllListeners();
-          this.bot = null;
-          this.callbacks.onLog('info', 'Bot instance cleaned up after disconnect');
-        } catch (err) {
-          this.callbacks.onLog('warn', `Error cleaning up bot on end event: ${this.formatError(err)}`);
-        }
-      }
+      this.bot = null;
+      this.releaseBot(bot);
+      this.callbacks.onLog('info', 'Bot instance cleaned up after disconnect');
     });
   }
 
@@ -361,13 +481,8 @@ export class BotConnection {
 
     this.reconnectTimer = setTimeout(() => {
       if (this.bot) {
-        try {
-          this.bot.removeAllListeners();
-          this.bot.quit('Reconnecting...');
-          this.callbacks.onLog('info', 'Old bot instance cleaned up');
-        } catch (err) {
-          this.callbacks.onLog('warn', `Error while cleaning up old bot: ${this.formatError(err)}`);
-        }
+        this.releaseBot(this.bot, 'Reconnecting...');
+        this.callbacks.onLog('info', 'Old bot instance cleaned up');
       }
 
       this.callbacks.onLog('info', 'Creating new bot instance...');
@@ -414,12 +529,9 @@ export class BotConnection {
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
     }
+    this.clearConnectTimer();
     if (this.bot) {
-      try {
-        this.bot.quit('Server shutting down');
-      } catch (err) {
-        this.callbacks.onLog('warn', `Error during cleanup: ${this.formatError(err)}`);
-      }
+      this.releaseBot(this.bot, 'Server shutting down');
     }
   }
 
