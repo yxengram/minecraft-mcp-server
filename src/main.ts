@@ -86,7 +86,7 @@ async function main() {
   registerPositionTools(factory, getBot, getAutopilot);
   registerInventoryTools(factory, getBot);
   registerBlockTools(factory, getBot);
-  registerEntityTools(factory, getBot);
+  registerEntityTools(factory, getBot, getAutopilot);
   registerChatTools(factory, getBot, messageStore);
   registerFlightTools(factory, getBot);
   registerGameStateTools(factory, getBot);

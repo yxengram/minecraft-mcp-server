@@ -1,7 +1,9 @@
 import { z } from "zod";
 import type { Bot } from 'mineflayer';
 import { ToolFactory } from '../tool-factory.js';
-import { describeEntity, entityLabel, findNearbyEntities, formatPosition, resolveTargetEntity } from './entity-utils.js';
+import type { Autopilot } from '../autopilot/autopilot.js';
+import { CombatRules, DEFAULT_COMBAT_RULES, checkTarget, isPlayer } from '../autopilot/threats.js';
+import { BotEntity, describeEntity, entityLabel, findNearbyEntities, formatPosition, resolveTargetEntity } from './entity-utils.js';
 
 type Entity = ReturnType<Bot['nearestEntity']>;
 
@@ -12,7 +14,19 @@ const MAX_ATTACKS = 20;
 
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
-export function registerEntityTools(factory: ToolFactory, getBot: () => Bot): void {
+export function registerEntityTools(factory: ToolFactory, getBot: () => Bot, getAutopilot?: () => Autopilot | null): void {
+  // Read at every hit, so a set-policy during a sequence applies to the next hit. Without the Autopilot (tests) the
+  // defaults apply, which never attack players.
+  const combatRules = (): CombatRules => getAutopilot?.()?.policy.get().combat ?? DEFAULT_COMBAT_RULES;
+
+  // Invariant I1: players only when the policy turned attackPlayers on (E-022, first part; tamed animals, the sword
+  // sweep and the type rules wait for Q21). The reason is checkTarget's own wording.
+  const playerRefusal = (bot: Bot, target: BotEntity): string | null => {
+    if (!isPlayer(target)) return null;
+    const check = checkTarget(bot, target, { attackPlayers: combatRules().attackPlayers });
+    return check.legal ? null : check.reason;
+  };
+
   factory.registerTool(
     "find-entity",
     "Find the nearest entity of a specific type",
@@ -112,9 +126,14 @@ export function registerEntityTools(factory: ToolFactory, getBot: () => Bot): vo
         );
       }
       const target = resolved.entity;
+      const refused = playerRefusal(bot, target);
+      if (refused) return factory.createErrorResponse(`${refused}; attack-entity did not attack`);
 
       const label = entityLabel(target);
       let attacks = 0;
+      let stopped = '';
+      // A function, so the check after the awaited look is not narrowed away by the one at the top of the loop.
+      const gone = () => target.isValid === false;
       for (let i = 0; i < times; i++) {
         if (target.isValid === false) break;
 
@@ -127,6 +146,15 @@ export function registerEntityTools(factory: ToolFactory, getBot: () => Bot): vo
         }
 
         await bot.lookAt(target.position.offset(0, (target.height ?? 1) * 0.9, 0), true);
+        // A target that vanished during the look ends the sequence as before; it is not a refusal.
+        if (gone()) break;
+        // The policy may have changed since the last hit (or during the look), as combat.ts checks before each hit.
+        const reason = playerRefusal(bot, target);
+        if (reason) {
+          if (attacks === 0) return factory.createErrorResponse(`${reason}; attack-entity did not attack`);
+          stopped = `stopped: ${reason}; `;
+          break;
+        }
         bot.attack(target);
         attacks++;
 
@@ -136,7 +164,7 @@ export function registerEntityTools(factory: ToolFactory, getBot: () => Bot): vo
       await sleep(ATTACK_SETTLE_MS);
       const defeated = target.isValid === false;
       return factory.createResponse(
-        `Attacked ${label} (id ${target.id}) ${attacks} time(s); ${defeated ? 'target is gone (killed or out of range)' : 'target is still alive'}`
+        `Attacked ${label} (id ${target.id}) ${attacks} time(s); ${stopped}${defeated ? 'target is gone (killed or out of range)' : 'target is still alive'}`
       );
     }
   );
