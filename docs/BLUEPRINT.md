@@ -285,7 +285,7 @@ src/main.ts（现有，改动）--创建并注册--> src/autopilot/autopilot.ts�
 │   │   └── gathering-tools.ts        现有，改动
 │   ├── tool-factory.ts               现有，改动
 │   ├── package-info.ts               计划新增（M19，F-049）：包名与版本的唯一来源
-│   ├── connection-errors.ts          计划新增（M19，F-053）：连接失败与踢出原因的说明
+│   ├── connection-errors.ts          新增（M19，F-053）：连接失败与踢出原因的说明
 │   ├── self-check.ts                 计划新增（M19，F-054）：--check 自检
 │   ├── tool-annotations.ts           计划新增（M19，F-055）：工具标题、注解与工具名单
 │   ├── server-instructions.ts        计划新增（M19，F-056）：MCP 服务器说明
@@ -308,10 +308,10 @@ src/main.ts（现有，改动）--创建并注册--> src/autopilot/autopilot.ts�
 │   ├── decision-hooks.test.ts        新增
 │   ├── task-tools.test.ts            新增
 │   ├── trade-tools.test.ts           新增（M13，F-044）
-│   ├── m19-connection.test.ts        计划新增（M19，F-047）：连接类改动
-│   ├── m19-safety.test.ts            计划新增（M19，F-048）：安全类改动
+│   ├── m19-connection.test.ts        新增（M19，F-047；已有 E-021、E-028 的用例）：连接类改动
+│   ├── m19-safety.test.ts            新增（M19，F-048；已有 E-022 第一部分的用例）：安全类改动
 │   ├── m19-tool-experience.test.ts   计划新增（M19，F-052）：调用预算、取消、回复语义、stop-all
-│   ├── release.test.ts               计划新增（M19，F-050）：版本、包内容与工具名单
+│   ├── release.test.ts               新增（M19，F-050；已有 E-025 的版本固定断言）：版本、包内容与工具名单
 │   ├── m18-tools.test.ts             新增（M18，F-046）：ground-height 与 lead 行为
 │   ├── m16-lava.test.ts              新增（M16，E-018）：寻路器与岩浆、在岩浆里、死亡时停止命令
 │   ├── m15-tools.test.ts             新增（M15，E-017）：use-item、dig-block、挖掘时间、传送门、sleep、实体分类
@@ -320,13 +320,13 @@ src/main.ts（现有，改动）--创建并注册--> src/autopilot/autopilot.ts�
 └── scripts/
     ├── test-live-world.mjs           现有，改动：覆盖 7 个新工具，改用共享场地辅助
     ├── test-scenarios.mjs            新增：情景测试
-    ├── test-smoke.mjs                计划新增（M19，F-051）：对打包后的程序做 stdio 冒烟测试
+    ├── test-smoke.mjs                新增（M19，F-051）：对打包后的程序做 stdio 冒烟测试
     ├── build-mcpb.mjs                计划新增（M19，F-058）：打包 MCPB 扩展
     └── lib/
         └── live-arena.mjs            新增：实机测试共享的场地与诊断辅助
 ```
 
-（M19 另计划新增 `.github/workflows/release.yml`（F-059），并修改 `.github/workflows/build.yml`、`.github/dependabot.yml`、`.github/pull_request_template.md`。）
+（M19 另计划新增 `.github/workflows/release.yml`（F-059）。`.github/workflows/build.yml`、`.github/dependabot.yml`、`.github/pull_request_template.md` 已在 E-025、E-026 中修改。）
 
 ### 运行或工具生成物
 
@@ -1168,7 +1168,7 @@ src/main.ts（现有，改动）--创建并注册--> src/autopilot/autopilot.ts�
 
 ### F-047 · `tests/m19-connection.test.ts`
 
-- **模块**：测试　**里程碑**：M19　**状态**：placeholder
+- **模块**：测试　**里程碑**：M19　**状态**：verified（部分，2026-10-26：E-021 与 E-028 的用例；E-029、E-030、E-041、E-042 的用例随各步加入）
 - **职责**：M19 连接类改动的单元测试。文件由第一个用到它的提交（E-021）创建；之后 E-028（connect-errors）、E-029（disconnect-command）、E-030（version-warning）、E-041（waypoint-world）、E-042（self-check）各自往里追加，用例写在各自的 E 行。E-021 的用例：出生前的 ENOTFOUND、ECONNRESET（end 先于 error）、登录中的 end、没有 end 的版本类 error、30 秒内没有 spawn，之后状态都是 disconnected，下一次调用重新连接；lastFailure 的记录、优先顺序与清空；释放后迟到的 error 不抛出；旧实例的事件不影响新实例；出生后的断线照旧；createBot 同步抛出。期望值来自 E 行的契约，而不是实现的输出。
 - **不负责**：联网，或连接真正的 Minecraft 服务器（实机检查在 `scripts/` 中）；`tests/bot-connection.test.ts` 的现有用例（不改）。
 - **依赖**：ava、sinon（假时钟）；BotConnection 构造函数的 createBot 注入（E-021）；假 bot 用 EventEmitter，带 `_client` 与 `end()`。
@@ -1176,7 +1176,7 @@ src/main.ts（现有，改动）--创建并注册--> src/autopilot/autopilot.ts�
 
 ### F-048 · `tests/m19-safety.test.ts`
 
-- **模块**：测试　**里程碑**：M19　**状态**：placeholder
+- **模块**：测试　**里程碑**：M19　**状态**：verified（部分，2026-10-26：E-022 第一部分的用例；被驯服的动物、横扫与按 type 选择等 Q21 获批后加入）
 - **职责**：M19 安全类改动的单元测试。文件由 E-022 的提交创建；之后 E-033（send-chat-commands）和 E-035（chat-untrusted）往里追加，用例写在各自的 E 行。E-022 的用例：attackPlayers 关闭时拒绝玩家、开启时可以攻击；被驯服的动物（owneruuid、狼的 flags 0x04、马的 flags 0x02）一律拒绝；点名的被动和中立生物可以攻击，笼统的 type 不打被动生物；按 type 选目标时跳过不合法的实体；剑的横扫会碰到玩家或宠物时不出手，旁边只有牛时照常出手；打到中途变得不合法时停止并说明原因；目标被打死时回复不变。期望值来自 E 行的契约和 G6 的 I1，而不是实现的输出。
 - **不负责**：`src/autopilot/threats.ts` 与 `src/autopilot/combat.ts` 自身的规则（由 `tests/threats.test.ts`、`tests/combat.test.ts` 覆盖）；联网，或连接 Minecraft。
 - **依赖**：ava、sinon；`tests/_helpers.ts` 的 createFactory 与 asBot；假 bot 带 `registry.entitiesByName` 的 metadataKeys，让 isTamed 能读到 owneruuid 和 flags。
@@ -1195,7 +1195,7 @@ src/main.ts（现有，改动）--创建并注册--> src/autopilot/autopilot.ts�
 
 ### F-050 · `tests/release.test.ts`
 
-- **模块**：测试　**里程碑**：M19　**状态**：placeholder
+- **模块**：测试　**里程碑**：M19　**状态**：verified（部分，2026-10-26：E-025 的版本固定断言；E-024、E-044、E-046 的断言待批准）
 - **职责**：只读仓库中的文件，检查发布身份与包内容的契约，不构建、不联网。
   - **E-024**：F-049 的 PACKAGE_NAME、PACKAGE_VERSION 等于 package.json 的 name、version，COMMAND_NAME 是去掉 scope 的 name。bin 只有一项，键等于 COMMAND_NAME，值为 dist/main.js。files 恰好是 dist、CHANGELOG.md、npm-shrinkwrap.json（顺序不限）。license 为 Apache-2.0，repository.url 为 git+https://github.com/yxengram/minecraft-mcp-server.git，homepage 与 bugs 存在，engines.node 为 >=22。tsconfig.build.json 的 declaration 为 false。CHANGELOG.md 有 “## [Unreleased]” 或 “## [<当前版本>]” 一节。src/ 下没有文件含 “yuniko-software/minecraft-mcp-server”，上游网址只留在 README 的致谢里。
   - **E-025**：mineflayer、minecraft-data、mineflayer-pathfinder 是精确版本（没有 ^ 或 ~），并且等于 package-lock.json 中 node_modules/<名字> 的 version。
@@ -1207,7 +1207,7 @@ src/main.ts（现有，改动）--创建并注册--> src/autopilot/autopilot.ts�
 
 ### F-051 · `scripts/test-smoke.mjs`
 
-- **模块**：M-VER 验证　**里程碑**：M19　**状态**：placeholder　**设计**：已确定；时限暂定，在三个平台的 CI 上实测后调整
+- **模块**：M-VER 验证　**里程碑**：M19　**状态**：implemented-unverified（2026-10-26：本地 macOS 9/9 通过；CI 三平台还没有运行，分支未推送；--pack-report 与 --compare-lock 已实现，在 E-024 加入 files 之前会失败，CI 中暂时注释掉）　**设计**：已确定；时限暂定，在三个平台的 CI 上实测后调整
 - **职责**：不需要游戏的冒烟测试，检查构建或打包后的服务器能启动、按 MCP 回复并退出。有三种用法。
   - **`node scripts/test-smoke.mjs [入口]`**
     - **入口**：一个 main.js 的路径，默认 dist/main.js。也可以是从 tarball 装好的 `<目录>/node_modules/<包名>/dist/main.js`，或解开的 .mcpb 中的 dist/main.js。
@@ -1256,7 +1256,7 @@ src/main.ts（现有，改动）--创建并注册--> src/autopilot/autopilot.ts�
 
 ### F-053 · `src/connection-errors.ts`
 
-- **模块**：M-MCP 工具接口（BotConnection 的辅助）　**里程碑**：M19　**状态**：placeholder
+- **模块**：M-MCP 工具接口（BotConnection 的辅助）　**里程碑**：M19　**状态**：verified（2026-10-26：单元测试；实机核对了主机不存在、/kick、同名登录三种；版本不符、白名单、封禁、在线模式、服务器已满只有单元测试）
 - **职责**：把连接失败与踢出原因变成用户能照着做的英文说明（E-028）。导出两个纯函数：
   - kickInfo(reason)：reason 可以是 JSON 字符串、网络 NBT 或对象，用 `src/text-component.ts` 的 simplifyNbt 与 componentToText 读取。返回 { key?, text }：key 是翻译键（例如 multiplayer.disconnect.duplicate_login）；text 是纯文字，翻译键按 minecraft-data 26.1.2 的 language.json 换成英文原文，%s 依次代入 with 参数（例如 “Kicked by an operator”、“Incompatible client! Please use 26.1.2”）；没有翻译键时是组件本身的文字。
   - explainFailure(failure, { host, port, username })：failure 是 E-021 记录的 lastFailure（错误码、消息、踢出原因、时间）。返回 { explanation, code }：explanation 按下表；code 是错误码、翻译键，或 E-021 看门狗的 “no spawn within 30 s” 一类消息，供回复括号里使用。
@@ -1272,7 +1272,7 @@ src/main.ts（现有，改动）--创建并注册--> src/autopilot/autopilot.ts�
   - 其他：原始代码和原文
 - **不负责**：不决定是否重连、何时重连（E-021）；retryable() 随推迟的 background-reconnect 以后再加；不写事件、不记日志；不拼接回复的开头 “Cannot connect to Minecraft server at H:P” 与网址行（`src/bot-connection.ts`，网址见 E-024）。
 - **输入**：kickInfo：踢出原因（kicked 事件或登录阶段的 disconnect）；explainFailure：失败记录与连接配置。
-- **输出**：英文文字，H、P、U 代入实际的主机、端口、用户名。
+- **输出**：英文文字，H、P、U 代入实际的主机、端口、用户名。实现中 explainFailure 另返回 kind（对照表中匹配的那一行），`src/bot-connection.ts` 据此决定哪些踢出要在原文后附上说明（online_mode、same_name、version、not_whitelisted、banned、ip_banned）。
 - **使用方**：`src/bot-connection.ts`（checkConnectionAndReconnect 的失败回复、kicked 事件与日志，E-028；whenEnded 的原因，E-029）；F-054 `src/self-check.ts`（E-042，Q33 获批后）。
 - **依赖**：`src/text-component.ts`；minecraft-data（language.json）。
 - **状态与副作用**：无状态；不联网、不写磁盘（minecraft-data 按需读取自带的 language.json）。

@@ -26,7 +26,7 @@
 | M16 | 岩浆与死亡时的命令：寻路器与岩浆保持距离、本能按碰撞箱和岩浆伤害判断“在岩浆里”、身体类工具在 bot 死亡时停止并报告 | M15；M15 验收中重做下界实测时的死亡（2026-10-22）；用户指示（2026-10-22，只规划） | verified（2026-10-22；见进展 M16 实现与实机验收） |
 | M17 | 修复任务式生存测试发现的问题：寻路器不在栅栏、墙、屋内放脚手架，不挖门和栅栏脚下的方块；移动工具报告途中放下和挖掉的方块；被围住（dig_in 的洞）时移动工具不会悄悄挖开掩体；紧急线索的决策请求对冲 | M15；任务式生存测试（2026-10-20）；会话指示（2026-10-22） | verified（2026-10-22；见进展 M17 实现与实机验收） |
 | M18 | 新工具 ground-height（远处地面高度，下界有顶时找附近的落脚层）与 lead-animal（拴绳或诱饵带动物走，新行为 lead） | M17；任务式生存测试中记下的问题；用户指示（2026-10-24） | verified（2026-10-24；见进展 M18 实现与验收） |
-| M19 | 发布前的阻塞问题、首次体验与安全：连接卡住、attack-entity 违反 I1、没有 key 时说清楚、安装与发行（npm、MCPB、CI、发布流程）、命令行、调用时限与取消、stop-all、连接错误说明、安全默认值（send-chat 的命令、问候、玩家文字不可信）、决策错误与统计、路标按世界分开、自检、工具注解、服务器说明 | M18；发布前评估（2026-10-26）；用户指示（2026-10-26，只规划） | placeholder（2026-10-26 规划；Q16～Q33 等待用户答复） |
+| M19 | 发布前的阻塞问题、首次体验与安全：连接卡住、attack-entity 违反 I1、没有 key 时说清楚、安装与发行（npm、MCPB、CI、发布流程）、命令行、调用时限与取消、stop-all、连接错误说明、安全默认值（send-chat 的命令、问候、玩家文字不可信）、决策错误与统计、路标按世界分开、自检、工具注解、服务器说明 | M18；发布前评估（2026-10-26）；用户指示（2026-10-26，只规划） | 部分实现（2026-10-26：不需要批准的部分；其余等待 Q16～Q33） |
 
 ---
 
@@ -285,7 +285,7 @@
 | 本步不做 | connect-to-server 与后台重连（M20）；--owner；决策调用与费用的上限、--chat-triage；--auth microsoft；toolsets、--protect-builds；熔炉接入容器工具；play 提示；提交扩展目录（详见 BLUEPRINT H 节） |
 | 验收 | 每一步：单元测试覆盖该 E 行的成功与失败场景，`npm test`、`npm run lint` 通过；涉及运行时行为的步骤跑全量实机测试（无 key 与有 key 各一轮）；E-036、E-037 之后跑情景测试。整体：CI 在三平台通过；冒烟测试通过；所有者在 macOS 与 Windows 上各实际安装一次 npx 与 .mcpb，并完成一次从零开始的上手（不看源码） |
 | 恢复 | 契约一个提交；之后每一步一个独立提交，回退那一步的提交即可 |
-| 状态与证据 | placeholder（2026-10-26 规划，见进展记录 M19 规划） |
+| 状态与证据 | 部分实现（2026-10-26）：不需要批准的第 1、2（第一部分）、5、6、8、21（部分）步与附加的 E-048、E-049 已完成，见进展记录「M19：先做不需要批准的部分（实现与验收）」；其余各步等待 Q16～Q33 |
 
 **实施顺序**（每步一个提交；发布阻塞项在前；改名放在最后，免得测试和文档反复修改）：
 
@@ -320,9 +320,9 @@
 | 25 | E-047 | MCPB 扩展包（P0，Q19；创建 F-057、F-058） |
 | 26 | F-059 | 发布流程 release.yml（Q18；代理只做 dry-run，所有者推送标签并批准发布） |
 
-**附加**（用户 2026-10-26 指示“包括之前说的问题，能做的先做掉”）：E-048 dig_in 封口后仍被射中（先复现，需要测试世界）；E-049 lead-animal 报告寻路器途中的改动。
+**附加**（用户 2026-10-26 指示“包括之前说的问题，能做的先做掉”）：E-048 dig_in 封口后仍被射中（已查明原因并修复，见进展记录）；E-049 lead-animal 报告寻路器途中的改动。
 
-**不需要批准、先做的部分**（2026-10-26）：第 1 步 E-021；第 2 步 E-022 的第一部分（拒绝攻击玩家）；第 5 步 E-025；第 6 步 E-026；第 8 步 E-028；第 21 步 E-043 中与已实现行为相符的部分（LAN 固定端口、Troubleshooting、Accounts、默认用户名，以及 README 中过时的测试数与里程碑范围）；E-049。E-029 与 E-039 依赖 E-027（Q27），E-048 需要测试世界复现，暂不做。
+**不需要批准、先做的部分**（2026-10-26）：第 1 步 E-021；第 2 步 E-022 的第一部分（拒绝攻击玩家）；第 5 步 E-025；第 6 步 E-026；第 8 步 E-028；第 21 步 E-043 中与已实现行为相符的部分（LAN 固定端口、Troubleshooting、Accounts、默认用户名，以及 README 中过时的测试数与里程碑范围）；E-049。E-029 与 E-039 依赖 E-027（Q27）。E-048 在测试世界查明原因后也已做（见进展记录）。
 
 ---
 
@@ -1357,4 +1357,56 @@
 - 能先做的：E-021、E-022 第一部分、E-025、E-026、E-028、E-043 的一部分、E-049（新增）。E-048（新增）要先在测试世界复现；测试世界现在没有打开。
 - 不能先做的：E-029、E-039 依赖 E-027（Q27）；长距离自动行走要新增工具（公开接口，需批准）；恶魂炸门需要另做设计；intent-dive 偶尔提前出水是决策模型自身的判断，没有可以修的代码缺陷。
 - 实施方式：多代理工作流，每一步一个实现代理、一个审查代理，按顺序在同一个工作树上做，每步一个提交。
+
+### 2026-10-26 M19：先做不需要批准的部分（实现与验收）
+
+- **实现**：多代理工作流（14 个代理：每步一个实现代理、一个审查代理，按顺序在同一个工作树上做），7 个提交，审查都判为通过：
+  - c43a0bd 第 1 步 E-021：出生前失败的连接尝试结束在 disconnected；30 秒看门狗；lastFailure() 记录原因；新增 tests/m19-connection.test.ts。
+  - 4a34480 第 2 步 E-022 第一部分：attack-entity 不打玩家，除非策略开启 combat.attackPlayers；每次出手前重新读取策略。新增 tests/m19-safety.test.ts。
+  - c74754e 第 5 步 E-025：固定 mineflayer 协议栈 4 个包的版本；dependabot 与 PR 模板；tests/release.test.ts 的版本固定断言。
+  - c59ed08 第 6 步 E-026：CI 矩阵（extra-tools 与 main 分支）；scripts/test-smoke.mjs。
+  - c0f0dbb 第 8 步 E-028：src/connection-errors.ts，用通俗的话说明连接失败与踢出原因。
+  - 49d4dbd 附加 E-049：lead-animal 报告寻路器途中挖掉和放下的方块。
+  - f5f8ea9 第 21 步 E-043 的一部分：README 的 LAN 固定端口、Troubleshooting、Accounts、默认用户名。
+- **我核对之后的提交**：
+  - 5e6e474 审查意见的后续：README 的工具数（43 个，原来写 40）、Port Number 每次都要填同一个数、Instinct 行后面还有调用次数、invalid_response 的说明；补了两个测试（攻击时目标在转身途中消失；lead 任务启动被拒时恢复 bot.dig）；改正 connection-errors.ts 的一处注释。
+  - 23271cb 附加 E-048（见下）。
+  - 118f863 E-048 的独立审查（多代理工作流，15 个代理，三个角度，每条发现再由一个代理反驳）：确认 7 条、驳回 5 条。据此修正了挂起条件，补了 6 个测试（并把 lead 任务启动被拒的回复改为逐字核对）和 zombie-chase-task 情景，并更新了 F-040、G1、F-003、F-001 的契约。
+- **实现时的取舍**（审查判为可接受，已写入契约，或留给后续步骤）：
+  - E-021：出生前失败的 disconnected 事件改为 “Could not join H:P: <detail>”；已释放的旧实例迟到的事件不再写事件。
+  - E-022：目标在转身途中消失时，以 “0 time(s); target is gone” 结束，不再多打一下（对所有目标）；玩家在攻击距离外时先报 “is a player”。工具描述、I1 的文字、被驯服的动物和横扫等 Q21 获批后再改。
+  - E-025：按 npm 11.19.1 的源码，依赖包里的 npm-shrinkwrap.json 只在从 registry 安装时生效，本地 `npm install <tgz>` 不用它（registry 安装没有实测）。E-024 加入 files 之前，打包结果里没有 npm-shrinkwrap.json，所以 E-025 的“包里有 npm-shrinkwrap.json”一项还不算通过，要在 E-024 之后重新检查。
+  - E-026：冒烟测试已经检查 serverInfo 与 package.json 一致；--pack-report 与 --compare-lock 已实现，但在 E-024 之前会失败，CI 中先注释掉（TODO(E-024)）；第 3 部分因此要等 E-024。actions/upload-artifact 用 @v6。
+  - E-028：explainFailure 另返回 kind（已写入 F-053）；版本号常量在 E-024 导出之前先复制一份。
+  - E-049：新增只读的 Autopilot.boundBot()（已写入 F-001）。
+  - E-043：只写了与现有行为相符的部分；--check、版本警告、Accounts 与 E-035 的交叉引用、E-036 的 key 状态与“强烈建议”的措辞等到对应步骤获批后再写。
+- **E-048 的设计变更**：
+  - 旧方案：先在坡上复现；按结果让 digInPlan 加查封口格与头部格的四周，封口后再核对一次。
+  - 查明的原因（2026-10-26 在测试世界查看旧洞，对照事件与代码；是推断）：封口格 y=91 现在是空气，bot 头部所在的 y=90 是空气，脚所在的 y=89 有一块放下的泥土（已长成草方块）。dig_in 报告完成前核对过封口是固体。这次询问中 resume_task 的回答是 0.77，高于阈值，所以 dig_in 结束后暂停的 lead 任务立刻恢复，寻路器为了走回坡上的牛把洞挖开，1.5 秒后 bot 被射中。当时查询事件只取了 4 类，task_resumed 事件本身不在结果里（编号 #34 正好缺着）。
+  - 新方案：InstinctEngine.finish() 交还身体之前检查 enclosedNow。以下都成立时挂起任务：没有 keepBody；任务正等着拿回身体（TaskManager.resumesOnRelease()）；这次动作开始时 bot 还没有被围住；现在被围住。不论动作怎样结束，也不论模型怎样回答 resume_task。后两个条件来自独立审查：一是 AI 玩家在洞里用 resume-task 让任务继续，之后本能在洞里吃完东西时，原来的代码会把任务又挂起；二是已被 suspend_task、手动命令挂起的任务，原来会再挂起一次并换掉原因。
+  - 原因：封口其实放成了，是恢复的任务让寻路器把洞挖开。
+  - 影响（可见的行为变化，与 M17 leaveShelter 的原则一致）：bot 用 dig_in 躲起来之后，任务一直挂起、bot 留在洞里，直到 AI 玩家调用 resume-task 或 cancel-task，或带 leaveShelter: true 移动。没有被围住时照常恢复。
+  - 已知的后果（审查发现，驳回为缺陷，因为契约允许，而且 M8 起其他挂起也会这样）：lead-animal、collect-block 调用期间 bot 挖洞躲起来时，任务被挂起，工具会一直等到自己的时限（lead-animal 默认 300 秒），然后回复 “time limit reached”，回复里不提挂起。E-038（等待 Q27）计划的 “Still leading after N s … is paused (<reason>)” 回复可以解决。
+- **实际执行的检查**：
+  - `tsc --noEmit` 通过；`npm run lint` 无错误；`npm test` 1056 个通过（M18 后为 952）；`npm run build` 通过；`npm run test:smoke` 9/9 PASS（macOS，Node 26.10.0）。
+  - E-048 的变异检查：五个条件（被围住、没有 keepBody、任务等着身体、开始时没有被围住、读不到世界时当作 false）分别去掉或改反后，各有对应的测试失败。
+  - 全量实机测试（测试世界 63320，代码为 23271cb）：无 key、有 key 各一轮，35 步全部 ok，覆盖 66 个工具。
+  - 最终代码（118f863）上再跑一轮有 key 的全量实机测试：35 步全部 ok，覆盖 66 个工具（E-048 之后的修正只改本能；无 key 时本能离线，所以无 key 一轮没有重跑）。
+  - 针对 M19 的实机检查（临时脚本，无 key）：
+    - `--host nonexistent.invalid`：服务器启动时的第一次尝试还在进行，调用回复 “Bot is connecting…”；4 秒后回复 “Cannot connect to Minecraft server at nonexistent.invalid:25565: The host name 'nonexistent.invalid' was not found. Check --host (localhost for a world on this computer) (ENOTFOUND)”，之后每次调用重新尝试，不再停在 connecting。
+    - attack-entity `type: player`（MCPHelper 在 1 格内，默认策略）：回复 “MCPHelper is a player; players are never attacked; attack-entity did not attack”，没有 attack 或 damaged 事件。
+    - `/kick ClaudeBot`：kicked 事件 “Kicked by an operator”；下一次调用 get-position 时重新连上并回复位置。
+    - 同名登录：原来的 bot 收到 kicked “You logged in from another location: Another player or bot named ClaudeBot joined (maybe you, if the bot has your name). Give the bot its own --username”；第二个实例退出后，下一次调用重新连上。
+  - 情景测试（有 key）：
+    - 23271cb 上，用 guard 任务的第一版 zombie-chase-task 跑 2 轮：第 1 轮 bot 死亡（本能 fight → flee，guard 任务把 bot 带向僵尸，没有 dig_in），第 2 轮通过，dig_in 之后任务被挂起。由此把任务改成 follow（跟着创造模式的 MCPHelper），见 E-048。zombie-chase 1 轮通过（flee → dig_in）。
+    - 最终代码（118f863）：**zombie-chase-task 2 轮都通过**，每轮都是 flee → dig_in，结果写着 “task held after dig_in (held by the instinct after dig_in: the bot is walled in, and resuming the task would dig it out of its shelter)”，bot 满血；zombie-chase 1 轮通过（flee → dig_in）。llm-only 与 no-key 两种对照配置照旧死亡。
+- **没有检查的**：
+  - CI 三平台矩阵（分支推送后才会运行）。
+  - 同一个 Port Number 两次对局域网开放、全新原版世界里的离线账号（需要所有者操作）。
+  - 版本不符、白名单、封禁、在线模式、服务器已满几种失败（只有单元测试）；Windows 的日志路径（来自 MCP 文档）。
+  - E-049 的实机报告：全量实机测试的 lead-animal 一步通过，但没有检查回复里有没有寻路器的改动。
+  - M18 实地测试中 E-048 的原场景（坡上、雷雨、带牛）没有重跑。
+- **遗留**：src/bot-connection.ts 的 SETUP_LINE 仍指向上游仓库，留给 E-024；跑全部测试时 tests/motor.test.ts 有 sinon 的 leak 警告（以前就有；tests/instinct.test.ts 的同类警告已通过每个假世界各用一个 sandbox 消除）。
+- **另外的实测**（下界，2026-10-26，用 fabd4a0 的构建）：ground-height 的 current-level 在东、东南、西、北都找到能站的点；向东南第一个点 (-152, 69, -35) 28 秒走到；第二个点 (-146, 63, -29) 60 秒超时。能站不等于走得到（可能是封闭的空腔），ground-height 只说明哪里能站。
+- **文件状态**：F-047、F-048、F-050 为 verified（部分）；F-053 为 verified（部分失败种类只有单元测试）；F-051 为 implemented-unverified（CI 未运行）。E 行没有状态栏，状态见本条与 M19 节的“状态与证据”。
 
