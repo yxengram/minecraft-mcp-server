@@ -16,7 +16,7 @@ import { assessThreats } from '../threats.js';
 import { bestWeaponName } from '../combat.js';
 import { buildMenu, MenuOption, OptionId } from './affordances.js';
 import { MACROS } from './macros.js';
-import { burningNow, headInWater, inLavaNow } from '../hazards.js';
+import { burningNow, enclosedNow, headInWater, inLavaNow } from '../hazards.js';
 import { label } from './motor.js';
 import { FLEE_DISTANCE } from './affordances.js';
 
@@ -598,16 +598,32 @@ export class InstinctEngine {
    * Ends an action once. Stops the body only while this action still owns it, and before releasing: releasing hands
    * the body back to a paused task, which re-applies its own goal (BLUEPRINT G4).
    */
+  /** enclosedNow, false when the world cannot be read: a failed check must not stop the body being handed back. */
+  private walledIn(): boolean {
+    try {
+      return enclosedNow(this.options.bot);
+    } catch {
+      return false;
+    }
+  }
+
   private finish(run: Running, outcome: Outcome, text: string, { keepBody = false, reask = true } = {}): void {
     if (run.finished) return;
     run.finished = true;
     clearTimeout(run.timer);
     run.controller.abort(new InstinctAbort(text));
     // Hold the task before letting go of the body, so it does not resume for a moment and walk back into the danger.
+    // Walled in, the body is never handed back however the action ended: in the M18 field test the resumed lead task
+    // dug the bot out of its dig_in hole and a skeleton shot it (E-048). Leaving is the AI player's call, as with
+    // leaveShelter (M17).
     let held = '';
     const task = this.options.tasks.currentTask();
-    if (run.holdTaskAfter && outcome !== 'interrupted' && task) {
-      this.options.tasks.hold(`held by the instinct after ${run.option.id}: the task kept leading the bot back into this danger`);
+    const sheltered = Boolean(task) && !keepBody && this.walledIn();
+    const why = sheltered
+      ? 'the bot is walled in, and resuming the task would dig it out of its shelter'
+      : run.holdTaskAfter && outcome !== 'interrupted' ? 'the task kept leading the bot back into this danger' : null;
+    if (why && task) {
+      this.options.tasks.hold(`held by the instinct after ${run.option.id}: ${why}`);
       held = `; task ${task.id} held for the AI player`;
     }
     if (run.lease.isActive() && !keepBody) {

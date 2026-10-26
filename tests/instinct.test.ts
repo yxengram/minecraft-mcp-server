@@ -33,6 +33,8 @@ interface WorldOptions {
 }
 
 function createWorld(options: WorldOptions = {}) {
+  // Its own sandbox: the default one keeps every fake of the file and warns about a leak past its threshold.
+  const fakes = sinon.createSandbox();
   const blocks = new Map(Object.entries(options.blocks ?? {}));
   const name = (x: number, y: number, z: number) => blocks.get(`${x},${y},${z}`) ?? options.terrain?.(x, y, z) ?? (y < 64 ? 'stone' : 'air');
   const blockAt = (pos: Vec3) => {
@@ -47,9 +49,9 @@ function createWorld(options: WorldOptions = {}) {
   const controls: Record<string, boolean> = {};
   const pathfinder = {
     goal: null as unknown,
-    setGoal: sinon.spy((goal: unknown) => { pathfinder.goal = goal; }),
-    stop: sinon.stub(),
-    bestHarvestTool: sinon.stub().returns(null)
+    setGoal: fakes.spy((goal: unknown) => { pathfinder.goal = goal; }),
+    stop: fakes.stub(),
+    bestHarvestTool: fakes.stub().returns(null)
   };
   const bot = Object.assign(new EventEmitter(), {
     entity: self,
@@ -62,12 +64,12 @@ function createWorld(options: WorldOptions = {}) {
     inventory: { items: () => [] as { name: string; count: number }[] },
     pathfinder,
     blockAt,
-    setControlState: sinon.spy((control: string, state: boolean) => { controls[control] = state; }),
-    clearControlStates: sinon.spy(() => { for (const key of Object.keys(controls)) controls[key] = false; }),
-    look: sinon.spy(async (yaw: number) => { self.yaw = yaw; }),
-    equip: sinon.stub().resolves(),
-    dig: sinon.stub().resolves(),
-    stopDigging: sinon.stub()
+    setControlState: fakes.spy((control: string, state: boolean) => { controls[control] = state; }),
+    clearControlStates: fakes.spy(() => { for (const key of Object.keys(controls)) controls[key] = false; }),
+    look: fakes.spy(async (yaw: number) => { self.yaw = yaw; }),
+    equip: fakes.stub().resolves(),
+    dig: fakes.stub().resolves(),
+    stopDigging: fakes.stub()
   });
   const set = (x: number, y: number, z: number, block: string) => blocks.set(`${x},${y},${z}`, block);
   /** Adds a mob at x, z (y 64); `metadata` by key name, e.g. { swell_dir: 1 } for a swelling creeper. */
@@ -730,6 +732,56 @@ test.serial('the model says the task should not carry on (it keeps leading the b
   t.regex(messages().at(-1)!, /^swim_to_air → swam to the air pocket .* \(\d+\.\ds\); task t1 held for the AI player$/);
   await clock.tickAsync(3000);
   t.deepEqual(taskEvents(), ['task_started', 'task_paused', 'task_paused'], 'no task_resumed at any point');
+});
+
+/** Walls in the cell at x 3, y 65-66, z 0 (the pocket's east end): stone below, above and on every side, as dig_in leaves it. */
+function wallInPocket(world: World) {
+  for (const [x, y, z] of [[3, 64, 0], [2, 65, 0], [3, 65, 1], [3, 65, -1], [3, 66, 1], [3, 66, -1], [3, 67, 0]]) world.set(x, y, z, 'stone');
+  world.set(3, 65, 0, 'air');
+}
+
+for (const resume of [0.9, 0.2]) {
+  test.serial(`an action that ends with the bot walled in holds the task, never resumed (resume task p=${resume}; E-048)`, async (t) => {
+    const clock = useClock(t);
+    const world = createWorld({ terrain: pool({ pocket: true }), position: new Vec3(0.5, 64.2, 0.5) });
+    const decide = sinon.stub().resolves(answer('swim_to_air', 0.9, 0.1, resume));
+    const { engine, tasks, holder, messages, taskEvents } = createEngine(t, world, decide);
+    t.true((await tasks.start('idle', {})).ok);
+    engine.tick();
+    await clock.tickAsync(0);
+
+    // It gets out into a closed cell: walled in, like the bottom of a closed dig_in hole.
+    wallInPocket(world);
+    world.self.position = new Vec3(3.5, 65, 0.5);
+    await clock.tickAsync(100);
+    t.is(holder(), null, 'nobody drives: the task was held before the body was let go');
+    t.is(tasks.currentTask()?.status, 'paused');
+    t.is(tasks.currentTask()?.pauseReason,
+      'held by the instinct after swim_to_air: the bot is walled in, and resuming the task would dig it out of its shelter (waiting for resume-task or cancel-task)');
+    t.regex(messages().at(-1)!, /^swim_to_air → swam to the air pocket .* \(\d+\.\ds\); task t1 held for the AI player$/);
+    await clock.tickAsync(3000);
+    t.deepEqual(taskEvents(), ['task_started', 'task_paused', 'task_paused'], 'held once, and no task_resumed at any point');
+  });
+}
+
+test.serial('turning the instinct off while the bot is walled in holds the task too (E-048)', async (t) => {
+  const clock = useClock(t);
+  const world = createWorld({ terrain: pool({ pocket: true }), position: new Vec3(0.5, 64.2, 0.5) });
+  const decide = sinon.stub().resolves(answer('swim_to_air', 0.9));
+  const { engine, store, tasks, holder, taskEvents } = createEngine(t, world, decide);
+  t.true((await tasks.start('idle', {})).ok);
+  engine.tick();
+  await clock.tickAsync(0);
+  t.is(holder()?.holder, 'instinct swim_to_air');
+
+  // Walled in where it is, still swimming, when the AI player turns the instinct off.
+  for (const [x, z] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) for (const y of [64, 65]) world.set(x, y, z, 'stone');
+  t.true(store.update({ instinct: { enabled: false } }, 'llm').ok);
+  engine.tick();
+  await clock.tickAsync(100);
+  t.is(holder(), null);
+  t.regex(tasks.currentTask()?.pauseReason ?? '', /^held by the instinct after swim_to_air: the bot is walled in/);
+  t.deepEqual(taskEvents(), ['task_started', 'task_paused', 'task_paused']);
 });
 
 test.serial('a new cue supersedes the request in flight: a lit creeper is asked about at once, and the stale answer is not acted on', async (t) => {
