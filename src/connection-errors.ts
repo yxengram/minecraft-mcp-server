@@ -4,7 +4,7 @@ import minecraftData from 'minecraft-data';
 import { componentToText, simplifyNbt } from './text-component.js';
 import type { ConnectionFailure } from './bot-connection.js';
 
-// The same as SUPPORTED_MINECRAFT_VERSION in bot-connection.ts, which imports this module and so cannot be imported here.
+// The same as SUPPORTED_MINECRAFT_VERSION in bot-connection.ts, which does not export it until E-024; then import it here.
 const VERIFIED_VERSION = '26.1.2';
 const KEY_PREFIX = 'multiplayer.disconnect.';
 

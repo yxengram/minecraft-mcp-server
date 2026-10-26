@@ -19,7 +19,7 @@ This is a fork of **[yuniko-software/minecraft-mcp-server](https://github.com/yu
 |---|---|
 | The MCP server, the bot connection and the first **23 tools** (movement, inventory, blocks, crafting, a furnace, chat, flight, game mode) | Upstream `main` at `240c8ce` (version 2.0.4) |
 | Support for **Minecraft Java 26.1.2** | Upstream [pull request #274](https://github.com/yuniko-software/minecraft-mcp-server/pull/274) (`a9c9111`, by lifat), merged into this fork |
-| Everything else in this README: 40 more tools, perception, the Autopilot, the tests and the design documents | This fork ([yxengram/minecraft-mcp-server](https://github.com/yxengram/minecraft-mcp-server), branch `extra-tools`) |
+| Everything else in this README: 43 more tools, perception, the Autopilot, the tests and the design documents | This fork ([yxengram/minecraft-mcp-server](https://github.com/yxengram/minecraft-mcp-server), branch `extra-tools`) |
 
 The upstream project is a good, simple bridge: the LLM calls a tool, and the bot does one thing. This fork keeps that bridge and every upstream tool, with the same names and arguments. It adds what turned out to be missing when an LLM actually tries to survive in the game.
 
@@ -118,7 +118,7 @@ npm run build
 ### 2. Open a world to LAN
 Start a world and choose `ESC → Open to LAN`. Turn cheats on if you want to run the live tests.
 
-The LAN World screen has a **Port Number** box that takes 1024–65535. Enter a fixed port, for example `25565`: the world then gets the same port every time you open it to LAN, and the `--port` in step 3 never has to change.
+The LAN World screen has a **Port Number** box that takes 1024–65535. Enter a fixed port, for example `25565`, and enter the same number each time you open the world to LAN: the port then stays the same, and the `--port` in step 3 never has to change.
 
 If you leave the box empty, Minecraft picks a different port each time and prints it in chat as `Local game hosted on port N`. Put that N in `--port` and restart the client completely: the server reads `--port` only when it starts.
 
@@ -205,14 +205,14 @@ Two other replies:
 When the connection drops or the bot is kicked, nothing happens until the next tool call, which connects again. A kick is a `kicked` event with the server's text. For online mode, a name clash, a version mismatch, the whitelist and bans, the explanation from the table follows after a colon, for example `You are not white-listed on this server!: <name> is not on the whitelist: run /whitelist add <name> on the server`. `Kicked by an operator` means someone ran `/kick`.
 
 ### The instinct is offline
-Without a working decision model the bot does not dodge, flee or eat by itself. While the instinct is offline, it reports each danger once as an `instinct` event, `instinct offline (<error>: <message>): <dangers>; the bot does not act on its own, decide what to do`, and the LLM has to act. Turned off in the policy, it reports nothing. The `Instinct:` line of `get-policy` says which case it is:
+Without a working decision model the bot does not dodge, flee or eat by itself. While the instinct is offline, it reports each danger once as an `instinct` event, `instinct offline (<error>: <message>): <dangers>; the bot does not act on its own, decide what to do`, and the LLM has to act. Turned off in the policy, it reports nothing. The `Instinct:` line of `get-policy` says which case it is (each line goes on with `; <n> call(s) in the last minute`):
 
 | `get-policy` says | What to do |
 |---|---|
 | `Instinct: offline (no OPENROUTER_API_KEY); dangers are only reported as instinct events, the bot does not act on them` | The key did not reach the server. Put it in `env` in the client config ([step 3](#3-add-the-server-to-your-mcp-client)) and restart the client completely |
 | `Instinct: offline (decisions are turned off in the policy); dangers are only reported as instinct events, the bot does not act on them` | `set-policy { "decisions": { "enabled": true } }` |
 | `Instinct: turned off in the policy` | `set-policy { "instinct": { "enabled": true } }` |
-| `Instinct: offline at the last request (<error>: <message>); dangers are left to you` | The last request failed. `timeout`: no answer in time. `http_error`: the request failed or OpenRouter answered with an error; the message has the HTTP status and the reply, so check the key and the credit on your OpenRouter account. `rate_limited`: the instinct asked more than `instinct.maxCallsPerMinute` times in a minute. The line says `online` again after the next request that succeeds |
+| `Instinct: offline at the last request (<error>: <message>); dangers are left to you` | The last request failed. `timeout`: no answer in time. `http_error`: the request failed or OpenRouter answered with an error; the message has the HTTP status and the reply, so check the key and the credit on your OpenRouter account. `rate_limited`: the instinct asked more than `instinct.maxCallsPerMinute` times in a minute. `invalid_response`: the model's answer was not valid JSON or did not answer every question; it usually passes on the next request, otherwise pick another model with `set-policy { "decisions": { "model": "..." } }`. The line says `online` again after the next request that succeeds |
 
 ---
 

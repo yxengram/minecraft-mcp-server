@@ -19,7 +19,7 @@
 |---|---|
 | MCP 服务器、机器人连接和最初的 **23 个工具**（移动、背包、方块、合成、熔炉、聊天、飞行、游戏模式） | 上游 `main` 的 `240c8ce`（2.0.4 版） |
 | 对 **Minecraft Java 26.1.2** 的支持 | 上游 [pull request #274](https://github.com/yuniko-software/minecraft-mcp-server/pull/274)（`a9c9111`，作者 lifat），已合入本分支 |
-| 本文介绍的其余全部内容：新增的 40 个工具、感知、Autopilot、测试和设计文档 | 本分支（[yxengram/minecraft-mcp-server](https://github.com/yxengram/minecraft-mcp-server)，分支 `extra-tools`） |
+| 本文介绍的其余全部内容：新增的 43 个工具、感知、Autopilot、测试和设计文档 | 本分支（[yxengram/minecraft-mcp-server](https://github.com/yxengram/minecraft-mcp-server)，分支 `extra-tools`） |
 
 上游项目是一座简洁好用的桥：LLM 调用一个工具，机器人做一件事。本分支保留了这座桥和上游的全部工具，名称和参数都不变；补上的是 LLM 真正尝试在游戏里生存时发现缺少的东西。
 
@@ -118,7 +118,7 @@ npm run build
 ### 2. 对局域网开放世界
 进入一个世界，选择 `ESC → 对局域网开放`（英文界面为 Open to LAN）。如果要运行实机测试，请开启作弊。
 
-打开后的局域网世界界面（LAN World）有一栏 **Port Number**（端口号），可以填 1024～65535。建议填一个固定端口，例如 `25565`：以后每次对局域网开放，端口都相同，第 3 步里的 `--port` 就不用再改。
+打开后的局域网世界界面（LAN World）有一栏 **Port Number**（端口号），可以填 1024～65535。建议填一个固定端口，例如 `25565`，以后每次对局域网开放时都填同一个数：端口保持不变，第 3 步里的 `--port` 就不用再改。
 
 这一栏留空时，Minecraft 每次另选一个端口，并在聊天栏显示，英文界面是 `Local game hosted on port N`。把这个 N 写进 `--port`，然后完全重启客户端：服务器只在启动时读取 `--port`。
 
@@ -205,14 +205,14 @@ API key 只从环境变量 `OPENROUTER_API_KEY` 读取，不要把它写进仓�
 连接断开或机器人被踢出后，什么都不会发生，直到下一次工具调用重新连接。被踢出会记为一个 `kicked` 事件，内容是服务器的原文。online mode、同名、版本不符、白名单和封禁这几种，原文后面会加一个冒号和上表中的说明，例如 `You are not white-listed on this server!: <name> is not on the whitelist: run /whitelist add <name> on the server`。`Kicked by an operator` 表示有人执行了 `/kick`。
 
 ### 本能离线
-没有可用的决策模型时，机器人不会自己躲避、逃跑或进食。本能离线期间，每个危险只以一个 `instinct` 事件报告一次：`instinct offline (<error>: <message>): <dangers>; the bot does not act on its own, decide what to do`，由 LLM 来应对。在策略里关闭本能时，连报告也没有。`get-policy` 的 `Instinct:` 一行说明是哪种情况：
+没有可用的决策模型时，机器人不会自己躲避、逃跑或进食。本能离线期间，每个危险只以一个 `instinct` 事件报告一次：`instinct offline (<error>: <message>): <dangers>; the bot does not act on its own, decide what to do`，由 LLM 来应对。在策略里关闭本能时，连报告也没有。`get-policy` 的 `Instinct:` 一行说明是哪种情况（每一行后面还接着 `; <n> call(s) in the last minute`）：
 
 | `get-policy` 显示 | 怎么做 |
 |---|---|
 | `Instinct: offline (no OPENROUTER_API_KEY); dangers are only reported as instinct events, the bot does not act on them` | key 没有传到服务器。把它写进客户端配置的 `env`（见[第 3 步](#3-在-mcp-客户端中添加服务器)），然后完全重启客户端 |
 | `Instinct: offline (decisions are turned off in the policy); dangers are only reported as instinct events, the bot does not act on them` | `set-policy { "decisions": { "enabled": true } }` |
 | `Instinct: turned off in the policy` | `set-policy { "instinct": { "enabled": true } }` |
-| `Instinct: offline at the last request (<error>: <message>); dangers are left to you` | 上一次请求失败了。`timeout`：没有及时回答。`http_error`：请求失败，或 OpenRouter 返回了错误；消息里有 HTTP 状态码和返回内容，请检查 key 和 OpenRouter 账户的余额。`rate_limited`：本能一分钟内询问的次数超过了 `instinct.maxCallsPerMinute`。下一次请求成功后，这一行会重新显示 `online` |
+| `Instinct: offline at the last request (<error>: <message>); dangers are left to you` | 上一次请求失败了。`timeout`：没有及时回答。`http_error`：请求失败，或 OpenRouter 返回了错误；消息里有 HTTP 状态码和返回内容，请检查 key 和 OpenRouter 账户的余额。`rate_limited`：本能一分钟内询问的次数超过了 `instinct.maxCallsPerMinute`。`invalid_response`：模型的回答不是有效的 JSON，或者没有回答全部问题；通常下一次请求就会恢复，否则用 `set-policy { "decisions": { "model": "..." } }` 换一个模型。下一次请求成功后，这一行会重新显示 `online` |
 
 ---
 

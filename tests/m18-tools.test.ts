@@ -372,6 +372,7 @@ test.serial('lead-animal: a failed lead task lists what the pathfinder dug too',
   const clock = useClock(t);
   const world = leadAnimal(t, [{ name: 'wheat', count: 5 }]);
   world.animal.position = new Vec3(-9.5, 64, 0.5);
+  const ownDig = world.bot.dig;
   let strides = 0;
   // A cow that never moves; the pathfinder digs through a block on the first stride (bot.dig, as it does).
   walking(world.bot, () => {
@@ -384,12 +385,14 @@ test.serial('lead-animal: a failed lead task lists what the pathfinder dug too',
   const text = result.content[0].text;
   t.regex(text, new RegExp(`^Failed: cow \\(id 2\\) stopped following: no closer to the target for ${STUCK_MS / 1000}s`));
   t.true(text.endsWith('; on the way the pathfinder dug 1 block(s): dirt at (3, 64, 0)'), text);
+  t.is(world.bot.dig, ownDig);
   t.is(world.bot.listenerCount('blockPlaced'), 0);
 });
 
 test.serial('lead-animal: a cancelled lead task lists the blocks placed before it was cancelled', async (t) => {
   const clock = useClock(t);
   const world = leadAnimal(t, [{ name: 'wheat', count: 5 }]);
+  const ownDig = world.bot.dig;
   let strides = 0;
   walking(world.bot, () => {
     if (strides++ === 0) world.bot.emit('blockPlaced', null, { name: 'cobblestone', position: new Vec3(5, 64, 0) });
@@ -405,6 +408,21 @@ test.serial('lead-animal: a cancelled lead task lists the blocks placed before i
   const text = result.content[0].text;
   t.regex(text, /^Failed: Leading stopped: task t\d+ was cancelled \(cancelled by the test\)/);
   t.true(text.endsWith('; on the way the pathfinder placed 1 block(s): cobblestone at (5, 64, 0)'), text);
+  t.is(world.bot.dig, ownDig);
+  t.is(world.bot.listenerCount('blockPlaced'), 0);
+});
+
+test.serial('lead-animal: a lead task refused at the start replies as before and stops watching', async (t) => {
+  useClock(t);
+  const world = leadAnimal(t, [{ name: 'wheat', count: 5 }]);
+  const ownDig = world.bot.dig;
+
+  // No entity 99 near the bot: the task is refused before it starts.
+  const result = await world.lead({ entityId: 99 });
+
+  t.true(result.isError);
+  t.false(result.content[0].text.includes('on the way'));
+  t.is(world.bot.dig, ownDig);
   t.is(world.bot.listenerCount('blockPlaced'), 0);
 });
 
