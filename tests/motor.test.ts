@@ -110,6 +110,8 @@ interface WorldOptions {
 }
 
 function createWorld(options: WorldOptions = {}) {
+  // Its own sandbox: the default one keeps every fake of the file and warns about a leak past its threshold.
+  const fakes = sinon.createSandbox();
   const blocks = new Map(Object.entries(options.blocks ?? {}));
   const blockName = (x: number, y: number, z: number): string =>
     blocks.get(`${x},${y},${z}`) ?? options.terrain?.(x, y, z) ?? (y < 64 ? 'stone' : 'air');
@@ -130,8 +132,8 @@ function createWorld(options: WorldOptions = {}) {
   const inventory = options.inventory ?? [];
   const pathfinder = {
     goal: null as unknown,
-    setGoal: sinon.spy((goal: unknown) => { pathfinder.goal = goal; }),
-    stop: sinon.stub()
+    setGoal: fakes.spy((goal: unknown) => { pathfinder.goal = goal; }),
+    stop: fakes.stub()
   };
   // Positions the bot walked through, for the "never into lava or off a cliff" checks.
   const visited: Vec3[] = [];
@@ -150,21 +152,21 @@ function createWorld(options: WorldOptions = {}) {
     inventory: { items: () => inventory, slots: [] as unknown[] },
     getEquipmentDestSlot: (destination: string) => ({ head: 5, torso: 6, legs: 7, feet: 8 } as Record<string, number>)[destination],
     pathfinder,
-    setControlState: sinon.spy((control: string, state: boolean) => { controls[control] = state; }),
-    clearControlStates: sinon.spy(() => {
+    setControlState: fakes.spy((control: string, state: boolean) => { controls[control] = state; }),
+    clearControlStates: fakes.spy(() => {
       for (const key of Object.keys(controls)) controls[key] = false;
     }),
-    look: sinon.spy(async (yaw: number, pitch: number) => {
+    look: fakes.spy(async (yaw: number, pitch: number) => {
       self.yaw = yaw;
       self.pitch = pitch;
     }),
-    lookAt: sinon.stub().resolves(),
-    equip: sinon.stub(),
-    unequip: sinon.stub().resolves(),
+    lookAt: fakes.stub().resolves(),
+    equip: fakes.stub(),
+    unequip: fakes.stub().resolves(),
     // Eating takes a moment in the game; here it finishes at once unless a test makes it wait.
-    consume: sinon.stub(),
-    deactivateItem: sinon.stub(),
-    attack: sinon.spy(),
+    consume: fakes.stub(),
+    deactivateItem: fakes.stub(),
+    attack: fakes.spy(),
     blockAt
   });
   bot.equip.callsFake(async (stack: FakeItem) => { bot.heldItem = stack; });
