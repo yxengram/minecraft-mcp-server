@@ -372,6 +372,20 @@ try {
     await cmd('/kill @e[type=minecart,distance=..16]');
   });
 
+  await step('safety: attack-entity never hits a player (M19 E-022)', async () => {
+    await call('move-to-position', { x: cx, y: y0, z: cz, range: 0, timeoutMs: 20000 });
+    await cmd(`/tp ${HELPER_NAME} ${cx + 1} ${y0} ${cz}`);
+    await waitFor(async () => (await distanceTo(HELPER_NAME)) <= 2, 'the helper to stand next to the bot', 5000);
+    const helperLine = (await call('list-entities', { type: 'player' })).split('\n').find(line => line.includes(HELPER_NAME));
+    const helperId = Number(helperLine?.match(/id (\d+)/)?.[1]);
+    expect(Number.isInteger(helperId), `list-entities did not give the helper's id:\n${helperLine}`);
+    expectIncludes(await call('attack-entity', { entityId: helperId }, { expectError: true }), 'is a player',
+      'attack-entity on a player by id');
+    expectIncludes(await call('attack-entity', { type: 'player' }, { expectError: true }), 'is a player',
+      'attack-entity on a player by type');
+    await cmd(`/tp ${HELPER_NAME} ${cx} ${y0} ${cz - 7}`);
+  });
+
   await step('trading with a villager', async () => {
     await call('move-to-position', { x: cx, y: y0, z: cz, range: 0, timeoutMs: 20000 });
     await cmd('/clear @s emerald');
