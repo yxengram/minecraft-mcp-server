@@ -2,7 +2,7 @@
 
 > 本文中所有尚未执行的测试与验收都是**计划**，不能当作测试证据。只有「进展与变更」中记录的检查是实际执行过的。
 >
-> 设计依据：[docs/BLUEPRINT.md](BLUEPRINT.md)（设计版本 v0.3）。
+> 设计依据：[docs/BLUEPRINT.md](BLUEPRINT.md)（设计版本 v0.4，2026-10-18 用户确认；v0.3 的决定作为历史保留在其 A 节）。当前状态：M1～M18 verified，M19 部分实现，见下面的总览。
 
 ## 里程碑总览
 
@@ -26,7 +26,7 @@
 | M16 | 岩浆与死亡时的命令：寻路器与岩浆保持距离、本能按碰撞箱和岩浆伤害判断“在岩浆里”、身体类工具在 bot 死亡时停止并报告 | M15；M15 验收中重做下界实测时的死亡（2026-10-22）；用户指示（2026-10-22，只规划） | verified（2026-10-22；见进展 M16 实现与实机验收） |
 | M17 | 修复任务式生存测试发现的问题：寻路器不在栅栏、墙、屋内放脚手架，不挖门和栅栏脚下的方块；移动工具报告途中放下和挖掉的方块；被围住（dig_in 的洞）时移动工具不会悄悄挖开掩体；紧急线索的决策请求对冲 | M15；任务式生存测试（2026-10-20）；会话指示（2026-10-22） | verified（2026-10-22；见进展 M17 实现与实机验收） |
 | M18 | 新工具 ground-height（远处地面高度，下界有顶时找附近的落脚层）与 lead-animal（拴绳或诱饵带动物走，新行为 lead） | M17；任务式生存测试中记下的问题；用户指示（2026-10-24） | verified（2026-10-24；见进展 M18 实现与验收） |
-| M19 | 发布前的阻塞问题、首次体验与安全：连接卡住、attack-entity 违反 I1、没有 key 时说清楚、安装与发行（npm、MCPB、CI、发布流程）、命令行、调用时限与取消、stop-all、连接错误说明、安全默认值（send-chat 的命令、问候、玩家文字不可信）、决策错误与统计、路标按世界分开、自检、工具注解、服务器说明 | M18；发布前评估（2026-10-26）；用户指示（2026-10-26，只规划） | 部分实现（2026-10-26：不需要批准的部分；其余等待 Q16～Q33） |
+| M19 | 发布前的阻塞问题、首次体验与安全：连接卡住、attack-entity 违反 I1、没有 key 时说清楚、安装与发行（npm、MCPB、CI、发布流程）、命令行、调用时限与取消、stop-all、连接错误说明、安全默认值（send-chat 的命令、问候、玩家文字不可信）、决策错误与统计、路标按世界分开、自检、工具注解、服务器说明 | M18；发布前评估（2026-10-26）；用户指示（2026-10-26，只规划） | 部分实现（2026-10-26：不需要批准的部分；2026-10-28：剩下的几件小事；2026-10-29：审计后剩下的检查与文档修正，见进展 M19 的三条记录；其余等待 Q16～Q33） |
 
 ---
 
@@ -154,6 +154,7 @@
 | 验收 | 单元测试：每个新信号与选项；新信号顶替在途请求、被顶替的答复不执行；fight 与 hold 永不针对玩家、被驯服的动物和 avoidNeutral 下的中立生物；死亡先取消任务再中止宏；复活后清除残留的着火位与氧气值。实机：instinct 配置下 7 个情景加 intent-dive 全部通过，其中 creeper-ambush 至少 5 轮并记录距离；全量实机测试（有 key 与无 key）通过 |
 | 已知后果 | 没有 key 时，bot 不再自己躲苦力怕、撤退、还手或进食（用户决定：没有本能时交给 LLM）。M10 的生存测试必须有 key |
 | 恢复 | 独立提交 |
+| 状态与证据 | verified（2026-10-19）：`tsc --noEmit`、`npm run lint` 通过，`npm test` 805 个通过；全量实机测试无 key、有 key 各一轮，28 步全部 ok，61 个工具全覆盖；阈值探测 27 个局面，actThreshold 改为 0.3；instinct 配置下 creeper-approach 5/5（80 格跑道），最终情景测试中 creeper-ambush 压力测试、hunger、fire、drowning-pocket、drowning-dig、chat-triage 通过，zombie-wave 改在午夜后 5 轮三种配置都通过。用户决定（Q11）：点燃后 4 格的 creeper-ambush 改为不要求通过的压力测试。剩下的偏差：intent-dive 偶尔在 12 格氧时出水，略早于情景标准。见进展记录 2026-10-18 M9 实现、2026-10-19 M9 补充 |
 
 ## M10：文档收尾与长线验收
 
@@ -162,6 +163,8 @@
 | 目标 | 文档与代码一致；10 天生存测试（普通难度，建造房屋）作为长线验收 |
 | 范围 | README、AGENTS（应急手段从“关闭反射”改为“关闭本能”）、BLUEPRINT 合并 I 节；生存测试记录 |
 | 验收 | 全量实机测试、情景测试、生存测试的实际结果记入进展 |
+| 恢复 | 独立提交（14c8777，只改 AGENTS.md、docs/BLUEPRINT.md、docs/PLAN.md，没有代码改动）；回退该提交即可 |
+| 状态与证据 | verified（2026-10-19）：BLUEPRINT A～D 节与 G7 按 v0.4 改写，H 节列出生存测试中的工具问题，AGENTS 更新状态与应急手段（README 已在 M8、M9 更新）；10 天生存测试（2026-10-18～19，普通难度，有 key，提交 d9dd382 的构建）：10 夜全部度过、没有死亡，建成 7×7 金合欢木板房，本能两次在水下低氧时选 swim_to_air 脱险。M10 的进展记录没有另外运行全量实机测试与情景测试；M9 最终构建上的这两项见 2026-10-19 M9 补充。见进展记录 2026-10-19 M10 |
 
 ---
 
@@ -285,7 +288,7 @@
 | 本步不做 | connect-to-server 与后台重连（M20）；--owner；决策调用与费用的上限、--chat-triage；--auth microsoft；toolsets、--protect-builds；熔炉接入容器工具；play 提示；提交扩展目录（详见 BLUEPRINT H 节） |
 | 验收 | 每一步：单元测试覆盖该 E 行的成功与失败场景，`npm test`、`npm run lint` 通过；涉及运行时行为的步骤跑全量实机测试（无 key 与有 key 各一轮）；E-036、E-037 之后跑情景测试。整体：CI 在三平台通过；冒烟测试通过；所有者在 macOS 与 Windows 上各实际安装一次 npx 与 .mcpb，并完成一次从零开始的上手（不看源码） |
 | 恢复 | 契约一个提交；之后每一步一个独立提交，回退那一步的提交即可 |
-| 状态与证据 | 部分实现（2026-10-26）：不需要批准的第 1、2（第一部分）、5、6、8、21（部分）步与附加的 E-048、E-049 已完成，见进展记录「M19：先做不需要批准的部分（实现与验收）」；其余各步等待 Q16～Q33 |
+| 状态与证据 | 部分实现（2026-10-26）：不需要批准的第 1、2（第一部分）、5、6、8、21（部分）步与附加的 E-048、E-049 已完成，见进展记录「M19：先做不需要批准的部分（实现与验收）」；2026-10-28 的进展记录「M19：剩下的几件小事（不需要批准）」：tests/motor.test.ts 改为每个假世界一个 sinon sandbox（a3ccd0e），`npm test` 1056 个通过、不再有 leak 警告；E-049 已实机检查（lead-animal 的回复列出寻路器挖掉的 2 块泥土）；E-028 的白名单与封禁在局域网世界里无法实测（没有这两类命令）；推送不触发 CI 的原因未查明，4099322 的推送触发了 CI Build（运行 40627211179，4 个作业通过）。2026-10-29 的进展记录「M19：审计后剩下的、不需要批准的事」：7bf298c 的推送也触发了 CI（运行 40628157781）；F-051 的两种故意失败在当前代码上重跑通过；test-live-world 新增 E-022 的“不打玩家”一步，全量实机测试无 key、有 key 各一轮 36 步全部 ok；服务器已满与端口后来才监听两种连接情况实机核对通过；全套情景测试（有 key，1 轮）instinct 配置 12 个情景全部通过；过时的文档说法已改正。其余各步等待 Q16～Q33 |
 
 **实施顺序**（每步一个提交；发布阻塞项在前；改名放在最后，免得测试和文档反复修改）：
 
@@ -421,7 +424,7 @@
 - 实现中发现并修复：任务从排队恢复后、行为开始运行前若被取消，行为会错过取消信号；任务管理器现在在调用行为前检查取消状态（有回归测试）。
 - 实际执行的检查：`tsc --noEmit` 通过；`npm run lint` 无错误；`npm test` 313 个测试通过（原有 273 个全部保留，新增 40 个）；`npm run build` 成功。
 - 实机验收：**未完成**。`npm run test:live:world` 在启动阶段失败，原因是 Minecraft 局域网端口 63320 已关闭（`nc` 确认端口不可连接），bot 无法进入游戏；与代码无关。另确认服务器在连接被拒绝时继续运行、不会退出。等待用户重新开放局域网并提供端口。
-- 备注：连接被拒绝时日志会出现一条 “Unhandled rejection: ECONNREFUSED”，M1 之前即存在，不影响运行，暂不处理。
+- 备注：连接被拒绝时日志会出现一条 “Unhandled rejection: ECONNREFUSED”，M1 之前即存在，不影响运行，暂不处理。（后续：M19 E-021 修复：释放实例时保留空的 error 监听；见 tests/m19-connection.test.ts “E-021 a late error after the instance is let go …” 与 2026-10-26 M19 条目；2026-10-29 实机连到没有监听的端口时，服务器的 stderr 也没有这一行，见 2026-10-29 M19 条目。）
 
 
 ### 2026-10-16 M2 实现
@@ -1424,3 +1427,29 @@
   - 需要所有者做的：在仓库与账户的 Settings → Actions 里看有没有 API 不显示的设置，并留意 Actions 页面的提示；自己推一次无关紧要的提交看看；仍不触发就联系 GitHub Support（附上 workflow id 388615046、两个提交与两个 activity id，以及手动运行 40334245083 能跑的对比）。在此之前，每次推送后用 `gh workflow run "CI Build" --ref extra-tools` 手动运行。pull_request 触发从未用过（没有开过 PR），不能当作已知可用的替代。
   - 之后（同日）：用户手动运行 40620556174（a651026），4 个作业全部通过。用户批准后把 extra-tools 快进到 4099322 并推送（03:31 UTC），这次推送触发了 CI Build（运行 40627211179，event 为 push），4 个作业全部通过。工作流记录没有变（state 为 active，updated_at 仍是 2026-10-19），所以不知道前三次（240c8ce、eb93dd1、a651026）为什么没有触发，也不知道是 GitHub 一侧恢复了，还是有设置改动。上面所有者要做的检查与联系 GitHub Support 暂时不需要；以后推送仍不触发时再做，并先用手动运行代替。
 
+### 2026-10-29 M19：审计后剩下的、不需要批准的事
+
+- 用户问“不需要我的东西都做完了吗？”。只读审计（多代理工作流，36 个代理：一个查文档，一个查代码与 GitHub；每条“现在就能做”的由一个代理尝试反驳，另有一个代理查漏和纠正分类；第一次有 8 个代理因断网失败，重跑后补齐）：共 215 条，按等谁分类（问题 Q16～Q33、所有者操作、需要同意、要先写契约、现在能做、已完成、不需要做）。复核后能做的列给用户。用户指示（2026-10-29）：“全部做掉”（只在本地提交，不推送）。
+- **文档修正**（多代理工作流，5 个代理：一个编辑；准确、流程、完整三个角度各一个审查；一个修正。审查提出 14 条，采纳 13 条；剩下一条是 PLAN 的 M19 状态行引用了没有记录的运行 40628157781，现记入本条）。主要改动：
+  - BLUEPRINT 开头的当前状态、A 节的设计版本与当前阶段（加上 M18；M19 改为部分实现）；PLAN 开头的设计版本。
+  - M9 删除的反射还留在 B 节的事件类型、D 节的模块表与关系图、F-001、F-002、F-003、F-010、F-011、F-014、F-016、F-036 的输入、使用方和依赖，以及 G2～G5 中：改为本能引擎的实际做法，反射只作为 M3～M8 的历史说明保留。G2 的暂停原因、G3 的例子改为代码里的原文。
+  - G6 I1 加上 src/tools/entity-tools.ts 与 tests/m19-safety.test.ts；H 节三个标题与下界一条跟上 M18、M19；F-050 的待批准项加上 E-047；F-017、F-030、AP-3、M-TASK 的“6 种行为”注明 M18 起为 7 种。
+  - M1～M6 条目验收末尾的“（计划，未执行）”（34 处）改为指向实际执行的记录；没有单独记录的边界项照实写明（F-001、F-019、F-032、F-033）；M9 删除的 F-012、F-013、F-025 只写删除。
+  - PLAN 的 M9、M10 补上“状态与证据”（M10 另补“恢复”），只写进展记录里有的检查；第 427 行的 ECONNREFUSED 备注加上后续说明。
+  - CONTRIBUTING.md 的 Open to LAN 端口说明改为与 README 第 2 步一致（原来写默认 25565），并把它加入 E-043 的文件清单。
+- **F-051 的两种故意失败**（当前代码，`npm run build` 后，Node 26.12.1）：`npm run test:smoke` 9/9 PASS，退出码 0。一个临时入口先向 stdout 打印一行非 JSON 文字再加载 dist/main.js：“FAIL stdout carries only JSON-RPC”，退出码 1，打印两个子进程 stderr 的最后几行。另一个临时入口启动后立即退出：“FAIL initialize within 15 s: MCP error -32000: Connection closed”，退出码 1，同样打印 stderr。两个入口都放在 dist/ 下，用完删除。
+- **从 tarball 安装后跑冒烟**：`npm pack --ignore-scripts` 后在空项目里 `npm install --offline`，失败（ENOTCACHED：qs@6.17.0 不在缓存里，10-26 之后依赖又有新版本）。需要联网下载，按约定停下，没有做。CI 的 ubuntu Node 22.x 任务每次都联网做这一项。
+- **E-022 的实机步骤**（提交 1b355a8）：scripts/test-live-world.mjs 新增一步“safety: attack-entity never hits a player (M19 E-022)”：辅助玩家站到 bot 旁边，attack-entity 按 id 和按 type player 攻击它，都返回含 “is a player” 的错误；之后把辅助玩家送回原处。`npm run test:live:world -- 63320 --allow-world-changes` 无 key、有 key 各一轮：36 步全部 ok，覆盖 66 个工具中的 66 个，新步骤两轮都通过。
+- **服务器已满（E-028）**（临时脚本，无 key）：先 ping：上限 8，在线 1 人（Thomas_Summon，局域网世界的主机总占一个名额）。连上 7 个不动的探针账号（MCPHelper、MCPWorldTest、MCPProbe、MCPProbe2～MCPProbe5）后为 8/8。再启动服务器（--username ClaudeBot）：第一次调用回复 “Bot is connecting…”，2.3 秒后回复 “Cannot connect to Minecraft server at 127.0.0.1:63320: The server is full: wait for a player to leave, or raise max-players in server.properties (multiplayer.disconnect.server_full)”；stderr 有 “Bot was kicked from server: The server is full!”。一个探针退出后，下一次调用连上并回复位置。全部探针退出后 ping 为 1/8。
+- **E-021 后半**（同一脚本）：用一个刚关闭的本机端口启动服务器，get-position 回复 “Nothing is listening on 127.0.0.1:<端口> … (ECONNREFUSED)”。然后在这个端口上开一个转发到 63320 的本机 TCP 转发（代替所有者在 Open to LAN 里填端口），不重启服务器，下一次调用连上并回复位置。两次检查中服务器的 stderr 都没有 “Unhandled rejection”。
+- **全套情景测试**（`npm run test:scenarios -- 63320 --allow-world-changes`，有 key，1 轮，三种配置；E-048 之后第一次跑全套）：**instinct 配置 12 个情景全部通过**，包括 creeper-ambush 压力测试（8.0 格）、zombie-chase（flee → dig_in）、zombie-chase-task（dig_in 之后任务被挂起，原因 “held by the instinct after dig_in: the bot is walled in, …”）、intent-dive（10 格氧时才行动）、lava-shore。llm-only 与 no-key 两种对照配置照旧只通过 zombie-wave、lava-shore、chat-triage。
+- **CI**：7bf298c 的推送也触发了 CI Build（运行 40628157781，event push，extra-tools，success，4 个作业通过；用 `gh run view` 只读查到）。
+- **发现的、需要用户决定或只有所有者能做的**：
+  - server_full 的说明让人去 server.properties 调 max-players，但局域网世界没有这个文件，上限固定 8 人（审计代理反汇编 26.1.2 客户端的 IntegratedServer.getMaxPlayers 得到 8，今天的 ping 也是 8）。改文字要改 F-053 的回复、README 的 Troubleshooting 与 tests/m19-connection.test.ts，属于回复文字的改动，先问用户。
+  - 从包安装时，9 个 prismarine-* 比 package-lock.json 新（2026-10-26 的 tarball 安装：prismarine-block 1.23.0 对 1.22.0、prismarine-chat 1.13.0 对 1.11.0、prismarine-registry 1.12.0 对 1.11.0 等），单元测试与实机测试都没有用过这些版本。E-024（Q17）把 npm-shrinkwrap.json 放进包后才能固定。
+  - Dependabot：2026-10-26 的两次运行（npm 与 github-actions）都显示成功，但仓库从来没有过 PR；Dependabot alerts 是关着的（API 返回 403）。只有所有者能在 GitHub 的设置里查看。
+  - CI 费用：现在每次推送都跑 macOS（按 10 倍计分钟）与 Windows（2 倍）；E-026 写明这是要先说明的费用，PLAN 里没有所有者表示接受的记录。
+  - pull_request 触发从来没有运行过（要开一个 PR 才能核对）。
+- **没有做的**：E-048 的原场景（坡上、雷雨、带牛）仍没有重跑（审查意见不一致：E-048 的验收已由单元测试与 zombie-chase-task 满足）；E-041 的 hashedSeed 探测（Q30 获批前用处不大）；本地的 tarball 安装（见上）；需要所有者的检查（同一端口两次开放局域网、全新原版世界里的离线账号、Windows 的日志路径、Claude Desktop 的配置示例）与需要下载专用服务器的检查（白名单、封禁、在线模式、版本不符）。
+- **对世界的影响**：探针账号在世界里停留约 1 分钟，用户的聊天里有它们进出的消息；MCPProbe、MCPProbe2～MCPProbe5 是新名字，存档里多了它们的 playerdata 文件。全量实机测试与情景测试各自在高空搭场地，结束时的清理步骤都是 ok。
+- **文件状态**：F-051 改为 verified（部分）：故意失败已重跑，验收中本地 macOS 的 tarball 安装没有记录；F-053 补上服务器已满与端口没有监听的实机核对；F-048 补上 test-live-world 的新步骤。

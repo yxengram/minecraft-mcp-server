@@ -24,9 +24,9 @@ git checkout -b your-feature-name
 
 ### 3. Setup Minecraft Server
 
-Create a singleplayer world and open it to LAN (ESC -> Open to LAN). The bot will connect using port 25565 and hostname localhost by default.
+Create a singleplayer world and open it to LAN (ESC -> Open to LAN). The bot connects to localhost on port 25565 by default, and the example config below passes `--port 25565`, but Open to LAN picks its own port unless you give it one: the LAN World screen has a **Port Number** box (1024–65535). Enter `25565` there, and the same number each time you open the world to LAN. If you leave the box empty, Minecraft picks a different port each time and prints it in chat as `Local game hosted on port N`; put that N in `--port` and restart the client completely, because the server reads `--port` only when it starts.
 
-For a more detailed setup guide, see the [README](README.md).
+For a more detailed setup guide, see the [README](README.md) (step 2, "Open a world to LAN").
 
 ### 4. Configure Your MCP Client
 
