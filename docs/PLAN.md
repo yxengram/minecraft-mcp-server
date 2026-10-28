@@ -1410,3 +1410,16 @@
 - **另外的实测**（下界，2026-10-26，用 fabd4a0 的构建）：ground-height 的 current-level 在东、东南、西、北都找到能站的点；向东南第一个点 (-152, 69, -35) 28 秒走到；第二个点 (-146, 63, -29) 60 秒超时。能站不等于走得到（可能是封闭的空腔），ground-height 只说明哪里能站。
 - **文件状态**：F-047、F-048、F-050 为 verified（部分）；F-053 为 verified（部分失败种类只有单元测试）；F-051 为 verified（--pack-report 与 --compare-lock 要等 E-024）。E 行没有状态栏，状态见本条与 M19 节的“状态与证据”。
 
+### 2026-10-28 M19：剩下的几件小事（不需要批准）
+
+- 用户指示（2026-10-28）：把 2026-10-26 条目中剩下的、不需要批准的小事做完。
+- **测试的 leak 警告**：tests/motor.test.ts 的假世界改为各用一个 sinon sandbox（与 tests/instinct.test.ts 相同），提交 a3ccd0e。`npm test` 1056 个通过，不再出现 “Potential memory leak detected”；`npm run lint` 无错误。
+- **E-049 的实机检查**（测试世界 63320，无 key，临时脚本）：在 bot 上方 y=200 搭一个有玻璃围栏的平台，中间一道 3 格高的泥土墙横穿整个平台，墙另一侧召唤一头牛。lead-animal（诱饵 wheat）回复 “Led cow (id 1005) to (-1344, 201, -425) by lure (wheat) in 14s; it is 0.6 blocks from the target; on the way the pathfinder dug 2 block(s): dirt at (-1337, 202, -425), dirt at (-1337, 201, -425)”。结束后杀掉这头牛、清除平台范围内的掉落物和给的 4 个小麦，平台改回空气，bot 送回原处；之后核对平台各处是空气、bot 背包里的小麦还是原来的 8 个。
+- **E-028 的白名单与封禁**：在测试世界里，`/whitelist list` 与 `/banlist players` 都回复 “Unknown or incomplete command”。对局域网开放的单人世界没有这两类命令，所以 not_whitelisted、banned 的说明在这里无法实测，只能在专用服务器上做（要下载服务器程序，需要用户同意）。脚本里改名单的部分因此没有执行，世界的名单没有改动。
+- **推送不触发 CI**：第二次推送（a651026，2026-10-26 14:01 UTC）同样没有触发 CI Build。只读调查（多代理工作流，2 个代理：一个调查，一个反驳；只用 GET 与只读 git 命令）：
+  - 两次推送都到了 GitHub（activity API 中的 47831198352、47832752572），其他应用也处理了（claude 检查套件、Dependabot 的运行）；但没有为 CI Build 创建 push 触发的运行。
+  - 这个仓库从来没有过 push 触发的运行：2026-10-18 建库时同时推送了 main（240c8ce，当时的过滤条件是 push: [main]，是匹配的），也没有运行；同一个文件在上游仓库会按 push 运行。同一账户的其他仓库（Coopanion、LacanAI，含私有仓库）按 push 正常运行。
+  - 已排除：提交信息中的跳过标记（15 个提交全文都查过）、推送没到达、分支过滤条件、YAML 无效、Actions 被关闭、费用或额度、GITHUB_TOKEN 不触发的规则、规则集与分支保护、GitHub 故障记录（反驳代理没有独立核对这一项）、标签过多等例外。
+  - 结论（低置信度）：GitHub 一侧或仓库内部状态的问题，通过 API 看不到。仓库中的文件不需要改。
+  - 需要所有者做的：在仓库与账户的 Settings → Actions 里看有没有 API 不显示的设置，并留意 Actions 页面的提示；自己推一次无关紧要的提交看看；仍不触发就联系 GitHub Support（附上 workflow id 388615046、两个提交与两个 activity id，以及手动运行 40334245083 能跑的对比）。在此之前，每次推送后用 `gh workflow run "CI Build" --ref extra-tools` 手动运行。pull_request 触发从未用过（没有开过 PR），不能当作已知可用的替代。
+

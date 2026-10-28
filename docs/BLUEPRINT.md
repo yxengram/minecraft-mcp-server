@@ -1256,7 +1256,7 @@ src/main.ts（现有，改动）--创建并注册--> src/autopilot/autopilot.ts�
 
 ### F-053 · `src/connection-errors.ts`
 
-- **模块**：M-MCP 工具接口（BotConnection 的辅助）　**里程碑**：M19　**状态**：verified（2026-10-26：单元测试；实机核对了主机不存在、/kick、同名登录三种；版本不符、白名单、封禁、在线模式、服务器已满只有单元测试）
+- **模块**：M-MCP 工具接口（BotConnection 的辅助）　**里程碑**：M19　**状态**：verified（2026-10-26：单元测试；实机核对了主机不存在、/kick、同名登录三种；版本不符、白名单、封禁、在线模式、服务器已满只有单元测试；LAN 世界没有 /whitelist 与 /ban 命令，白名单与封禁要在专用服务器上才能实测）
 - **职责**：把连接失败与踢出原因变成用户能照着做的英文说明（E-028）。导出两个纯函数：
   - kickInfo(reason)：reason 可以是 JSON 字符串、网络 NBT 或对象，用 `src/text-component.ts` 的 simplifyNbt 与 componentToText 读取。返回 { key?, text }：key 是翻译键（例如 multiplayer.disconnect.duplicate_login）；text 是纯文字，翻译键按 minecraft-data 26.1.2 的 language.json 换成英文原文，%s 依次代入 with 参数（例如 “Kicked by an operator”、“Incompatible client! Please use 26.1.2”）；没有翻译键时是组件本身的文字。
   - explainFailure(failure, { host, port, username })：failure 是 E-021 记录的 lastFailure（错误码、消息、踢出原因、时间）。返回 { explanation, code }：explanation 按下表；code 是错误码、翻译键，或 E-021 看门狗的 “no spawn within 30 s” 一类消息，供回复括号里使用。
