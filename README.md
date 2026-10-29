@@ -273,7 +273,7 @@ A command that moves or uses the bot's body stops when the bot dies, and its rep
 - `find-entity`: the nearest entity of a type
 - `list-entities`: nearby entities, with details such as drops, owners, sheep colors, held items and creepers about to explode
 - `list-players`: players online
-- `attack-entity`: attack an entity in reach
+- `attack-entity`: attack an entity in reach. Never hits players (unless `combat.attackPlayers` is on) or tamed animals, and holds back a sword hit whose sweep would reach them
 - `activate-entity`: right-click an entity
 - `list-trades`: what a villager offers, the stock left and how many times you can afford each trade
 - `trade`: trade with a villager by the number list-trades shows

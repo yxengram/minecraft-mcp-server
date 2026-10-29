@@ -3,14 +3,17 @@
 import test from 'ava';
 import sinon from 'sinon';
 import { Vec3 } from 'vec3';
+import minecraftData from 'minecraft-data';
 import { registerEntityTools } from '../src/tools/entity-tools.js';
 import { PolicyStore } from '../src/autopilot/policy.js';
 import type { Autopilot } from '../src/autopilot/autopilot.js';
 import { asBot, createFactory } from './_helpers.js';
 
 // ---------------------------------------------------------------------------------------------------------------
-// E-022 (first part): attack-entity never hits a player unless the policy turned combat.attackPlayers on.
-// Tamed animals, the sword sweep and the type-selection rules wait for Q21 and are not tested here yet.
+// E-022: attack-entity follows invariant I1. Players only with combat.attackPlayers on; tamed animals never (no way
+// to force it); no sword hit whose sweep would reach a player or a pet; by type, the nearest target the bot may
+// attack, where 'mob', 'hostile' or part of a name names nothing; a target that turns illegal mid-way stops the
+// sequence. The first part (players) came first; the rest followed Q21 (2026-10-29).
 // ---------------------------------------------------------------------------------------------------------------
 
 const self = { id: 1, position: new Vec3(0, 64, 0) };
@@ -35,8 +38,14 @@ function allowPlayers(policy: PolicyStore, on: boolean) {
   if (!result.ok) throw new Error(result.errors.join('; '));
 }
 
-function fakeBot(entities: Record<number, unknown>) {
-  return { entity: self, entities, lookAt: sinon.stub().resolves(), attack: sinon.stub() };
+// The bot is verified with 26.1.2; tamed animals are read from that version's metadata layout.
+const registry = minecraftData('26.1.2');
+
+function fakeBot(entities: Record<number, unknown>, heldItem?: string) {
+  return {
+    registry, entity: self, entities, heldItem: heldItem ? { name: heldItem } : null,
+    lookAt: sinon.stub().resolves(), attack: sinon.stub()
+  };
 }
 
 test('E-022: without the Autopilot the default rules apply and a player is never attacked', async (t) => {
@@ -65,7 +74,7 @@ test('E-022: with attackPlayers off (the default policy) a player by id is refus
   t.is(bot.attack.callCount, 0);
 });
 
-test('E-022: a player chosen by type is refused the same way', async (t) => {
+test('E-022: a player chosen by type is refused: no player the bot may attack, with the reason', async (t) => {
   const { factory, getTool } = createFactory();
   const bot = fakeBot({ 5: player() });
   const { getAutopilot } = autopilotWith();
@@ -74,7 +83,8 @@ test('E-022: a player chosen by type is refused the same way', async (t) => {
   const result = await getTool('attack-entity')!.execute({ type: 'player' });
 
   t.true(result.isError);
-  t.true(result.content[0].text.includes(REFUSED));
+  // Since the second part, a type whose matches are all illegal gets the type-selection error (E-022 (3)).
+  t.is(result.content[0].text, `Failed: No player the bot may attack within 4.5 blocks: ${PLAYER_REASON}`);
   t.false(bot.attack.called);
 });
 
@@ -186,4 +196,336 @@ test('E-022: with the Autopilot wired in, a hostile mob by id is still attacked 
   t.falsy(result.isError);
   t.true(bot.attack.calledOnceWith(target));
   t.is(result.content[0].text, 'Attacked zombie (id 2) 1 time(s); target is still alive');
+});
+
+// --- E-022 (second part, Q21): tamed animals, named types, the sword sweep -------------------------------------
+
+const OWNER = '0b1c2d3e-0000-4000-8000-000000000001';
+const TAMED_REASON = 'wolf is tamed; tamed animals are never attacked';
+const TARGET_AT = new Vec3(2, 64, 0);
+// One block beside the target and about 2.24 blocks from the bot: a sword sweep would hit it.
+const BESIDE = new Vec3(2, 64, 1);
+const DESCRIPTION_END = 'Never hits players (unless combat.attackPlayers is on) or tamed animals, and holds back a sword hit whose sweep would reach them';
+
+function sweepReason(bystander: string, target: string) {
+  return `${bystander} is next to ${target}; a sword sweep would hit it too. Hold a non-sword item (equip-item) or wait until they move apart`;
+}
+
+/** An entity metadata array with each value at the index of its key for that entity type. */
+function meta(name: string, values: Record<string, unknown>): unknown[] {
+  const keys = registry.entitiesByName[name]?.metadataKeys as string[] | undefined;
+  if (!keys) throw new Error(`no metadata keys for ${name}`);
+  const result: unknown[] = [];
+  for (const [key, value] of Object.entries(values)) {
+    const index = keys.indexOf(key);
+    if (index < 0) throw new Error(`${name} has no metadata key ${key}`);
+    result[index] = value;
+  }
+  return result;
+}
+
+/** A mob with mineflayer's type for its name (26.1.2): allay and iron_golem are 'mob', wolf and cow 'animal'. */
+function mob(id: number, name: string, pos: Vec3, metadata: unknown[] = []) {
+  return { id, name, type: registry.entitiesByName[name]?.type ?? 'mob', position: pos, height: 1.8, isValid: true, metadata };
+}
+
+type FakeEntity = { id: number; position: Vec3 };
+
+/** Registers the tool on a fake bot with these entities and a real PolicyStore, and runs one call. */
+async function attackWith(
+  entities: FakeEntity[],
+  args: Record<string, unknown>,
+  { policy = new PolicyStore(), heldItem, setup }: { policy?: PolicyStore; heldItem?: string; setup?: (bot: ReturnType<typeof fakeBot>) => void } = {}
+) {
+  const { factory, getTool } = createFactory();
+  const bot = fakeBot(Object.fromEntries(entities.map(entity => [entity.id, entity])), heldItem);
+  setup?.(bot);
+  registerEntityTools(factory, asBot(bot), () => ({ policy }) as unknown as Autopilot);
+  const result = await getTool('attack-entity')!.execute(args);
+  return { bot, result, text: result.content[0].text };
+}
+
+function setCombat(policy: PolicyStore, combat: Record<string, unknown>) {
+  const result = policy.update({ combat }, 'llm');
+  if (!result.ok) throw new Error(result.errors.join('; '));
+}
+
+test('E-022: the tool description ends with the I1 sentence', (t) => {
+  const { factory, getTool } = createFactory();
+  registerEntityTools(factory, asBot(fakeBot({})));
+
+  t.true(getTool('attack-entity')!.description.endsWith(DESCRIPTION_END));
+});
+
+// (2) Tamed animals are always refused, also with attackPlayers on; there is no parameter to force it.
+for (const [label, name, metadata, reason] of [
+  ['a wolf with an owner uuid', 'wolf', () => meta('wolf', { owneruuid: OWNER }), TAMED_REASON],
+  ['a wolf with the tamed flag 0x04', 'wolf', () => meta('wolf', { flags: 0x04 }), TAMED_REASON],
+  ['a horse with the tamed flag 0x02', 'horse', () => meta('horse', { flags: 0x02 }), 'horse is tamed; tamed animals are never attacked']
+] as const) {
+  for (const attackPlayers of [false, true]) {
+    test(`E-022: ${label} by id is refused and never hit (attackPlayers ${attackPlayers})`, async (t) => {
+      const policy = new PolicyStore();
+      setCombat(policy, { attackPlayers });
+      const pet = mob(3, name, TARGET_AT, metadata());
+
+      const { bot, result, text } = await attackWith([pet], { entityId: 3, times: 3 }, { policy });
+
+      t.true(result.isError);
+      t.is(text, `Failed: ${reason}; attack-entity did not attack`);
+      t.is(bot.attack.callCount, 0);
+    });
+  }
+}
+
+// The contract does not say which reply comes first for an illegal target out of reach, only that it is never hit.
+test('E-022: a tamed wolf out of reach is never hit', async (t) => {
+  const pet = mob(3, 'wolf', new Vec3(10, 64, 0), meta('wolf', { owneruuid: OWNER }));
+
+  const { bot, result } = await attackWith([pet], { entityId: 3 });
+
+  t.true(result.isError);
+  t.false(bot.attack.called);
+});
+
+// (3) Named targets: by id, or a type that is the whole name. Generic types and parts of names name nothing.
+for (const name of ['pig', 'cow']) {
+  test(`E-022: a ${name} by id is attacked and the reply is unchanged`, async (t) => {
+    const animal = mob(3, name, TARGET_AT);
+
+    const { bot, result, text } = await attackWith([animal], { entityId: 3 });
+
+    t.falsy(result.isError);
+    t.true(bot.attack.calledOnceWith(animal));
+    t.is(text, `Attacked ${name} (id 3) 1 time(s); target is still alive`);
+  });
+}
+
+for (const args of [{ entityId: 3 }, { type: 'enderman' }, { type: 'Enderman' }]) {
+  test(`E-022: with avoidNeutral on, an enderman named by ${JSON.stringify(args)} is attacked`, async (t) => {
+    const policy = new PolicyStore();
+    t.true(policy.get().combat.avoidNeutral, 'the default policy leaves neutral mobs alone');
+    const enderman = mob(3, 'enderman', TARGET_AT);
+
+    const { bot, result, text } = await attackWith([enderman], args, { policy });
+
+    t.falsy(result.isError);
+    t.true(bot.attack.calledOnceWith(enderman));
+    t.is(text, 'Attacked enderman (id 3) 1 time(s); target is still alive');
+  });
+}
+
+test("E-022: type 'mob' passes over the nearer iron golem (neutral) and allay (passive) and hits the zombie", async (t) => {
+  const golem = mob(3, 'iron_golem', new Vec3(1.5, 64, 0));
+  const allay = mob(4, 'allay', new Vec3(0, 64, 2));
+  const zombie = mob(6, 'zombie', new Vec3(3, 64, 0));
+
+  const { bot, result, text } = await attackWith([golem, allay, zombie], { type: 'mob' });
+
+  t.falsy(result.isError);
+  t.true(bot.attack.calledOnceWith(zombie));
+  t.is(text, 'Attacked zombie (id 6) 1 time(s); target is still alive');
+});
+
+test("E-022: type 'mob' with only a neutral and a passive mob in reach attacks nothing and gives the nearest one's reason", async (t) => {
+  const golem = mob(3, 'iron_golem', new Vec3(1.5, 64, 0));
+  const allay = mob(4, 'allay', new Vec3(0, 64, 2));
+
+  const { bot, result, text } = await attackWith([golem, allay], { type: 'mob' });
+
+  t.true(result.isError);
+  t.is(text, 'Failed: No mob the bot may attack within 4.5 blocks: iron_golem is neutral and is only attacked when named explicitly');
+  t.false(bot.attack.called);
+});
+
+test("E-022: type 'mob' never names a passive mob, even when it is the only match", async (t) => {
+  const allay = mob(4, 'allay', new Vec3(0, 64, 2));
+
+  const { bot, text } = await attackWith([allay], { type: 'mob' });
+
+  t.is(text, 'Failed: No mob the bot may attack within 4.5 blocks: allay is not hostile');
+  t.false(bot.attack.called);
+});
+
+test("E-022: with a generic type, neutral mobs follow avoidNeutral: off, the nearest iron golem is attacked", async (t) => {
+  const policy = new PolicyStore();
+  setCombat(policy, { avoidNeutral: false });
+  const golem = mob(3, 'iron_golem', new Vec3(1.5, 64, 0));
+  const zombie = mob(6, 'zombie', new Vec3(3, 64, 0));
+
+  const { bot, text } = await attackWith([golem, zombie], { type: 'mob' }, { policy });
+
+  t.true(bot.attack.calledOnceWith(golem));
+  t.is(text, 'Attacked iron_golem (id 3) 1 time(s); target is still alive');
+});
+
+test("E-022: type 'piglin' passes over the nearer zombified piglin (only part of its name) and hits the piglin", async (t) => {
+  const zombified = mob(3, 'zombified_piglin', new Vec3(1, 64, 1));
+  const piglin = mob(4, 'piglin', new Vec3(0, 64, 3));
+
+  const { bot, result, text } = await attackWith([zombified, piglin], { type: 'piglin' });
+
+  t.falsy(result.isError);
+  t.true(bot.attack.calledOnceWith(piglin));
+  t.is(text, 'Attacked piglin (id 4) 1 time(s); target is still alive');
+});
+
+// (4) Selecting by type skips the entities that may not be attacked.
+test("E-022: type 'wolf' passes over the nearer tamed wolf and hits the wild one in reach", async (t) => {
+  const pet = mob(3, 'wolf', new Vec3(1.5, 64, 0), meta('wolf', { owneruuid: OWNER }));
+  const wild = mob(4, 'wolf', new Vec3(0, 64, 3.5), meta('wolf', { flags: 0 }));
+
+  const { bot, result, text } = await attackWith([pet, wild], { type: 'wolf' });
+
+  t.falsy(result.isError);
+  t.true(bot.attack.calledOnceWith(wild));
+  t.is(text, 'Attacked wolf (id 4) 1 time(s); target is still alive');
+});
+
+test("E-022: type 'wolf' with only a tamed wolf in reach attacks nothing", async (t) => {
+  const pet = mob(3, 'wolf', new Vec3(1.5, 64, 0), meta('wolf', { owneruuid: OWNER }));
+  const farWild = mob(4, 'wolf', new Vec3(8, 64, 0));
+
+  const { bot, result, text } = await attackWith([pet, farWild], { type: 'wolf' });
+
+  t.true(result.isError);
+  t.is(text, `Failed: No wolf the bot may attack within 4.5 blocks: ${TAMED_REASON}`);
+  t.false(bot.attack.called);
+});
+
+test('E-022: a type that matches nothing in reach keeps the old reply', async (t) => {
+  const { text } = await attackWith([mob(4, 'wolf', new Vec3(8, 64, 0))], { type: 'wolf' });
+
+  t.is(text, 'Failed: No wolf found within 4.5 blocks. Move closer first');
+});
+
+// (5) The sword sweep: no hit while a player or a pet stands next to the target.
+for (const [label, bystander, name] of [
+  ['a player', () => player(5, BESIDE.clone()), 'MCPHelper'],
+  ['a tamed wolf', () => mob(5, 'wolf', BESIDE.clone(), meta('wolf', { owneruuid: OWNER })), 'wolf']
+] as const) {
+  test(`E-022: holding a sword with ${label} next to the target, the bot does not swing`, async (t) => {
+    const target = zombie(2, TARGET_AT.clone());
+
+    const { bot, result, text } = await attackWith([target, bystander()], { entityId: 2, times: 3 }, { heldItem: 'diamond_sword' });
+
+    t.true(result.isError);
+    t.is(text, `Failed: ${sweepReason(name, 'zombie')}; attack-entity did not attack`);
+    t.is(bot.attack.callCount, 0);
+  });
+}
+
+test('E-022: holding a sword with only a cow next to the target, the bot swings as before', async (t) => {
+  const target = zombie(2, TARGET_AT.clone());
+  const cow = mob(5, 'cow', BESIDE.clone());
+
+  const { bot, result, text } = await attackWith([target, cow], { entityId: 2 }, { heldItem: 'iron_sword' });
+
+  t.falsy(result.isError);
+  t.true(bot.attack.calledOnceWith(target));
+  t.is(text, 'Attacked zombie (id 2) 1 time(s); target is still alive');
+});
+
+for (const heldItem of ['iron_axe', undefined]) {
+  test(`E-022: holding ${heldItem ?? 'nothing'} (no sweep), a player next to the target does not stop the hit`, async (t) => {
+    const target = zombie(2, TARGET_AT.clone());
+
+    const { bot, result } = await attackWith([target, player(5, BESIDE.clone())], { entityId: 2 }, { heldItem });
+
+    t.falsy(result.isError);
+    t.true(bot.attack.calledOnceWith(target));
+  });
+}
+
+test('E-022: with attackPlayers on, a sword sweep still may not reach a player beside the target', async (t) => {
+  const policy = new PolicyStore();
+  setCombat(policy, { attackPlayers: true });
+  const target = zombie(2, TARGET_AT.clone());
+
+  const { bot, text } = await attackWith([target, player(5, BESIDE.clone())], { entityId: 2 }, { policy, heldItem: 'diamond_sword' });
+
+  t.is(text, `Failed: ${sweepReason('MCPHelper', 'zombie')}; attack-entity did not attack`);
+  t.false(bot.attack.called);
+});
+
+test('E-022: with attackPlayers on, a player may be the target but another player beside it holds back the sword', async (t) => {
+  const policy = new PolicyStore();
+  setCombat(policy, { attackPlayers: true });
+  const target = player(5, TARGET_AT.clone());
+  const alex = { ...player(6, BESIDE.clone()), username: 'Alex' };
+
+  const { bot, text } = await attackWith([target, alex], { entityId: 5 }, { policy, heldItem: 'diamond_sword' });
+
+  t.is(text, `Failed: ${sweepReason('Alex', 'MCPHelper')}; attack-entity did not attack`);
+  t.false(bot.attack.called);
+});
+
+// (6) A target that turns illegal mid-way stops the sequence before the next hit.
+test('E-022: a player stepping next to the target after the 2nd hit (sword in hand) stops it before the 3rd', async (t) => {
+  const target = zombie(2, TARGET_AT.clone());
+
+  const { bot, result, text } = await attackWith([target], { entityId: 2, times: 5 }, {
+    heldItem: 'diamond_sword',
+    setup: fake => fake.attack.callsFake(() => {
+      if (fake.attack.callCount === 2) fake.entities[5] = player(5, BESIDE.clone());
+    })
+  });
+
+  t.falsy(result.isError);
+  t.is(bot.attack.callCount, 2);
+  // The sweep is checked after the 3rd look, right before the hit it holds back (E-022 (5)).
+  t.is(bot.lookAt.callCount, 3);
+  t.true(text.includes('2 time(s); stopped:'));
+  t.is(text, `Attacked zombie (id 2) 2 time(s); stopped: ${sweepReason('MCPHelper', 'zombie')}; target is still alive`);
+});
+
+test('E-022: a player stepping next to the target during the look (sword in hand) means no hit at all', async (t) => {
+  const target = zombie(2, TARGET_AT.clone());
+
+  const { bot, result, text } = await attackWith([target], { entityId: 2, times: 3 }, {
+    heldItem: 'diamond_sword',
+    setup: fake => fake.lookAt.callsFake(async () => { fake.entities[5] = player(5, BESIDE.clone()); })
+  });
+
+  t.true(result.isError);
+  t.is(text, `Failed: ${sweepReason('MCPHelper', 'zombie')}; attack-entity did not attack`);
+  t.false(bot.attack.called);
+});
+
+test('E-022: a wolf tamed after the 2nd hit is not hit a 3rd time', async (t) => {
+  const wolf = mob(3, 'wolf', TARGET_AT.clone(), meta('wolf', { flags: 0 }));
+
+  const { bot, text } = await attackWith([wolf], { entityId: 3, times: 5 }, {
+    setup: fake => fake.attack.callsFake(() => {
+      if (fake.attack.callCount === 2) wolf.metadata = meta('wolf', { owneruuid: OWNER });
+    })
+  });
+
+  t.is(bot.attack.callCount, 2);
+  t.is(text, `Attacked wolf (id 3) 2 time(s); stopped: ${TAMED_REASON}; target is still alive`);
+});
+
+// (7) A target killed during the sequence ends as before.
+test('E-022: a target killed by the 2nd hit, sword in hand and a cow beside it, ends with "target is gone"', async (t) => {
+  const target = zombie(2, TARGET_AT.clone());
+
+  const { bot, result, text } = await attackWith([target, mob(5, 'cow', BESIDE.clone())], { entityId: 2, times: 5 }, {
+    heldItem: 'diamond_sword',
+    setup: fake => fake.attack.callsFake(() => { if (fake.attack.callCount === 2) target.isValid = false; })
+  });
+
+  t.falsy(result.isError);
+  t.is(bot.attack.callCount, 2);
+  t.true(text.startsWith('Attacked zombie (id 2) 2 time(s); target is gone'));
+  t.false(text.includes('stopped:'));
+});
+
+test('E-022: a target that is already gone is not refused: the call ends with "target is gone"', async (t) => {
+  const target = { ...player(5, TARGET_AT.clone()), isValid: false };
+
+  const { bot, result, text } = await attackWith([target], { entityId: 5 });
+
+  t.falsy(result.isError);
+  t.false(bot.attack.called);
+  t.true(text.startsWith('Attacked MCPHelper (id 5) 0 time(s); target is gone'));
 });

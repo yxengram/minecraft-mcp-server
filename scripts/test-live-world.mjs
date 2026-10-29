@@ -386,6 +386,29 @@ try {
     await cmd(`/tp ${HELPER_NAME} ${cx} ${y0} ${cz - 7}`);
   });
 
+  await step('safety: attack-entity never hits a tamed wolf (M19 E-022)', async () => {
+    await call('move-to-position', { x: cx, y: y0, z: cz, range: 0, timeoutMs: 20000 });
+    // Owner is the helper's UUID as four signed 32-bit ints, the form summon reads since 1.16.
+    const uuid = (helper.player?.uuid ?? helper._client?.uuid ?? '').replace(/-/g, '');
+    expect(/^[0-9a-f]{32}$/i.test(uuid), `the helper's UUID is unknown: ${JSON.stringify(uuid)}`);
+    const owner = [0, 8, 16, 24].map(i => Number.parseInt(uuid.slice(i, i + 8), 16) | 0).join(',');
+    try {
+      await cmd(`/summon wolf ${cx - 2} ${y0} ${cz} {NoAI:1b,PersistenceRequired:1b,Owner:[I;${owner}]}`);
+      // Checks the NBT form too: a wolf without an owner would be a plain neutral mob, attacked when named.
+      const wolfLine = await waitFor(async () => (await call('list-entities', { type: 'wolf', maxDistance: 8 })).split('\n')
+        .find(line => line.includes('tamed')), 'the summoned wolf to show as tamed (check the Owner NBT form)', 5000);
+      const wolfId = Number(wolfLine.match(/id (\d+)/)?.[1]);
+      expect(Number.isInteger(wolfId), `list-entities did not give the wolf's id:\n${wolfLine}`);
+      expectIncludes(await call('attack-entity', { entityId: wolfId, times: 3 }, { expectError: true }), 'is tamed',
+        'attack-entity on a tamed wolf by id');
+      expectIncludes(await call('attack-entity', { type: 'wolf' }, { expectError: true }), 'No wolf the bot may attack',
+        'attack-entity on a tamed wolf by type');
+      expectIncludes(await call('list-entities', { type: 'wolf', maxDistance: 8 }), `id ${wolfId}`, 'the tamed wolf after attack-entity');
+    } finally {
+      await cmd('/kill @e[type=wolf,distance=..16]');
+    }
+  });
+
   await step('trading with a villager', async () => {
     await call('move-to-position', { x: cx, y: y0, z: cz, range: 0, timeoutMs: 20000 });
     await cmd('/clear @s emerald');

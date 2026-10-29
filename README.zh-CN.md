@@ -273,7 +273,7 @@ API key 只从环境变量 `OPENROUTER_API_KEY` 读取，不要把它写进仓�
 - `find-entity`：最近的某类实体
 - `list-entities`：附近的实体，附带掉落物、主人、羊的颜色、手持物品、即将爆炸的苦力怕等细节
 - `list-players`：在线玩家
-- `attack-entity`：攻击够得着的实体
+- `attack-entity`：攻击够得着的实体。不打玩家（除非开启 `combat.attackPlayers`）和被驯服的动物；剑的横扫会波及他们时不出手
 - `activate-entity`：右键实体
 - `list-trades`：村民提供的交易、剩余次数，以及每项能负担几次
 - `trade`：按 list-trades 列出的编号与村民交易

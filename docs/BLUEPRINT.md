@@ -315,7 +315,7 @@ src/main.ts（现有，改动）--创建并注册--> src/autopilot/autopilot.ts�
 │   ├── task-tools.test.ts            新增
 │   ├── trade-tools.test.ts           新增（M13，F-044）
 │   ├── m19-connection.test.ts        新增（M19，F-047；已有 E-021、E-028 的用例）：连接类改动
-│   ├── m19-safety.test.ts            新增（M19，F-048；已有 E-022 第一部分的用例）：安全类改动
+│   ├── m19-safety.test.ts            新增（M19，F-048；已有 E-022 的用例）：安全类改动
 │   ├── m19-tool-experience.test.ts   计划新增（M19，F-052）：调用预算、取消、回复语义、stop-all
 │   ├── release.test.ts               新增（M19，F-050；已有 E-025 的版本固定断言）：版本、包内容与工具名单
 │   ├── m18-tools.test.ts             新增（M18，F-046）：ground-height 与 lead 行为
@@ -526,7 +526,7 @@ src/main.ts（现有，改动）--创建并注册--> src/autopilot/autopilot.ts�
 - **模块**：M-CMB 战斗与威胁　**里程碑**：M2（M3 扩展环境危险）　**状态**：verified　**设计**：已确定：判定规则；中立生物名单暂定
 - **职责**：根据当前游戏状态计算威胁信息：附近的敌对生物（按距离）、即将爆炸的苦力怕、自身是否着火/在岩浆中/氧气过低/低血量，以及远离威胁的方向；判断某个实体能否作为攻击目标。
 - **不负责**：不移动 bot；不做任何决定；不调用网络。
-- **输入**：来源：src/autopilot/combat.ts、src/autopilot/behaviors/guard.ts、src/autopilot/behaviors/hunt.ts；M9 起 src/autopilot/instinct/attention.ts、affordances.ts、macros.ts、instinct-engine.ts；M15 起 src/tools/entity-utils.ts、src/tools/vision-tools.ts（mobHostility）；M17 起 src/tools/position-tools.ts（assessThreats，被围住时拒绝移动的说明）；M19 E-022 起 src/tools/entity-tools.ts（checkTarget、isPlayer）。M3～M8 还有 src/autopilot/reflexes.ts（M9 删除）；规划时列出的 src/decisions/decision-hooks.ts 实现中没有调用本文件。 内容：bot（实体表、自身状态、方块查询）；当前策略中的攻击规则；可选的“明确允许的目标类型”（hunt 使用）。 限制：只读取内存数据；单次计算的目标耗时低于 1 毫秒（目标，待实测）。
+- **输入**：来源：src/autopilot/combat.ts、src/autopilot/behaviors/guard.ts、src/autopilot/behaviors/hunt.ts；M9 起 src/autopilot/instinct/attention.ts、affordances.ts、macros.ts、instinct-engine.ts；M15 起 src/tools/entity-utils.ts、src/tools/vision-tools.ts（mobHostility）；M17 起 src/tools/position-tools.ts（assessThreats，被围住时拒绝移动的说明）；M19 E-022 起 src/tools/entity-tools.ts（checkTarget、isPlayer、isTamed）。M3～M8 还有 src/autopilot/reflexes.ts（M9 删除）；规划时列出的 src/decisions/decision-hooks.ts 实现中没有调用本文件。 内容：bot（实体表、自身状态、方块查询）；当前策略中的攻击规则；可选的“明确允许的目标类型”（hunt 使用）。 限制：只读取内存数据；单次计算的目标耗时低于 1 毫秒（目标，待实测）。
 - **输出**：去向：上述调用者。 内容：威胁摘要（敌对生物列表与距离、膨胀中的苦力怕、着火/岩浆/氧气/血量状态）；目标合法性（是或否，附原因）；逃离方向（水平单位向量）。 成功含义：同一状态下结果确定且可重复。
 - **使用方**：输入一行所列的模块（调用）；tests/threats.test.ts（验证）；tests/combat.test.ts、tests/m15-tools.test.ts、tests/m16-lava.test.ts（作为被测模块的依赖）。
 - **依赖**：src/tools/entity-utils.ts（现有，附近实体与苦力怕状态）；src/tools/gamestate-tools.ts（现有，自身氧气读取）；src/autopilot/hazards.ts（M16 起，inLavaNow）。规划时写的 src/tools/terrain-utils.ts 实现中没有用到。攻击规则不由本文件读取策略：调用者把当前策略的 combat 值作为 CombatRules / TargetRules 参数传入（没有传入时用 DEFAULT_COMBAT_RULES，attackPlayers=false）。 外部：mineflayer、minecraft-data。
@@ -543,7 +543,7 @@ src/main.ts（现有，改动）--创建并注册--> src/autopilot/autopilot.ts�
 - **不负责**：不选择目标（由调用者给出）；不判断是否应该参战；不使用弓、弩、盾牌（本版本非目标）。
 - **输入**：来源：src/autopilot/behaviors/guard.ts、src/autopilot/behaviors/hunt.ts；M9 起 src/autopilot/instinct/macros.ts 的 fight 与 src/autopilot/instinct/motor.ts 的 holdGround（engage）；M3～M8 为 src/autopilot/reflexes.ts（self-defense），M9 删除。 内容：目标实体、最大追击距离、撤退血量、取消信号。 限制：目标必须通过 src/autopilot/threats.ts 的合法性检查，否则立即返回非法目标，不出手。
 - **输出**：去向：调用者。 内容：结果：killed / lost / out_of_range / retreated / cancelled / illegal_target，附攻击次数与耗时。 成功含义：结束时没有残留的寻路目标或按键状态。
-- **使用方**：src/autopilot/behaviors/guard.ts、src/autopilot/behaviors/hunt.ts、src/autopilot/instinct/macros.ts、src/autopilot/instinct/motor.ts（调用 engage）；src/autopilot/instinct/attention.ts、affordances.ts、instinct-engine.ts（M9 起读取 currentCombatTarget、bestWeaponName、weaponStats）；M3～M8 还有 src/autopilot/reflexes.ts（M9 删除）；tests/combat.test.ts（验证）；tests/motor.test.ts（作为被测宏的依赖）；tests/work-behaviors.test.ts（作为被测行为的依赖）；scripts/test-scenarios.mjs（zombie-wave，经 MCP 服务器间接使用）。
+- **使用方**：src/autopilot/behaviors/guard.ts、src/autopilot/behaviors/hunt.ts、src/autopilot/instinct/macros.ts、src/autopilot/instinct/motor.ts（调用 engage）；src/autopilot/instinct/attention.ts、affordances.ts、instinct-engine.ts（M9 起读取 currentCombatTarget、bestWeaponName、weaponStats）；M3～M8 还有 src/autopilot/reflexes.ts（M9 删除）；M19 E-022 起 src/tools/entity-tools.ts（attack-entity 读取 isSword、sweepBystanders）；tests/combat.test.ts（验证）；tests/motor.test.ts（作为被测宏的依赖）；tests/work-behaviors.test.ts（作为被测行为的依赖）；scripts/test-scenarios.mjs（zombie-wave，经 MCP 服务器间接使用）。
 - **依赖**：src/autopilot/threats.ts（合法性与目标状态）；src/tools/movement-utils.ts（现有，stopPathfinder）。 外部：mineflayer（attack、lookAt、equip）、mineflayer-pathfinder（GoalFollow）、minecraft-data（武器攻击速度）。
 - **状态与副作用**：状态：战斗过程中的临时状态（上次出手时间、攻击次数）。 副作用：攻击实体、移动、切换手持物品。
 - **关键约束**：两次出手的间隔不小于武器冷却（剑约 0.625 秒；minecraft-data 没有攻击速度数据，改用原版数值表：剑 1.6、斧 0.8–1.0、三叉戟 1.1、其他物品与空手 4 次/秒，按整刻向上取整）；收到取消信号或调用者的停止条件（例如任务暂停）后 1 刻内停止出手；除 cancelled 外，结束时调用 stopPathfinder 并清除按键状态；cancelled 时不触碰身体——暂停时身体已归手动命令、反射或本能动作（M9 起没有反射），取消时由任务管理器停止（G1、G4）。目标旁有非法生物（例如被守卫的玩家、宠物、中立生物）时不用剑出手（避免横扫误伤），改用其他武器或空手；换手中物品后等待一个完整冷却。连续出手 10 秒都没有收到目标受伤事件时放弃（lost），避免对打不动的目标（例如嘎吱怪）无限出手。追击距离从调用者给出的锚点（守卫位置或被守卫的玩家）量起，默认是开战时 bot 的位置。retreated 只表示脱离战斗，移动远离由 M3 的低血量撤退反射负责（M9 起由本能的 low_health 信号与 flee 选项负责，由决策模型选择）。目标消失时：收到死亡事件，或在最近一次命中后 3 秒内、6 格内消失，记为 killed，否则为 lost。
@@ -592,7 +592,7 @@ src/main.ts（现有，改动）--创建并注册--> src/autopilot/autopilot.ts�
 - **职责**：定义策略结构（zod 模式）与默认值；提供读取当前策略、合并部分更新并校验、恢复默认值（含启动参数）、生成可读摘要；强制硬性安全规则。策略分组：reflexes（5 个反射的开关与阈值，self-defense 的姿态 fight / flee / auto）；combat（attackPlayers 默认 false，avoidNeutral 默认 true）；chat（triage 默认 true：用决策模型筛选与 bot 有关的聊天并上报 LLM；commandsFrom 默认空：哪些玩家的聊天命令可以不经 LLM 直接执行，已确认默认谁都不授权，只能由 LLM 修改；replyInChat 默认 true）；decisions（enabled、model、actThreshold 默认 0.85、cautiousThreshold 默认 0.5、maxCallsPerMinute 默认 30，阈值待 M5 探测后修订）。
 - **不负责**：不执行任何动作；不保存到磁盘；不读取环境变量。
 - **输入**：来源：src/tools/policy-tools.ts（部分更新，来源 llm）；src/autopilot/autopilot.ts（启动配置中的决策模型 id，来源 startup；bot 重新进入游戏时请求恢复默认）。 内容：部分策略对象与来源标记。 限制：未知字段拒绝；血量与饥饿 0–20；距离 1–32；概率 0–1；速率 1–600 次/分钟；来源只能是 llm 或 startup。
-- **输出**：去向：src/autopilot/instinct/instinct-engine.ts、attention.ts、affordances.ts、macros.ts、motor.ts（M8、M9 起；M3～M8 还有 src/autopilot/reflex-engine.ts、src/autopilot/reflexes.ts，M9 删除）、src/autopilot/combat.ts、src/autopilot/task-manager.ts（交给行为的服务）、src/autopilot/behaviors/guard.ts、hunt.ts（经 combatSettings）、src/decisions/decision-hooks.ts、src/decisions/openrouter-client.ts、src/tools/entity-tools.ts（M19 E-022 起，经 Autopilot 读取 combat.attackPlayers）（读取）；src/tools/policy-tools.ts（更新结果与摘要）。src/autopilot/threats.ts 不读取策略，攻击规则由调用者以参数传入（F-010）。 内容：当前策略对象；更新结果（新策略与警告列表，或全部校验错误）；人类可读的摘要文字。 成功含义：更新后所有读取者立即看到新值；校验失败时策略保持不变。
+- **输出**：去向：src/autopilot/instinct/instinct-engine.ts、attention.ts、affordances.ts、macros.ts、motor.ts（M8、M9 起；M3～M8 还有 src/autopilot/reflex-engine.ts、src/autopilot/reflexes.ts，M9 删除）、src/autopilot/combat.ts、src/autopilot/task-manager.ts（交给行为的服务）、src/autopilot/behaviors/guard.ts、hunt.ts（经 combatSettings）、src/decisions/decision-hooks.ts、src/decisions/openrouter-client.ts、src/tools/entity-tools.ts（M19 E-022 起，经 Autopilot 读取 combat.attackPlayers、combat.avoidNeutral）（读取）；src/tools/policy-tools.ts（更新结果与摘要）。src/autopilot/threats.ts 不读取策略，攻击规则由调用者以参数传入（F-010）。 内容：当前策略对象；更新结果（新策略与警告列表，或全部校验错误）；人类可读的摘要文字。 成功含义：更新后所有读取者立即看到新值；校验失败时策略保持不变。
 - **使用方**：输出一行所列的读取者（M3～M8 的 src/autopilot/reflex-engine.ts、src/autopilot/reflexes.ts 在 M9 删除）；src/tools/policy-tools.ts（读取与更新）；src/autopilot/autopilot.ts（创建 PolicyStore）；tests/policy.test.ts（验证）；tests/openrouter-client.test.ts、tests/instinct.test.ts、tests/motor.test.ts、tests/policy-tools.test.ts 等（作为被测模块的依赖）。
 - **依赖**：zod（外部，现有依赖）。 外部：zod。
 - **状态与副作用**：状态：当前策略（内存）。MCP 服务器重启或 bot 重新进入游戏时恢复默认（含启动参数）。 副作用：无。
@@ -1182,7 +1182,7 @@ src/main.ts（现有，改动）--创建并注册--> src/autopilot/autopilot.ts�
 
 ### F-048 · `tests/m19-safety.test.ts`
 
-- **模块**：测试　**里程碑**：M19　**状态**：verified（部分，2026-10-26：E-022 第一部分的用例；2026-10-29 test-live-world 加了“attack-entity 不打玩家”一步，无 key、有 key 各一轮通过；被驯服的动物、横扫与按 type 选择等在 E-022 第二部分实施时加入，Q21 已于 2026-10-29 获批）
+- **模块**：测试　**里程碑**：M19　**状态**：verified（部分：E-022 的用例全部在；E-033、E-035 的用例随各步加入。2026-10-26：E-022 第一部分的用例；2026-10-29 test-live-world 加了“attack-entity 不打玩家”一步，无 key、有 key 各一轮通过；2026-10-30：E-022 第二部分（被驯服的动物、横扫、按 type 选择、中途变得不合法）的用例，test-live-world 加了“attack-entity 不打被驯服的狼”一步，无 key、有 key 各一轮 37 步全部 ok）
 - **职责**：M19 安全类改动的单元测试。文件由 E-022 的提交创建；之后 E-033（send-chat-commands）和 E-035（chat-untrusted）往里追加，用例写在各自的 E 行。E-022 的用例：attackPlayers 关闭时拒绝玩家、开启时可以攻击；被驯服的动物（owneruuid、狼的 flags 0x04、马的 flags 0x02）一律拒绝；点名的被动和中立生物可以攻击，笼统的 type 不打被动生物；按 type 选目标时跳过不合法的实体；剑的横扫会碰到玩家或宠物时不出手，旁边只有牛时照常出手；打到中途变得不合法时停止并说明原因；目标被打死时回复不变。期望值来自 E 行的契约和 G6 的 I1，而不是实现的输出。
 - **不负责**：`src/autopilot/threats.ts` 与 `src/autopilot/combat.ts` 自身的规则（由 `tests/threats.test.ts`、`tests/combat.test.ts` 覆盖）；联网，或连接 Minecraft。
 - **依赖**：ava、sinon；`tests/_helpers.ts` 的 createFactory 与 asBot；假 bot 带 `registry.entitiesByName` 的 metadataKeys，让 isTamed 能读到 owneruuid 和 flags。
@@ -1502,7 +1502,7 @@ M19 对现有类型正文的改动（不新增类型）：E-035 让 chat、whisp
 
 | 编号 | 不变量 | 保证位置 | 测试 |
 |---|---|---|---|
-| I1 | 除非策略显式开启 `combat.attackPlayers`，任何代码路径都不会攻击玩家 | `src/autopilot/threats.ts`、`src/autopilot/combat.ts`、`src/tools/entity-tools.ts`（attack-entity，M19 E-022 第一部分起：没有开启 combat.attackPlayers 时拒绝攻击玩家） | `tests/threats.test.ts`、`tests/combat.test.ts`、`tests/motor.test.ts`（M9：本能的 fight / hold 永不针对玩家，即使开启 attackPlayers）、`tests/m19-safety.test.ts`（E-022 第一部分） |
+| I1 | 除非策略显式开启 `combat.attackPlayers`，任何代码路径都不会攻击玩家；任何代码路径都不会攻击被驯服的动物；剑的横扫不波及玩家和被驯服的动物（即使开启 attackPlayers） | `src/autopilot/threats.ts`、`src/autopilot/combat.ts`、`src/tools/entity-tools.ts`（attack-entity，M19 E-022 起：没有开启 combat.attackPlayers 时拒绝攻击玩家；一律拒绝被驯服的动物；手持剑、横扫会波及玩家或被驯服的动物时不出手） | `tests/threats.test.ts`、`tests/combat.test.ts`、`tests/motor.test.ts`（M9：本能的 fight / hold 永不针对玩家，即使开启 attackPlayers）、`tests/m19-safety.test.ts`（E-022） |
 | I2 | 来自聊天的内容不能修改策略或授权名单；默认（无人授权）时聊天不会直接改变 bot 的行为；被授权玩家的聊天也只能启动安全清单内的行为 | `src/decisions/decision-hooks.ts`、`src/autopilot/policy.ts` | `tests/decision-hooks.test.ts`、`tests/policy.test.ts` |
 | I3 | 同一时刻至多一个主体控制 bot 身体 | `src/autopilot/action-arbiter.ts` | `tests/action-arbiter.test.ts` |
 | I4 | OpenRouter API key 不出现在任何日志、事件、错误或工具输出中 | `src/decisions/openrouter-client.ts`、`src/tools/policy-tools.ts` | `tests/openrouter-client.test.ts`、`tests/policy-tools.test.ts` |
@@ -1511,7 +1511,7 @@ M19 对现有类型正文的改动（不新增类型）：E-035 让 chat、whisp
 | I7 | use-item 不把岩浆倒进 bot 自己的脚、头两格或与它们相邻的格子，也不倒在其他玩家 10 格以内（M15，用户决定 2026-10-22） | `src/tools/interaction-tools.ts`（lavaProblem，走近前后各检查一次） | `tests/m15-tools.test.ts` |
 | I8（M19 计划；Q28 已于 2026-10-29 获批，未实现） | stop-all 成功返回（isError 为 false）时：当前任务已取消；没有在途或排队的身体类调用，也没有在途的 collect-block、lead-animal；仲裁器没有持有者，寻路器没有目标，按键已清除。唯一例外：暂停期内为 in_lava、trapped_underwater、low_air、creeper_swelling 新开始的本能动作，回复中写明。暂停期内本能不为其他线索请求决策或申请租约；暂停最长 300 秒，重新进入游戏时结束 | `src/tools/position-tools.ts`（stop-all）、`src/tool-factory.ts`（在途调用表、stopAll）、`src/autopilot/instinct/instinct-engine.ts`（pauseFor、interrupt） | `tests/m19-tool-experience.test.ts` |
 
-M19 计划中的其余变化（实施时才改上表）：I1 扩展为“除非策略显式开启 `combat.attackPlayers`，任何代码路径都不会攻击玩家；任何代码路径都不会攻击被驯服的动物；剑的横扫不波及玩家和被驯服的动物（即使开启 attackPlayers）”（E-022，Q21 已于 2026-10-29 获批）。拒绝攻击玩家只是落实现有的 I1，已在 E-022 第一部分实现（2026-10-26），所以 `src/tools/entity-tools.ts` 与 `tests/m19-safety.test.ts` 已列入上表 I1 一行；被驯服的动物与横扫的部分已获批，等 E-022 第二部分实施。I3 的保证位置加入 `src/tool-factory.ts`（中止之后、释放租约之后不再动身体），测试加入 `tests/m19-tool-experience.test.ts`（E-027）。I2、I4～I7 的文字不变。
+M19 的变化：上表 I1 的文字已按 E-022 扩展到被驯服的动物与横扫（Q21 已于 2026-10-29 获批）。拒绝攻击玩家只是落实原有的 I1，在 E-022 第一部分实现（2026-10-26）；被驯服的动物与横扫在 E-022 第二部分实现（2026-10-30）。计划中的其余变化（实施时才改上表）：I3 的保证位置加入 `src/tool-factory.ts`（中止之后、释放租约之后不再动身体），测试加入 `tests/m19-tool-experience.test.ts`（E-027）。I2、I4～I7 的文字不变。
 
 ### G7. 决策模型的使用规则
 

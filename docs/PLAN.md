@@ -1507,3 +1507,12 @@
   - MCPB 扩展的隐私说明采用代理的草稿：“With an OpenRouter API key, the bot sends other players' chat messages and short summaries of its own state (for example health and nearby mobs) to OpenRouter, which decides how it reacts. Without a key, it talks only to the Minecraft server you connect to.”。实施 E-047 时按代码核对实际发往 OpenRouter 的内容，不符时先问用户。
 - **实施前的基线**：`npm test` 1056 个通过（2026-10-29，提交 4957877 之后）；局域网测试世界 127.0.0.1:63320 可以 ping 通（1/8，Thomas_Summon，26.1.2）。
 - 各步的实现与检查记在下面各自的条目里。
+
+### 2026-10-30 M19 第 2 步：E-022 第二部分（Q21）
+
+- **实现**（多代理工作流：一个实现；契约、测试、安全三个角度各一个审查；一个修正。审查提出 4 条，采纳 3 条）：`src/tools/entity-tools.ts` 的 attack-entity 一律拒绝被驯服的动物（没有强制参数）；手持剑、横扫会碰到玩家或被驯服的动物时不出手（即使开启 attackPlayers；旁边只有中立或被动生物时照常出手，不换武器）；按 type 选目标时取 4.5 格内最近的合法目标，只有不合法的匹配时回复 “No <type> the bot may attack within 4.5 blocks: <最近一个的 reason>”；按 id 或按与名字完全相同的 type 选中算点名，mob、hostile 或名字的一部分不算；每次出手前（看向目标之后）重新检查合法性与横扫，中途不合法时以 “stopped: <reason>” 结束。工具描述与 README 中英文加上一句说明。G6 I1 一行按契约扩展。
+- **行为变化**（契约规定的）：按 type 选中、但只有玩家的情况，回复由 “… is a player …” 改为 “No player the bot may attack within 4.5 blocks: MCPHelper is a player; players are never attacked”（仍含 “is a player”）；开始时已经消失的玩家不再被拒绝，回复照旧以 “target is gone” 结束。
+- **没有采纳的一条**：审查发现 26.1.2 的敌对生物 parched（minecraft-data 的 type 为 hostile）不在 `src/autopilot/threats.ts` 的 HOSTILE_MOBS 中，所以 attack-entity 按 mob 或 hostile 选目标时会说 “parched is not hostile”（按 id 或 type parched 仍可攻击）；本能、guard 与 hunt 也一样不把它当敌对生物。threats.ts 在 E-022 的“不变的部分”里，这一步不改，记为待办。
+- **检查**：`npm test` 1089 个通过（原 1056 个，新增 33 个，改了 2 个已有用例：按 type 选中玩家的回复；out of reach 的被驯服的狼只断言不出手）；`npm run lint`、`tsc --noEmit`、`git diff --check` 无输出；`npm run build` 后 `npm run test:live:world -- 63320 --allow-world-changes` 无 key、有 key 各一轮：37 步全部 ok（新增一步 “safety: attack-entity never hits a tamed wolf (M19 E-022)”：召唤一只 Owner 为辅助玩家的狼，按 id 与按 type wolf 都被拒绝，狼仍在），覆盖 66 个工具中的 66 个。
+- **对世界的影响**：新步骤在场地旁召唤一只不动的狼，结束时用 /kill 清掉 16 格内的狼。
+- **文件状态**：F-048 仍为 verified（部分），E-022 的用例已齐；E-033、E-035 的用例随各步加入。
