@@ -730,7 +730,7 @@ try {
     await call('move-to-position', { x: cx, y: y0, z: cz, range: 0, timeoutMs: 20000 });
   }
 
-  await step('fly-to (creative)', async () => {
+  await step('fly-to in creative, refused in survival (M19 E-032)', async () => {
     await call('move-to-position', { x: cx, y: y0, z: cz, range: 0, timeoutMs: 20000 });
     await cmd('/gamemode creative @s');
     await sleep(1000);
@@ -739,6 +739,9 @@ try {
     expect(py >= y0 + 2, `fly-to ended at y=${py}`);
     await cmd('/gamemode survival @s');
     await sleep(1500);
+    // Outside creative and spectator mode fly-to refuses instead of flying (the server would pull the bot back).
+    expectIncludes(await call('fly-to', { x: cx + 2, y: y0 + 3, z: cz + 2 }, { expectError: true }), 'needs creative',
+      'fly-to in survival');
   });
 
   await step('a move stops when the bot dies (M16)', async () => {

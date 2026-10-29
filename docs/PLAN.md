@@ -1562,3 +1562,9 @@
 - **待办**（没有改）：place-block 选参照面时仍把 cave_air、void_air 当作实心方块（`name !== 'air'`），会白走一趟并等 5 秒；选参照面在 E-031 的“不变的部分”里。
 - **实机测试的调整**（与 E-031 无关）：有 key 时 portals 一步失败一次：bot 在下界被本能拉去打猪灵，打斗中碰到传送门，冷却重新计时，走回传送门 10 秒也没有回到主世界。现在这一步开始时（有 key 时）用 set-policy 关闭本能，结束时打开。
 - **检查**：`npm test` 1195 个通过（新增 8 个）；`npm run lint`、`tsc --noEmit`、`git diff --check` 无输出；故意改坏五处，对应的用例失败，之后恢复。`npm run build` 后 `npm run test:smoke` 13 项全部 PASS。`npm run test:live:world -- 63320 --allow-world-changes`：第一轮无 key 39 步全部 ok，有 key 在 portals 失败（见上）；关闭本能后第二轮无 key 39 步全部 ok，有 key 在 “lead-animal: by lure and on a lead (M18)” 失败：用牵绳牵牛时绳子断了（事件里有 “Picked up 1 lead”），任务报告牛离目标 4.1 格，脚本要求牛在目标旁。这一步此前 7 轮有 key 都通过，第一轮也通过，lead-animal 的代码本步没有改，记为不稳定，没有再跑。两轮中 E-031 的新检查都通过。
+
+### 2026-10-30 M19 第 11b 步：E-032 fly-to 按游戏模式检查（Q29）
+
+- **实现**（多代理工作流：一个实现；契约、测试、安全三个角度各一个审查；一个修正。审查提出 5 条，全部采纳）：`src/tools/flight-tools.ts`：不在创造或旁观模式时返回错误 “fly-to needs creative or spectator mode; the bot is in <模式> mode. Walk with move-to-position instead”，不起飞；飞完后保持无重力 300 毫秒，再比较位置，离目标超过 1.5 格时返回错误 “Flight ended at (x, y, z), N blocks from (tx, ty, tz): the server did not accept the move (blocked path?)”；工具描述按契约改写。审查发现 mineflayer 4.39 把传给 flyTo 的 Vec3 直接作为 bot 的位置，服务器拉回时会原地改它，位置检查就成了自己和自己比、把拉回报告为成功；现在传一个副本，测试替身也按 mineflayer 的做法写。契约里 “每次结束都调用 stopFlying” 改为 “每次飞行结束都调用 stopFlying”（没起飞时调用会让重力变成 null）。`scripts/test-live-world.mjs` 的这一步改名为 “fly-to in creative, refused in survival (M19 E-032)”，切回生存模式后 fly-to 返回含 “needs creative” 的错误。CHANGELOG 加一行。
+- **待办**（没有改）：README 中英文的 fly-to 说明仍只写 “(creative)”，没提旁观模式。
+- **检查**：`npm test` 1204 个通过（新增 9 个，改了 3 个已有用例：工具描述、生存模式下改为错误、成功用例加上游戏模式）；`npm run lint`、`tsc --noEmit`、`git diff --check` 无输出；去掉副本时改写后的拉回用例失败。`npm run build` 后 `npm run test:smoke` 13 项全部 PASS；`npm run test:live:world -- 63320 --allow-world-changes` 无 key、有 key 各一轮 39 步全部 ok，覆盖 66 个工具中的 66 个。
