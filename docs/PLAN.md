@@ -1540,3 +1540,11 @@
 - **检查**：`npm test` 1146 个通过（新增 20 个，已有用例不改）；`npm run lint`、`tsc --noEmit`、`git diff --check` 无输出；修正时故意去掉几处中止检查，对应的用例失败，之后恢复。`npm run build` 后 `npm run test:smoke` 13 项全部 PASS。`npm run test:live:world -- 63320 --allow-world-changes`：第一轮见上；改用泥土后第二轮无 key、有 key 各 38 步全部 ok，覆盖 66 个工具中的 66 个。
 - **对世界的影响**：第一轮中 bot 在下界死了一次（无 key 那一轮），脚本照常清理场地。
 - **文件状态**：F-052 新建，verified（部分）：E-027 的用例；之后各步往里追加。
+
+### 2026-10-30 M19 第 9 步：E-029 bot 离开游戏时，在途的身体类命令立即返回
+
+- **实现**（多代理工作流：一个实现；契约、测试、安全三个角度各一个审查；一个修正。审查提出 5 条，采纳 4 条；没采纳的一条是 BLUEPRINT 中测试位置的说法，已由主会话改正）：`src/bot-connection.ts` 新增 whenEnded(bot)：每个 bot 实例一个 promise，在 end（onBotEnd 之后）、failAttempt、重连替换实例与 cleanup 时兑现，带纯文字原因；被踢时用 kickInfo 的纯文字，优先于其他原因。`src/tool-factory.ts`：中止原因加上 ended；每个 bot 只订阅一次 whenEnded，结束时中止该 bot 上全部在途的身体类调用（包括排队中的）；ended 不等 DEATH_SETTLE_MS，立即释放租约并回复 “Failed: The bot left the game during <工具> (<原因>); the command was stopped. The next tool call reconnects”。不写 command 事件，G3 不变。CHANGELOG 加一行。
+- **实机测试的调整**：新增一步 “a move returns at once when the bot is kicked, and the next call joins again (M19 E-029)”：移动途中 bot 经 send-chat 对自己执行 /kick，3 秒内返回含 “left the game during move-to-position” 与 “(Kicked by an operator)” 的回复，之后重新进入世界，不再继续走。另外修了 portals 一步的两处不稳（与 E-029 无关）：无 key 时 bot 在下界被猪灵打死（第 7 步第一轮和本步第一轮各一次），现在进下界前给 300 秒的 resistance，结束时清掉；恶魂炸掉下界一侧的传送门时，“走出传送门”的检查会把刚被炸成空气的格子当作已经走出，补回传送门后 bot 被提前送回主世界（本步第二轮），现在按到达时记下的传送门格子检查。
+- **检查**：`npm test` 1168 个通过（新增 22 个，已有断言不改）；`npm run lint`、`tsc --noEmit`、`git diff --check` 无输出；修正时故意改坏四处，对应的用例失败，之后恢复。`npm run build` 后 `npm run test:smoke` 13 项全部 PASS。`npm run test:live:world -- 63320 --allow-world-changes`：第一轮无 key 在 portals 失败（被猪灵打死），有 key 39 步全部 ok；加 resistance 后无 key 再跑一轮，在 portals 失败（提前回到主世界）；改了检查后无 key、有 key 各一轮 39 步全部 ok，覆盖 66 个工具中的 66 个。新步骤在每一轮都通过。
+- **对世界的影响**：每轮 bot 被踢出一次（聊天里有离开与重新加入的消息）；第一轮 bot 在下界死了一次。
+- **文件状态**：F-052 仍为 verified（部分），加上 E-029 的用例（另一部分在 tests/m19-connection.test.ts，F-047）。

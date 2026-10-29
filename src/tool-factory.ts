@@ -39,14 +39,15 @@ export const BODY_TOOLS = new Set([
   'clear-region', 'fill-region', 'dig-tunnel'
 ]);
 
-/** Why a tool call was stopped (E-027; E-029 adds ended). */
-export type AbortReason = 'death' | 'cancelled' | 'budget' | 'stop-all';
+/** Why a tool call was stopped (E-027; ended, the bot left the game, since E-029). */
+export type AbortReason = 'death' | 'cancelled' | 'budget' | 'stop-all' | 'ended';
 
 const ABORT_TEXT: Record<AbortReason, string> = {
   death: 'the bot died',
   cancelled: 'cancelled by the MCP client',
   budget: 'the call ran out of time',
-  'stop-all': 'stopped by stop-all'
+  'stop-all': 'stopped by stop-all',
+  ended: 'the bot left the game'
 };
 
 /**
@@ -61,7 +62,7 @@ export class CallAborted extends AbortError {
 
 /** What an executor gets besides its arguments (E-027). */
 export interface ToolContext {
-  /** Aborted when the call is stopped: cancelled by the MCP client, out of time, the bot died, or stop-all. */
+  /** Aborted when the call is stopped: cancelled by the MCP client, out of time, the bot died or left, or stop-all. */
   readonly signal: AbortSignal;
   /** When the call's time budget ends (Date.now() milliseconds). */
   readonly deadline: number;
@@ -98,6 +99,8 @@ class ToolCall implements InFlightCall {
   queued = false;
   deadline: number;
   abortedAt: number | null = null;
+  /** Why the bot this body command drove left the game, once it has (E-029). */
+  endedBecause: string | null = null;
   /** Stops the body when this call drives it; set while a body command runs. */
   stopBody: () => void = () => {};
   readonly ctx: ToolContext;
@@ -176,6 +179,8 @@ export class ToolFactory {
   private autopilotProvider: (() => Autopilot | null) | null = null;
   private events: EventStore | null = null;
   private readonly calls = new Set<ToolCall>();
+  // The body commands waiting on each bot's end signal (E-029): one subscription per bot, not one per call.
+  private readonly endWatchers = new WeakMap<mineflayer.Bot, Set<ToolCall>>();
 
   constructor(
     private server: McpServer,
@@ -249,7 +254,8 @@ export class ToolFactory {
   //
   // One way to stop them (E-027, with E-018's death handling folded in): a death, a cancel from the MCP client, the end
   // of the time budget or stop-all stop the body, abort ctx.signal, give the command DEATH_SETTLE_MS to give up, and
-  // then release the lease and discard the command's result.
+  // then release the lease and discard the command's result. When the bot leaves the game (E-029) there is no body to
+  // stop and nothing to wait for: the lease goes and the reply comes at once.
   private async runWithBody(call: ToolCall, run: () => Promise<McpResponse>): Promise<McpResponse> {
     const name = call.name;
     const bot = this.currentBot();
@@ -257,11 +263,13 @@ export class ToolFactory {
     const arbiter = autopilot?.isReady() ? autopilot.arbiter : null;
     let lease: Lease | null = null;
     // Only the holder stops the body (G4): a command an urgent instinct action suspended, or one still waiting in the
-    // queue, leaves it alone. Without the Autopilot there is no arbiter and the command is what drives the body.
+    // queue, leaves it alone. Without the Autopilot there is no arbiter and the command is what drives the body. A
+    // bot that left the game has no body to stop.
     call.stopBody = () => {
-      if (bot && (!arbiter || lease?.isActive())) stopBody(bot);
+      if (bot && call.endedBecause === null && (!arbiter || lease?.isActive())) stopBody(bot);
     };
     const death = this.watchDeath(bot, call);
+    const end = this.watchEnd(bot, call);
     try {
       let report: string | null = null;
       let interruptedBy: string | null = null;
@@ -293,6 +301,7 @@ export class ToolFactory {
     } finally {
       lease?.release();
       death.dispose();
+      end.dispose();
       call.stopBody = () => {};
     }
   }
@@ -308,6 +317,7 @@ export class ToolFactory {
       call.stopBody();
     } else {
       const running = run();
+      // Also takes a rejection that comes after the reply, so a command that fails late is not an unhandled rejection.
       const settled = running.then(
         value => { state.outcome = { ok: true, value }; state.beforeAbort = !call.signal.aborted; },
         error => { state.outcome = { ok: false, error }; state.beforeAbort = !call.signal.aborted; }
@@ -317,7 +327,9 @@ export class ToolFactory {
         if (state.outcome.ok) return state.outcome.value;
         throw state.outcome.error;
       }
-      if (!state.outcome) await settleWithin(settled, DEATH_SETTLE_MS);
+      // A command of a bot that left the game may never settle, since the bot's listeners are gone. That body is gone
+      // too, so releasing the lease now cannot let two holders drive it (E-029).
+      if (!state.outcome && call.reason !== 'ended') await settleWithin(settled, DEATH_SETTLE_MS);
     }
     // Nothing of this call moves the body any more: its loops stopped on the signal, or its result is discarded.
     release();
@@ -349,6 +361,11 @@ export class ToolFactory {
         return this.createErrorResponse(
           `${name} did not finish within ${budget} s, so it was stopped at ${at}; call it again to continue, or use start-task for long jobs${own ? `\n${own}` : ''}`);
       }
+      case 'ended':
+        // Also for a call that waited for the lease: the body it waited for is gone. No command event: this reply
+        // reaches the client.
+        return this.createErrorResponse(
+          `The bot left the game during ${name} (${call.endedBecause}); the command was stopped. The next tool call reconnects`);
       case 'stop-all': {
         const text = `${name} was stopped by stop-all after ${seconds} s at ${at}`;
         this.events?.addEvent('command', text);
@@ -394,6 +411,36 @@ export class ToolFactory {
         bot.removeListener?.('spawn', signalSpawn);
       }
     };
+  }
+
+  /**
+   * Stops a body command when its bot leaves the game (E-029). Letting go of the bot removes all of its listeners, the
+   * pathfinder's and the death watch's included, so a pending goto, dig or window never settled and the call did not
+   * return until the budget ran out. The connection's end signal is a promise, which survives that. A connection
+   * without one (a stand-in) leaves the command as before.
+   */
+  private watchEnd(bot: mineflayer.Bot | null, call: ToolCall): { dispose(): void } {
+    const connection = this.connection as { whenEnded?: (bot: mineflayer.Bot) => Promise<string> };
+    if (!bot || typeof connection.whenEnded !== 'function') return { dispose: () => {} };
+    // One subscription per bot: the promise keeps its callbacks until the bot leaves, which may be hours and many
+    // calls later, so a callback per call would pile up. Once it has fired the entry goes, and a call that starts
+    // after that subscribes again and is stopped at once.
+    let calls = this.endWatchers.get(bot);
+    if (!calls) {
+      const watching = new Set<ToolCall>();
+      calls = watching;
+      this.endWatchers.set(bot, watching);
+      void connection.whenEnded(bot).then(reason => {
+        this.endWatchers.delete(bot);
+        for (const waiting of [...watching]) {
+          waiting.endedBecause = reason;
+          waiting.abort('ended');
+        }
+      });
+    }
+    calls.add(call);
+    const watched = calls;
+    return { dispose: () => { watched.delete(call); } };
   }
 
   private currentBot(): mineflayer.Bot | null {

@@ -47,3 +47,4 @@ The first release of this fork. It builds on upstream version 2.0.4 (upstream `m
 - `dig-block` picks a suitable tool and waits long enough for blocks that need an iron pickaxe or better.
 - Body commands stop and say so when the bot dies.
 - A body command that the MCP client cancels stops the bot at once; before, the bot kept walking toward the old target. The client drops the reply to a cancelled request, so a `command` event says what was cancelled and where the bot stopped. A cancelled `collect-block` or `lead-animal` cancels its task.
+- A body command that is running when the bot leaves the game (kicked, or the connection is lost) returns at once with an error that gives the reason, for example "Kicked by an operator"; before, it did not return until the MCP client gave up. The next tool call reconnects.

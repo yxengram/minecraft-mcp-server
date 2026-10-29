@@ -8,6 +8,8 @@ import minecraftData from 'minecraft-data';
 import type mineflayer from 'mineflayer';
 import { BotConnection, CONNECT_TIMEOUT_MS } from '../src/bot-connection.js';
 import { explainFailure, kickInfo } from '../src/connection-errors.js';
+import { ToolFactory } from '../src/tool-factory.js';
+import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 
 // ---------------------------------------------------------------------------------------------------------------
 // E-021: an attempt that fails before spawning ends in disconnected, so the next tool call connects again.
@@ -745,3 +747,193 @@ for (const { name, reason, event } of kickedEventCases) {
     t.deepEqual(kickedEvents(s), [event]);
   });
 }
+
+// ---------------------------------------------------------------------------------------------------------------
+// E-029: each instance has an end signal, whenEnded(bot), so a body command whose goto or dig lost its listeners
+// returns when the bot leaves. It resolves in the end handler after onBotEnd, in failAttempt, when a reconnect
+// replaces the instance and at cleanup; a kick gives kickInfo's plain text, anything else the end's reason.
+// ---------------------------------------------------------------------------------------------------------------
+
+/** Whether a promise has settled yet, and with what. */
+function watch<T>(promise: Promise<T>) {
+  const state: { settled: boolean; value?: T } = { settled: false };
+  void promise.then(value => {
+    state.settled = true;
+    state.value = value;
+  });
+  return state;
+}
+
+const asBot = (bot: FakeBot) => bot as unknown as mineflayer.Bot;
+
+test.serial('E-029 whenEnded: an end after spawn resolves it with the end\'s reason as plain text, after onBotEnd', async (t) => {
+  const s = setup();
+  t.teardown(() => s.clock.restore());
+  s.connection.connect();
+  const bot = s.bots[0];
+  bot.emit('spawn');
+  const ended = watch(s.connection.whenEnded(asBot(bot)));
+  const seenThen: { unbound?: boolean; state?: string; bot?: unknown } = {};
+  void s.connection.whenEnded(asBot(bot)).then(() => {
+    seenThen.unbound = s.callbacks.onBotEnd.calledOnce;
+    seenThen.state = s.connection.getState();
+    seenThen.bot = s.connection.getBot();
+  });
+  await s.clock.tickAsync(CONNECT_TIMEOUT_MS * 2);
+  t.false(ended.settled, 'not while the bot is in the game');
+
+  // The release calls bot.end and then resolves the signal, so bot.end not yet called at the unbind means the order.
+  let releasedAtUnbind: boolean | undefined;
+  s.callbacks.onBotEnd.callsFake(() => { releasedAtUnbind = bot.end.called; });
+  bot.emit('end', 'socketClosed');
+  await s.clock.tickAsync(0);
+  t.true(ended.settled);
+  t.is(ended.value, 'socketClosed', 'the reason itself, not JSON text');
+  t.false(releasedAtUnbind, 'the instance is let go, and its end signal resolved, only after onBotEnd');
+  t.deepEqual(seenThen, { unbound: true, state: 'disconnected', bot: null }, 'a caller that resumes finds the Autopilot unbound and no bot');
+});
+
+const kickEnds: { name: string; reason: unknown; text: string }[] = [
+  { name: 'by an operator (network NBT)', reason: nbtTranslate(`${KEY}kicked`), text: 'Kicked by an operator' },
+  // The plain text only: the event adds E-028's explanation, the end signal does not.
+  { name: 'by another login with the same name', reason: nbtTranslate(`${KEY}duplicate_login`), text: 'You logged in from another location' },
+  { name: 'with a reason of its own (JSON text)', reason: '{"text":"Go and build your own house"}', text: 'Go and build your own house' }
+];
+
+for (const { name, reason, text } of kickEnds) {
+  test.serial(`E-029 whenEnded: kicked ${name}, the end after the kick resolves it with the kick's plain text`, async (t) => {
+    const s = setup();
+    t.teardown(() => s.clock.restore());
+    s.connection.connect();
+    const bot = s.bots[0];
+    bot.emit('spawn');
+    bot.quit = sinon.stub();
+    const ended = watch(s.connection.whenEnded(asBot(bot)));
+    bot.emit('kicked', reason, true);
+    await s.clock.tickAsync(0);
+    t.false(ended.settled, 'it resolves when the instance is let go, at the end');
+
+    bot.emit('end', 'socketClosed');
+    await s.clock.tickAsync(0);
+    t.is(ended.value, text);
+  });
+}
+
+// The contract gives the value only when there is an end or a kick; an attempt that fails without either (ENOTFOUND,
+// the watchdog) only has to resolve with some reason.
+const failedAttemptEnds: { name: string; fail: (bot: FakeBot) => void; reason?: string; waitMs?: number }[] = [
+  { name: "an end('socketClosed') during login", fail: bot => bot.emit('end', 'socketClosed'), reason: 'socketClosed' },
+  {
+    name: 'an ENOTFOUND error',
+    fail: bot => bot.emit('error', errno('ENOTFOUND', 'getaddrinfo ENOTFOUND nonexistent.invalid'))
+  },
+  {
+    name: 'a kick during login',
+    fail: bot => {
+      bot.quit = sinon.stub();
+      bot.emit('kicked', '{"translate":"multiplayer.disconnect.not_whitelisted"}', false);
+      bot.emit('end', 'socketClosed');
+    },
+    reason: 'You are not white-listed on this server!'
+  },
+  { name: 'the watchdog', fail: () => {}, waitMs: CONNECT_TIMEOUT_MS }
+];
+
+for (const { name, fail, reason, waitMs = 0 } of failedAttemptEnds) {
+  test.serial(`E-029 whenEnded: an attempt that fails before spawn (${name}) resolves it`, async (t) => {
+    const s = setup();
+    t.teardown(() => s.clock.restore());
+    s.connection.connect();
+    const bot = s.bots[0];
+    const ended = watch(s.connection.whenEnded(asBot(bot)));
+    fail(bot);
+    await s.clock.tickAsync(waitMs);
+    t.is(s.connection.getState(), 'disconnected');
+    t.true(ended.settled);
+    if (reason === undefined) t.true(typeof ended.value === 'string' && ended.value.length > 0, 'some reason');
+    else t.is(ended.value, reason);
+  });
+}
+
+test.serial('E-029 whenEnded: a reconnect that replaces the instance resolves it with "replaced by a new connection"; the new one stays pending', async (t) => {
+  const s = setup();
+  t.teardown(() => s.clock.restore());
+  s.connection.connect();
+  const old = s.bots[0];
+  old.emit('spawn');
+  // After spawn ECONNREFUSED sets disconnected without an end, so the instance is still held when a call reconnects.
+  old.emit('error', errno('ECONNREFUSED', 'connect ECONNREFUSED 127.0.0.1:25565'));
+  t.is(s.connection.getState(), 'disconnected');
+  const ended = watch(s.connection.whenEnded(asBot(old)));
+
+  void s.connection.checkConnectionAndReconnect();
+  await s.clock.tickAsync(RECONNECT_DELAY_MS);
+  t.true(old.end.calledOnceWith('Reconnecting...'), 'bot.end gets the same reason as before');
+  t.is(ended.value, 'replaced by a new connection');
+  const newer = watch(s.connection.whenEnded(asBot(s.bots[1])));
+
+  // The old instance's late end changes neither signal.
+  old.emit('end', 'socketClosed');
+  await s.clock.tickAsync(0);
+  t.is(ended.value, 'replaced by a new connection');
+  t.false(newer.settled);
+  await s.clock.tickAsync(CALL_WAIT_MS);
+});
+
+test.serial('E-029 whenEnded: a kicked instance that a reconnect replaces before its end still gives the kick text', async (t) => {
+  const s = setup();
+  t.teardown(() => s.clock.restore());
+  s.connection.connect();
+  const old = s.bots[0];
+  old.emit('spawn');
+  old.quit = sinon.stub();
+  old.emit('kicked', nbtTranslate(`${KEY}kicked`), true);
+  const ended = watch(s.connection.whenEnded(asBot(old)));
+
+  void s.connection.checkConnectionAndReconnect();
+  await s.clock.tickAsync(RECONNECT_DELAY_MS);
+  t.is(ended.value, 'Kicked by an operator');
+  await s.clock.tickAsync(CALL_WAIT_MS);
+});
+
+test.serial('E-029 whenEnded: cleanup resolves it with "the MCP server is shutting down"', async (t) => {
+  const s = setup();
+  t.teardown(() => s.clock.restore());
+  s.connection.connect();
+  const bot = s.bots[0];
+  bot.emit('spawn');
+  const ended = watch(s.connection.whenEnded(asBot(bot)));
+  s.connection.cleanup();
+  await s.clock.tickAsync(0);
+  t.true(bot.end.calledOnceWith('Server shutting down'), 'bot.end gets the same reason as before');
+  t.is(ended.value, 'the MCP server is shutting down');
+});
+
+test.serial('E-029 a body command returns as soon as the kicked bot leaves, with the kick text; also without the Autopilot', async (t) => {
+  const s = setup();
+  t.teardown(() => s.clock.restore());
+  s.connection.connect();
+  const bot = s.bots[0];
+  bot.emit('spawn');
+  bot.quit = sinon.stub();
+  const server = { tool: sinon.stub() };
+  // No setAutopilot: the command runs without an arbiter, as when the Autopilot is not bound.
+  const factory = new ToolFactory(server as unknown as McpServer, s.connection);
+  // Like a goto or a dig whose listeners went with the bot, it never settles; body: true, as the trade tools register.
+  factory.registerTool('stuck-command', 'Never ends', {}, () => new Promise(() => {}), { body: true });
+  const handler = server.tool.firstCall.args[3] as (args: unknown) => Promise<{ content: { type: string; text: string }[]; isError?: boolean }>;
+
+  const reply = watch(handler({}));
+  await s.clock.tickAsync(1000);
+  t.false(reply.settled);
+
+  bot.emit('kicked', nbtTranslate(`${KEY}kicked`), true);
+  bot.emit('end', 'socketClosed');
+  await s.clock.tickAsync(100);
+  t.true(reply.settled, 'within 100 ms of the end');
+  t.deepEqual(reply.value, {
+    content: [{ type: 'text', text: 'Failed: The bot left the game during stuck-command (Kicked by an operator); the command was stopped. The next tool call reconnects' }],
+    isError: true
+  });
+  t.is(factory.inFlight().length, 0);
+});

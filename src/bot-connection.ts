@@ -32,6 +32,14 @@ export interface ConnectionFailure {
 
 type CreateBot = (options: mineflayer.BotOptions) => mineflayer.Bot;
 
+/** One instance's end (E-029). A promise rather than a listener on the bot, which removeAllListeners would remove. */
+interface EndSignal {
+  readonly ended: Promise<string>;
+  resolve(reason: string): void;
+  /** The kick reason as plain text; it says more than the end that follows the kick. */
+  kick?: string;
+}
+
 // Socket failures end the attempt at once. mineflayer sends an end as well, but before or after the error depending
 // on how the socket failed, and the state used to stay at connecting when the end came first (E-021).
 const ATTEMPT_ENDING_CODES = new Set(['ECONNREFUSED', 'ETIMEDOUT', 'ENOTFOUND', 'EAI_AGAIN', 'EHOSTUNREACH', 'ENETUNREACH', 'ECONNRESET', 'EPIPE']);
@@ -107,6 +115,7 @@ export class BotConnection {
   private failure: ConnectionFailure | null = null;
   // The instance whose attempt already has a record: the first error or kick of an attempt says the most.
   private failureRecordedFor: mineflayer.Bot | null = null;
+  private readonly endSignals = new WeakMap<mineflayer.Bot, EndSignal>();
   private readonly reconnectDelayMs: number;
   private readonly createBot: CreateBot;
 
@@ -134,6 +143,28 @@ export class BotConnection {
   /** Why the latest attempt failed or the bot was kicked; cleared when the bot spawns (E-021). */
   lastFailure(): Readonly<ConnectionFailure> | null {
     return this.failure;
+  }
+
+  /**
+   * Resolves with why `bot` left the game (E-029): the kick text when it was kicked, otherwise the end's reason. It
+   * resolves when the instance is let go: in the end handler after onBotEnd, when an attempt fails, when a reconnect
+   * replaces it and at cleanup. Letting go removes all of the bot's listeners, so a body command waiting for a goto
+   * or a dig would never hear back; this tells it to return.
+   */
+  whenEnded(bot: mineflayer.Bot): Promise<string> {
+    return this.endSignal(bot).ended;
+  }
+
+  private endSignal(bot: mineflayer.Bot): EndSignal {
+    let signal = this.endSignals.get(bot);
+    if (!signal) {
+      let resolve: (reason: string) => void = () => {};
+      // The executor runs at once, so resolve is the promise's own by the next line.
+      const ended = new Promise<string>(settle => { resolve = settle; });
+      signal = { ended, resolve };
+      this.endSignals.set(bot, signal);
+    }
+    return signal;
   }
 
   getConfig(): BotConfig {
@@ -200,7 +231,7 @@ export class BotConnection {
     this.recordFailure(bot, failure);
     this.state = 'disconnected';
     this.bot = null;
-    this.releaseBot(bot, 'Connection attempt failed');
+    this.releaseBot(bot, failure.message, 'Connection attempt failed');
 
     const recorded = this.failure ?? { ...failure, time: Date.now() };
     const detail = recorded.code && !recorded.message.includes(recorded.code) ? `${recorded.code}: ${recorded.message}` : recorded.message;
@@ -211,9 +242,10 @@ export class BotConnection {
   /**
    * Lets go of an instance. The no-op error listener stays because ping can report a second error after the other
    * listeners are gone, and an error nobody listens to is thrown. bot.end rather than bot.quit: quit comes with the
-   * kick plugin, which is not loaded before inject_allowed (E-021).
+   * kick plugin, which is not loaded before inject_allowed (E-021). `endedBecause` is what whenEnded resolves with,
+   * unless the bot was kicked (E-029); `reason` goes to bot.end.
    */
-  private releaseBot(bot: mineflayer.Bot, reason?: string): void {
+  private releaseBot(bot: mineflayer.Bot, endedBecause: string, reason?: string): void {
     bot.removeAllListeners();
     bot.on('error', () => {});
     try {
@@ -221,6 +253,8 @@ export class BotConnection {
     } catch (err) {
       this.callbacks.onLog('warn', `Error while letting go of the bot: ${this.formatError(err)}`);
     }
+    const signal = this.endSignal(bot);
+    signal.resolve(signal.kick ?? endedBecause);
   }
 
   private registerEventHandlers(bot: mineflayer.Bot): void {
@@ -422,7 +456,11 @@ export class BotConnection {
     bot.on('kicked', (reason) => {
       // The message stays raw: the disconnected event of a kick during login is built from it (E-021).
       this.recordFailure(bot, { message: this.formatError(reason), kickReason: reason });
-      const description = this.describeKick(reason);
+      const { text } = kickInfo(reason);
+      // A body command running now returns with this text once the end comes (E-029), not with the end's reason. An
+      // empty kick text says nothing, so the end's reason is used then.
+      if (text) this.endSignal(bot).kick ??= text;
+      const description = this.describeKick(reason, text);
       this.callbacks.onEvent?.('kicked', description);
       this.callbacks.onLog('error', `Bot was kicked from server: ${description}`);
       this.state = 'disconnected';
@@ -470,7 +508,8 @@ export class BotConnection {
       }
 
       this.bot = null;
-      this.releaseBot(bot);
+      // After onBotEnd, so a body command that returns now finds the Autopilot unbound (E-029).
+      this.releaseBot(bot, typeof reason === 'string' ? reason : this.formatError(reason));
       this.callbacks.onLog('info', 'Bot instance cleaned up after disconnect');
     });
   }
@@ -490,7 +529,7 @@ export class BotConnection {
 
     this.reconnectTimer = setTimeout(() => {
       if (this.bot) {
-        this.releaseBot(this.bot, 'Reconnecting...');
+        this.releaseBot(this.bot, 'replaced by a new connection', 'Reconnecting...');
         this.callbacks.onLog('info', 'Old bot instance cleaned up');
       }
 
@@ -550,7 +589,7 @@ export class BotConnection {
     }
     this.clearConnectTimer();
     if (this.bot) {
-      this.releaseBot(this.bot, 'Server shutting down');
+      this.releaseBot(this.bot, 'the MCP server is shutting down', 'Server shutting down');
     }
   }
 
@@ -561,8 +600,7 @@ export class BotConnection {
   }
 
   /** The kick reason as plain text rather than JSON or NBT, so the LLM can read it in get-events (E-028). */
-  private describeKick(reason: unknown): string {
-    const { text } = kickInfo(reason);
+  private describeKick(reason: unknown, text: string): string {
     const { kind, explanation } = explainFailure({ message: text, kickReason: reason }, this.config);
     return kind !== undefined && EXPLAINED_KICKS.has(kind) ? `${text}: ${explanation}` : text;
   }

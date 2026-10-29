@@ -10,7 +10,7 @@ import minecraftData from 'minecraft-data';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
-import { CALL_LIMIT_MS, DEATH_SETTLE_MS, ToolFactory, type ToolContext } from '../src/tool-factory.js';
+import { CALL_LIMIT_MS, DEATH_SETTLE_MS, RESPAWN_WAIT_MS, ToolFactory, type ToolContext } from '../src/tool-factory.js';
 import { ActionArbiter, PRIORITY } from '../src/autopilot/action-arbiter.js';
 import { TaskManager } from '../src/autopilot/task-manager.js';
 import { BEHAVIORS } from '../src/autopilot/autopilot.js';
@@ -105,8 +105,13 @@ async function serve(t: ExecutionContext, bot: unknown, extra: (factory: ToolFac
   const arbiter = new ActionArbiter({ stopBody: sinon.stub() });
   const stand: Record<string, unknown> = { isReady: () => true, arbiter, describeInterruption: () => null, boundBot: () => bot };
   const server = new McpServer({ name: 'm19-tool-experience-test', version: '0.0.0' });
-  // The factory calls checkConnectionAndReconnect on every call, so a test can replace it with a slow one.
-  const connection: { checkConnectionAndReconnect: () => Promise<{ connected: boolean }>; getBot: () => unknown } = {
+  // The factory calls checkConnectionAndReconnect on every call, so a test can replace it with a slow one. Without
+  // whenEnded the connection is like the stand-ins before E-029; leaveGame() below adds one.
+  const connection: {
+    checkConnectionAndReconnect: () => Promise<{ connected: boolean }>;
+    getBot: () => unknown;
+    whenEnded?: (bot: unknown) => Promise<string>;
+  } = {
     checkConnectionAndReconnect: async () => ({ connected: true }),
     getBot: () => bot
   };
@@ -627,4 +632,173 @@ test.serial('E-027 (5): lead-animal is in the in-flight table, and once cancelle
   t.is(tasks!.currentTask(), null);
   t.true(call.settled);
   t.is(s.factory.inFlight().length, 0);
+});
+
+// ---------------------------------------------------------------------------------------------------------------
+// E-029: a body command in progress returns at once when the bot leaves the game. BotConnection lets go of the bot
+// with removeAllListeners, so a pending goto, dig or window never settles and the death watch is gone too; the
+// connection's whenEnded(bot) promise is what tells the call. The kick text and the four places that resolve it are
+// tested with the real BotConnection in tests/m19-connection.test.ts.
+// ---------------------------------------------------------------------------------------------------------------
+
+type Served = Awaited<ReturnType<typeof serve>>;
+
+/**
+ * Gives the stand-in connection a whenEnded for `bot` and returns what makes the bot leave: like BotConnection's
+ * release, every listener on the bot goes (the death watch's included) before the end signal resolves.
+ */
+function leaveGame(s: Served, bot: EventEmitter) {
+  let resolve: (reason: string) => void = () => {};
+  const ended = new Promise<string>(settle => { resolve = settle; });
+  s.connection.whenEnded = asked => (asked === bot ? ended : new Promise(() => {}));
+  return (reason: string) => {
+    bot.removeAllListeners();
+    resolve(reason);
+  };
+}
+
+const leftDuring = (name: string, reason: string) =>
+  `Failed: The bot left the game during ${name} (${reason}); the command was stopped. The next tool call reconnects`;
+
+test.serial('E-029: move-to-position whose goto never ends returns within 100 ms of the end signal, and the lease is released', async (t) => {
+  const clock = useClock(t);
+  const bot = fakeBot();
+  // Once the bot is let go nothing settles the goto, not even a stop of the pathfinder.
+  bot.pathfinder.goto = sinon.stub().returns(new Promise(() => {}));
+  const s = await serve(t, bot);
+  const leave = leaveGame(s, bot);
+
+  const pending = track(s.call('move-to-position', { x: 40, y: 64, z: 0 }));
+  await clock.tickAsync(1000);
+  t.is(s.arbiter.holder()?.holder, 'manual move-to-position');
+  t.false(pending.settled);
+
+  leave('socketClosed');
+  await clock.tickAsync(100);
+  t.true(pending.settled, 'replied within 100 ms');
+  t.false(pending.reply!.rejected, 'a real reply');
+  t.true(pending.reply!.isError);
+  t.is(pending.reply!.text, leftDuring('move-to-position', 'socketClosed'));
+  t.is(s.arbiter.holder(), null);
+  t.is(s.factory.inFlight().length, 0);
+  t.deepEqual(s.commandEvents(), [], 'the reply reaches the client, so no command event (G3)');
+});
+
+test.serial('E-029: a body command that ignores the signal still replies at once (no 2 s wait); its ctx.signal is aborted, and its late rejection is not unhandled', async (t) => {
+  const clock = useClock(t);
+  const bot = fakeBot();
+  const unhandled = sinon.spy();
+  process.on('unhandledRejection', unhandled);
+  t.teardown(() => { process.off('unhandledRejection', unhandled); });
+  let seen: ToolContext | null = null;
+  const s = await serve(t, bot, factory => {
+    factory.registerTool('stuck-command', 'Fails 3 s after it starts, whatever happens', {}, async (_args: unknown, ctx: ToolContext) => {
+      seen = ctx;
+      await new Promise(resolve => setTimeout(resolve, 3000));
+      throw new Error('the window never opened');
+    }, { body: true });
+  });
+  const leave = leaveGame(s, bot);
+
+  const pending = track(s.call('stuck-command'));
+  await clock.tickAsync(500);
+  leave('socketClosed');
+  await clock.tickAsync(100);
+  t.true(pending.settled, 'not after DEATH_SETTLE_MS: the command would never settle on a bot that is gone');
+  t.is(pending.reply!.text, leftDuring('stuck-command', 'socketClosed'));
+  t.is(s.arbiter.holder(), null, 'the lease is released at once');
+  const ctx = seen as ToolContext | null;
+  t.true(ctx?.signal.aborted, 'ctx.signal is aborted, so a loop that wakes up later does not drive the next bot');
+  t.throws(() => ctx?.throwIfAborted());
+
+  // The original promise rejects only now, after the reply.
+  await clock.tickAsync(3000);
+  await new Promise(resolve => setImmediate(resolve));
+  await new Promise(resolve => setImmediate(resolve));
+  t.true(unhandled.notCalled, 'no unhandled rejection');
+  t.is(s.factory.inFlight().length, 0);
+});
+
+test.serial('E-029: the reply names the reason the connection gives, e.g. the plain kick text', async (t) => {
+  const clock = useClock(t);
+  const bot = fakeBot();
+  const s = await serve(t, bot, factory => {
+    factory.registerTool('stubborn-command', 'Never ends', {}, () => new Promise(() => {}), { body: true });
+  });
+  const leave = leaveGame(s, bot);
+
+  const pending = track(s.call('stubborn-command'));
+  await clock.tickAsync(500);
+  leave('Kicked by an operator');
+  await clock.tickAsync(100);
+  t.is(pending.reply?.text, leftDuring('stubborn-command', 'Kicked by an operator'));
+});
+
+test.serial('E-029: a command waiting for the lease when the bot leaves returns at once and never runs', async (t) => {
+  const clock = useClock(t);
+  const bot = fakeBot();
+  const s = await serve(t, bot);
+  const leave = leaveGame(s, bot);
+  const urgent = await s.arbiter.acquire({ holder: 'instinct leave_lava', priority: PRIORITY.URGENT_INSTINCT });
+  t.true(urgent.ok);
+  if (!urgent.ok) return;
+
+  const queued = track(s.call('move-to-position', { x: 40, y: 64, z: 0 }));
+  await clock.tickAsync(1000);
+  t.false(queued.settled, 'waiting for the instinct action');
+  leave('socketClosed');
+  await clock.tickAsync(100);
+  t.true(queued.settled);
+  t.is(queued.reply!.text, leftDuring('move-to-position', 'socketClosed'));
+
+  urgent.lease.release();
+  await clock.tickAsync(10000);
+  t.false(bot.pathfinder.goto.called, 'the command never ran');
+  t.is(s.arbiter.holder(), null, 'and never gets the lease');
+  t.is(s.factory.inFlight().length, 0);
+});
+
+test.serial('E-029, E-018: when the death comes first the reply is still the death reply', async (t) => {
+  const clock = useClock(t);
+  const bot = fakeBot();
+  const s = await serve(t, bot, factory => {
+    factory.registerTool('stubborn-command', 'Never ends', {}, () => new Promise(() => {}), { body: true });
+  });
+  const leave = leaveGame(s, bot);
+
+  const pending = track(s.call('stubborn-command'));
+  await clock.tickAsync(500);
+  bot.emit('death');
+  await clock.tickAsync(100);
+  leave('socketClosed');
+  // The respawn never comes on a bot that left, so the death reply waits its usual time for it.
+  await clock.tickAsync(DEATH_SETTLE_MS + RESPAWN_WAIT_MS + 100);
+  t.true(pending.settled);
+  t.is(pending.reply!.text, 'Failed: The bot died during stubborn-command at (0, 64, 0); it respawned at (0, 64, 0) and the command was stopped');
+  t.is(s.arbiter.holder(), null);
+});
+
+test.serial('E-029: a body command that ends before the bot leaves keeps its result, and a tool that is not a body tool is not stopped', async (t) => {
+  const clock = useClock(t);
+  const bot = fakeBot();
+  bot.arrive = true;
+  const s = await serve(t, bot, factory => {
+    factory.registerTool('slow-query', 'Answers after 1 s', {}, async () => {
+      await new Promise(resolve => setTimeout(resolve, 1000));
+      return factory.createResponse('answered after 1 s');
+    });
+  });
+  const leave = leaveGame(s, bot);
+
+  const moved = await s.call('move-to-position', { x: 3, y: 64, z: 0 });
+  t.false(moved.isError, moved.text);
+  t.true(moved.text.startsWith('Successfully moved to position near (3, 64, 0)'), moved.text);
+
+  const query = track(s.call('slow-query'));
+  await clock.tickAsync(500);
+  leave('socketClosed');
+  await clock.tickAsync(600);
+  t.true(query.settled);
+  t.false(query.reply!.isError, query.reply!.text);
+  t.is(query.reply!.text, 'answered after 1 s');
 });

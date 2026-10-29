@@ -192,3 +192,80 @@ test('registerTool executor catches and returns error response on exception', as
     isError: true
   });
 });
+
+// E-029: a body command returns when the connection's whenEnded(bot) resolves. A connection without whenEnded (the
+// stand-ins of the tests above) and a bot that stays in the game give the command's own result, as before.
+function bodyToolHandler(connection: Record<string, unknown>, executor: sinon.SinonStub) {
+  const mockServer = { tool: sinon.stub() } as unknown as McpServer;
+  const factory = new ToolFactory(mockServer, connection as unknown as BotConnection);
+  factory.registerTool('move-to-position', 'A body tool', {}, executor);
+  return (mockServer.tool as sinon.SinonStub).firstCall.args[3] as (args: unknown) => Promise<unknown>;
+}
+
+const standInBot = () => ({ once: sinon.stub(), removeListener: sinon.stub(), entity: { position: { x: 0.5, y: 64, z: 0.5 } } });
+
+test('E-029: a body tool on a connection stand-in without whenEnded returns its own result as before', async (t) => {
+  const bot = standInBot();
+  const expected = { content: [{ type: 'text', text: 'Successfully moved' }] };
+  const handler = bodyToolHandler({ checkConnectionAndReconnect: sinon.stub().resolves({ connected: true }), getBot: () => bot }, sinon.stub().resolves(expected));
+  t.deepEqual(await handler({}), expected);
+});
+
+test('E-029: a body tool whose bot stays in the game returns its own result, and waits on that bot\'s end signal', async (t) => {
+  const bot = standInBot();
+  const whenEnded = sinon.stub().returns(new Promise(() => {}));
+  const expected = { content: [{ type: 'text', text: 'Successfully moved' }] };
+  const handler = bodyToolHandler({ checkConnectionAndReconnect: sinon.stub().resolves({ connected: true }), getBot: () => bot, whenEnded }, sinon.stub().resolves(expected));
+  t.deepEqual(await handler({}), expected);
+  t.true(whenEnded.calledOnceWith(bot));
+});
+
+// Serial, so the fake timers (only setTimeout: setImmediate stays real) cannot reach the concurrent tests above.
+test.serial('E-029: when whenEnded resolves during a body tool, the call replies within 100 ms that the bot left the game', async (t) => {
+  const clock = sinon.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+  t.teardown(() => clock.restore());
+  const bot = standInBot();
+  let leave: (reason: string) => void = () => {};
+  const whenEnded = sinon.stub().returns(new Promise<string>(resolve => { leave = resolve; }));
+  const handler = bodyToolHandler({ checkConnectionAndReconnect: sinon.stub().resolves({ connected: true }), getBot: () => bot, whenEnded }, sinon.stub().returns(new Promise(() => {})));
+  let reply: unknown;
+  let settled = false;
+  void handler({}).then(value => {
+    settled = true;
+    reply = value;
+  });
+  await new Promise(resolve => setImmediate(resolve));
+  leave('socketClosed');
+  await clock.tickAsync(100);
+  t.true(settled, 'within 100 ms of the end signal, not after DEATH_SETTLE_MS');
+  t.deepEqual(reply, {
+    content: [{ type: 'text', text: 'Failed: The bot left the game during move-to-position (socketClosed); the command was stopped. The next tool call reconnects' }],
+    isError: true
+  });
+});
+
+test.serial('E-029: two body calls on the same bot both reply that it left, and so does one that starts after it left', async (t) => {
+  const clock = sinon.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+  t.teardown(() => clock.restore());
+  const bot = standInBot();
+  let leave: (reason: string) => void = () => {};
+  const ended = new Promise<string>(resolve => { leave = resolve; });
+  // Without the Autopilot there is no lease, so both commands run at once.
+  const handler = bodyToolHandler({ checkConnectionAndReconnect: sinon.stub().resolves({ connected: true }), getBot: () => bot, whenEnded: () => ended }, sinon.stub().returns(new Promise(() => {})));
+  const replies: unknown[] = [];
+  void handler({}).then(value => replies.push(value));
+  void handler({}).then(value => replies.push(value));
+  await new Promise(resolve => setImmediate(resolve));
+  leave('socketClosed');
+  await clock.tickAsync(100);
+  const left = {
+    content: [{ type: 'text', text: 'Failed: The bot left the game during move-to-position (socketClosed); the command was stopped. The next tool call reconnects' }],
+    isError: true
+  };
+  t.deepEqual(replies, [left, left]);
+
+  void handler({}).then(value => replies.push(value));
+  await new Promise(resolve => setImmediate(resolve));
+  await clock.tickAsync(100);
+  t.deepEqual(replies, [left, left, left], 'the end signal had already resolved when this call started');
+});

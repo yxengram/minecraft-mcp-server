@@ -5,7 +5,7 @@
 //   npm run test:live:world -- <LAN_PORT> --allow-world-changes
 //
 // It builds a floating stone arena at y=240 above the bot (removed again at the end), gives itself items, summons entities, changes
-// time and game mode, and kills the bot at the end to test death/respawn events. A second
+// time and game mode, kicks the bot once (the next call joins again), and kills the bot at the end to test death/respawn events. A second
 // in-process bot (MCPHelper) acts as another player for chat, whisper and follow tests.
 // With OPENROUTER_API_KEY set, the decision model is used as well; without it, the no-key behavior is checked.
 
@@ -653,6 +653,7 @@ try {
       await cmd(`/fill ${cx + 2} ${y0} ${cz + 6} ${cx + 5} ${y0 + 3} ${cz + 6} air`);
       await cmd(`/fill ${cx + 2} ${y0 - 1} ${cz + 6} ${cx + 5} ${y0 - 1} ${cz + 6} stone`);
       await cmd('/clear @s flint_and_steel');
+      await cmd('/effect clear @s resistance');
       for (const name of ['live-portal', 'live-portal-nether']) {
         try { await call('delete-waypoint', { name }); } catch { /* not saved */ }
       }
@@ -666,6 +667,9 @@ try {
     await cmd(`/fill ${cx + 3} ${y0} ${cz + 6} ${cx + 4} ${y0 + 2} ${cz + 6} air`);
     await cmd('/give @s flint_and_steel');
     await cmd('/effect give @s fire_resistance 300 0 true');
+    // Piglins attack a bot without gold armor, and without a key nothing makes it flee: twice on 2026-10-30 one killed
+    // it on the Nether side. The step checks portals, not survival; the finally block clears the effect.
+    await cmd('/effect give @s resistance 300 4 true');
     await waitForCount('flint_and_steel', count => count >= 1, 'flint and steel');
     await call('move-to-position', { x: cx + 3, y: y0, z: cz + 4, range: 0, timeoutMs: 20000 });
     await call('equip-item', { itemName: 'flint_and_steel' });
@@ -690,7 +694,11 @@ try {
       } catch {
         continue;
       }
-      if ((await block(...(await position()))) !== 'nether_portal') { out = true; break; }
+      // Checked against the cells found on arrival too: a cell a ghast has just blown up is air now, but the repair
+      // below puts the portal back, and a bot standing there would be sent back early (2026-10-30).
+      const [px, py, pz] = await position();
+      const portalCell = portalCells.some(([x, y, z]) => x === px && z === pz && (y === py || y === py + 1));
+      if (!portalCell && (await block(px, py, pz)) !== 'nether_portal') { out = true; break; }
     }
     expect(out, 'could not step out of the Nether portal');
     // The portal cooldown after a trip (about 15 s) restarts whenever the bot touches a portal.
@@ -741,6 +749,33 @@ try {
     expect(Math.hypot(bx - ax, bz - az) <= 2, `after the respawn the bot moved from ${ax}, ${az} to ${bx}, ${bz}`);
     await cmd(`/tp @s ${cx} ${y0} ${cz}`);
     await sleep(1000);
+  });
+
+  await step('a move returns at once when the bot is kicked, and the next call joins again (M19 E-029)', async () => {
+    await call('move-to-position', { x: cx - 8, y: y0, z: cz - 8, range: 0, timeoutMs: 20000 });
+    const moving = call('move-to-position', { x: cx + 8, y: y0, z: cz + 8, range: 0, timeoutMs: 30000 }, { expectError: true, timeout: 60000 });
+    await sleep(600);
+    // The bot kicks itself: send-chat is not a body tool, so it runs during the move.
+    const kickedAt = Date.now();
+    await call('send-chat', { message: `/kick ${BOT_NAME}` });
+    const reply = await moving;
+    const seconds = (Date.now() - kickedAt) / 1000;
+    expectIncludes(reply, 'left the game during move-to-position', 'move-to-position after a kick');
+    expectIncludes(reply, '(Kicked by an operator)', 'move-to-position after a kick');
+    expect(seconds <= 3, `move-to-position returned ${seconds.toFixed(1)} s after the kick`);
+    // The next call joins again (E-021); while the join is under way a call may answer "Bot is connecting".
+    const [ax, , az] = await waitFor(async () => {
+      try {
+        return await position();
+      } catch {
+        return null;
+      }
+    }, 'the bot to join again after the kick', 30000);
+    // The stopped move must not walk on with the bot that joined again.
+    await sleep(2000);
+    const [bx, , bz] = await position();
+    expect(Math.hypot(bx - ax, bz - az) <= 2, `after joining again the bot moved from ${ax}, ${az} to ${bx}, ${bz}`);
+    await call('move-to-position', { x: cx, y: y0, z: cz, range: 0, timeoutMs: 20000 });
   });
 
   await step('events: pickup, damage, death and respawn', async () => {
