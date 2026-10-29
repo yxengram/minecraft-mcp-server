@@ -247,7 +247,7 @@ src/main.ts（现有，改动）--创建并注册--> src/autopilot/autopilot.ts�
 ├── AGENTS.md                         新增：后续代理的协作规则
 ├── README.md                         现有，改动：Autopilot 使用说明（M6）；2026-10-19 完整重写（来源、改变、设计理念），链接中文版
 ├── README.zh-CN.md                   新增（2026-10-19）：README 的中文版
-├── CHANGELOG.md                      计划新增（M19，D-006，E-024 创建）：发布说明
+├── CHANGELOG.md                      新增（M19，D-006，E-024 创建）：发布说明
 ├── mcpb/
 │   └── manifest.json                 计划新增（M19，F-057）：MCPB 扩展包的清单
 ├── package.json                      现有，改动：ava 测试范围限定为 tests/（规划阶段已完成）、M6 增加 test:scenarios 脚本
@@ -350,7 +350,7 @@ src/main.ts（现有，改动）--创建并注册--> src/autopilot/autopilot.ts�
 | D-003 | `AGENTS.md` | 后续代理的阅读顺序与修改边界 |
 | D-004 | `blueprint/README.md`（已在 M6 随目录删除） | 设计阶段说明镜像目录的用途与删除时机 |
 | D-005 | `README.md`（现有） | 增加一小节，指向本蓝图并说明 Autopilot 尚未实现（已在 M6 换成实际的使用说明，见 E-010；2026-10-19 完整重写，另有中文版 `README.zh-CN.md`） |
-| D-006 | `CHANGELOG.md`（M19 计划） | 发布说明（英文，Keep a Changelog 格式）；E-024 创建，打标签前只有 Unreleased 一节，F-059 取当前版本的一节作为 Release 说明 |
+| D-006 | `CHANGELOG.md`（M19） | 发布说明（英文，Keep a Changelog 格式）；E-024 创建，打标签前只有 Unreleased 一节，F-059 取当前版本的一节作为 Release 说明 |
 
 ## F. 文件契约（新增文件）
 
@@ -1201,7 +1201,7 @@ src/main.ts（现有，改动）--创建并注册--> src/autopilot/autopilot.ts�
 
 ### F-050 · `tests/release.test.ts`
 
-- **模块**：测试　**里程碑**：M19　**状态**：verified（部分，2026-10-26：E-025 的版本固定断言；E-024、E-044、E-046 的断言与 E-047 的 manifest 检查待实施，Q17、Q31、Q16、Q19 已于 2026-10-29 获批）
+- **模块**：测试　**里程碑**：M19　**状态**：verified（部分，2026-10-26：E-025 的版本固定断言；2026-10-30：E-024 的断言（bin、files、元数据、declaration 与 prebuild、CHANGELOG 的一节、src 中没有上游网址），故意把 src 加进 files、把 mineflayer 改回 ^4.39.0 时对应的用例失败；E-044、E-046 的断言与 E-047 的 manifest 检查随各步加入）
 - **职责**：只读仓库中的文件，检查发布身份与包内容的契约，不构建、不联网。
   - **E-024**：F-049 的 PACKAGE_NAME、PACKAGE_VERSION 等于 package.json 的 name、version，COMMAND_NAME 是去掉 scope 的 name。bin 只有一项，键等于 COMMAND_NAME，值为 dist/main.js。files 恰好是 dist、CHANGELOG.md、npm-shrinkwrap.json（顺序不限）。license 为 Apache-2.0，repository.url 为 git+https://github.com/yxengram/minecraft-mcp-server.git，homepage 与 bugs 存在，engines.node 为 >=22。tsconfig.build.json 的 declaration 为 false。CHANGELOG.md 有 “## [Unreleased]” 或 “## [<当前版本>]” 一节。src/ 下没有文件含 “yuniko-software/minecraft-mcp-server”，上游网址只留在 README 的致谢里。
   - **E-025**：mineflayer、minecraft-data、mineflayer-pathfinder 是精确版本（没有 ^ 或 ~），并且等于 package-lock.json 中 node_modules/<名字> 的 version。
@@ -1214,7 +1214,7 @@ src/main.ts（现有，改动）--创建并注册--> src/autopilot/autopilot.ts�
 
 ### F-051 · `scripts/test-smoke.mjs`
 
-- **模块**：M-VER 验证　**里程碑**：M19　**状态**：verified（部分；2026-10-26：本地 macOS 9/9 通过；CI 运行 40334245083 在 ubuntu（Node 22、24）、macOS、Windows 上全部通过，包括安装后的包的冒烟测试；2026-10-29：在当前代码上重跑两种故意制造的失败（入口放在 dist/ 下，用完删除），都以 1 退出并打印 stderr 的最后几行；验收中“本地 macOS 上对从 tarball 装好的包跑一次”没有记录：2026-10-29 离线安装缺少缓存里没有的依赖，要联网下载，没有做成；CI 的 ubuntu 每次都做这一项；--pack-report 与 --compare-lock 已实现，在 E-024 加入 files 之前会失败，CI 中暂时注释掉，要在 E-024 之后再验证）　**设计**：已确定；时限暂定，在三个平台的 CI 上实测后调整
+- **模块**：M-VER 验证　**里程碑**：M19　**状态**：verified（部分；2026-10-26：本地 macOS 9/9 通过；CI 运行 40334245083 在 ubuntu（Node 22、24）、macOS、Windows 上全部通过，包括安装后的包的冒烟测试；2026-10-29：在当前代码上重跑两种故意制造的失败（入口放在 dist/ 下，用完删除），都以 1 退出并打印 stderr 的最后几行；验收中“本地 macOS 上对从 tarball 装好的包跑一次”没有记录：2026-10-29 离线安装缺少缓存里没有的依赖，要联网下载，没有做成；CI 的 ubuntu 每次都做这一项；--pack-report 与 --compare-lock 已实现，在 E-024 加入 files 之前会失败，CI 中暂时注释掉，要在 E-024 之后再验证；2026-10-30（E-024 之后）：本地对临时副本运行 npm shrinkwrap 与 npm pack --dry-run，--pack-report 8 项全部 PASS；两项都已在 CI 中打开，--compare-lock 要联网安装，只在下一次推送的 CI 中核对；关闭 stdin 的检查改为等 E-024 的启动行，本地 13 项全部 PASS）　**设计**：已确定；时限暂定，在三个平台的 CI 上实测后调整
 - **职责**：不需要游戏的冒烟测试，检查构建或打包后的服务器能启动、按 MCP 回复并退出。有三种用法。
   - **`node scripts/test-smoke.mjs [入口]`**
     - **入口**：一个 main.js 的路径，默认 dist/main.js。也可以是从 tarball 装好的 `<目录>/node_modules/<包名>/dist/main.js`，或解开的 .mcpb 中的 dist/main.js。

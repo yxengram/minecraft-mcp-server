@@ -147,6 +147,10 @@ test('checkConnectionAndReconnect includes setup instructions on failure', async
   t.true(result.message!.includes('Cannot connect'));
   t.true(result.message!.includes('localhost:25565'));
   t.true(result.message!.includes('github.com'));
+  // E-024: the first line stays as it was (E-028 and the smoke test rely on it); the link points to this repository.
+  t.true(result.message!.startsWith('Cannot connect to Minecraft server at localhost:25565'));
+  t.true(result.message!.includes('yxengram/minecraft-mcp-server'));
+  t.is(result.message!.split('\n').at(-1), 'For setup instructions, visit: https://github.com/yxengram/minecraft-mcp-server#getting-started');
 
   attemptReconnectStub.restore();
 });

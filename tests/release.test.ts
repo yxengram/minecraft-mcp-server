@@ -3,11 +3,24 @@
 // number that a dependency update would have to edit by hand.
 import test from 'ava';
 import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { COMMAND_NAME, PACKAGE_NAME, PACKAGE_VERSION } from '../src/package-info.js';
 
 interface PackageJson {
   name?: string;
   version?: string;
+  description?: string;
+  keywords?: string[];
+  homepage?: string;
+  bugs?: string | { url?: string };
+  repository?: string | { type?: string; url?: string };
+  license?: string;
+  author?: string | { name?: string };
+  bin?: string | Record<string, string>;
+  files?: string[];
+  scripts?: Record<string, string>;
+  engines?: Record<string, string>;
   dependencies?: Record<string, string>;
 }
 
@@ -54,4 +67,65 @@ test('F-049: PACKAGE_NAME, PACKAGE_VERSION and COMMAND_NAME follow package.json'
   const unscoped = name.startsWith('@') ? name.slice(name.indexOf('/') + 1) : name;
   t.is(COMMAND_NAME, unscoped);
   t.false(COMMAND_NAME.includes('/'), `COMMAND_NAME "${COMMAND_NAME}" still has a scope`);
+});
+
+// ---------------------------------------------------------------------------------------------------------------
+// E-024: release identity and package contents. The files list keeps src/, tests/, docs/ and the rest of the
+// repository out of the package; npm-shrinkwrap.json is listed for E-025 although only CI and the release create
+// it. npm provenance needs repository.url to equal the GitHub repository, and the reply to a failed connection
+// links to this repository, not the upstream one.
+// ---------------------------------------------------------------------------------------------------------------
+
+const REPOSITORY_URL = 'git+https://github.com/yxengram/minecraft-mcp-server.git';
+const UPSTREAM_REPOSITORY = 'yuniko-software/minecraft-mcp-server';
+
+test('E-024: bin has one command, COMMAND_NAME, which runs dist/main.js', (t) => {
+  const { bin } = readJson<PackageJson>('package.json');
+  t.is(typeof bin, 'object', 'bin must name the command, not only give its file');
+  t.deepEqual(bin, { [COMMAND_NAME]: 'dist/main.js' });
+});
+
+test('E-024: files is exactly dist, CHANGELOG.md and npm-shrinkwrap.json', (t) => {
+  const { files } = readJson<PackageJson>('package.json');
+  t.true(Array.isArray(files), 'package.json has no files list, so npm would pack the whole repository');
+  t.deepEqual([...(files ?? [])].sort(), ['dist', 'CHANGELOG.md', 'npm-shrinkwrap.json'].sort());
+});
+
+test('E-024: license, repository, homepage, bugs, author and engines are filled in', (t) => {
+  const pkg = readJson<PackageJson>('package.json');
+  t.is(pkg.license, 'Apache-2.0');
+  t.is(typeof pkg.repository === 'object' ? pkg.repository.url : undefined, REPOSITORY_URL, 'repository.url');
+  t.truthy(pkg.homepage, 'homepage is missing');
+  t.truthy(typeof pkg.bugs === 'object' ? pkg.bugs.url : pkg.bugs, 'bugs is missing');
+  t.is(typeof pkg.author === 'object' ? pkg.author.name : pkg.author, 'yxengram');
+  t.truthy(pkg.description, 'description is missing');
+  t.true(Array.isArray(pkg.keywords) && pkg.keywords.length > 0, 'keywords are missing');
+  t.is(pkg.engines?.node, '>=22');
+});
+
+test('E-024: the build emits no .d.ts files and starts from an empty dist/', (t) => {
+  const { compilerOptions } = readJson<{ compilerOptions?: { declaration?: boolean } }>('tsconfig.build.json');
+  t.is(compilerOptions?.declaration, false, 'tsconfig.build.json must set declaration to false');
+  // node alone, so it also runs on Windows; without it, files of deleted modules (M9's reflexes) stay in the package.
+  const { scripts } = readJson<PackageJson>('package.json');
+  t.is(scripts?.prebuild, `node -e "require('node:fs').rmSync('dist',{recursive:true,force:true})"`);
+});
+
+test('E-024: CHANGELOG.md has an Unreleased section or one for the current version', (t) => {
+  const { version = '' } = readJson<PackageJson>('package.json');
+  t.truthy(version, 'package.json has no version');
+  const file = new URL('../CHANGELOG.md', import.meta.url);
+  t.true(fs.existsSync(file), 'CHANGELOG.md is missing');
+  const text = fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : '';
+  const escaped = version.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  t.regex(text, new RegExp(`^## \\[(Unreleased|${escaped})\\]`, 'm'));
+});
+
+test('E-024: no file in src/ names the upstream repository', (t) => {
+  const root = fileURLToPath(new URL('../src/', import.meta.url));
+  const files = fs.readdirSync(root, { recursive: true, encoding: 'utf8' })
+    .filter(name => fs.statSync(path.join(root, name)).isFile());
+  t.true(files.length > 0, 'src/ has no files');
+  const naming = files.filter(name => fs.readFileSync(path.join(root, name), 'utf8').includes(UPSTREAM_REPOSITORY));
+  t.deepEqual(naming, [], `these files still contain ${UPSTREAM_REPOSITORY}`);
 });

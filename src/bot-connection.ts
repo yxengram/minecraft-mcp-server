@@ -11,7 +11,8 @@ import { describeOffset, wokeUpInsideBlock } from './tools/terrain-utils.js';
 import { configureMovements, installDoorHelper } from './tools/movement-utils.js';
 import { fixToolMaterials } from './tools/block-utils.js';
 
-const SUPPORTED_MINECRAFT_VERSION = '26.1.2';
+/** The Minecraft version the bot is tested with; the connection errors and the startup line name it (E-024). */
+export const SUPPORTED_MINECRAFT_VERSION = '26.1.2';
 /** How long an attempt may take to spawn before it counts as failed (E-021). */
 export const CONNECT_TIMEOUT_MS = 30_000;
 // The server moves the player off the bed right after waking; look at where the head ended up after that (E-014).
@@ -44,7 +45,7 @@ function endsAttempt(failure: { code?: string; message: string }): boolean {
 // Kicks whose text does not say what to do get the explanation after it in the kicked event (E-028). "Kicked by an
 // operator" and "The server is full!" say enough by themselves.
 const EXPLAINED_KICKS: ReadonlySet<FailureKind> = new Set<FailureKind>(['online_mode', 'same_name', 'version', 'not_whitelisted', 'banned', 'ip_banned']);
-const SETUP_LINE = 'For setup instructions, visit: https://github.com/yuniko-software/minecraft-mcp-server';
+const SETUP_LINE = 'For setup instructions, visit: https://github.com/yxengram/minecraft-mcp-server#getting-started';
 
 interface BotConfig {
   host: string;

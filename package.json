@@ -1,11 +1,37 @@
 {
   "name": "minecraft-mcp-server",
-  "version": "2.0.4",
+  "version": "3.0.0",
+  "description": "MCP server that lets an LLM play Minecraft Java Edition through a Mineflayer bot, with background tasks and an instinct that reacts to danger in real time",
+  "keywords": [
+    "mcp",
+    "mcp-server",
+    "model-context-protocol",
+    "minecraft",
+    "mineflayer",
+    "bot",
+    "llm",
+    "ai-agent"
+  ],
+  "homepage": "https://github.com/yxengram/minecraft-mcp-server#readme",
+  "bugs": {
+    "url": "https://github.com/yxengram/minecraft-mcp-server/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/yxengram/minecraft-mcp-server.git"
+  },
+  "license": "Apache-2.0",
+  "author": "yxengram",
   "type": "module",
   "main": "dist/main.js",
   "bin": {
     "minecraft-mcp-server": "dist/main.js"
   },
+  "files": [
+    "dist",
+    "CHANGELOG.md",
+    "npm-shrinkwrap.json"
+  ],
   "ava": {
     "files": [
       "tests/**/*.test.ts"
@@ -19,6 +45,7 @@
   },
   "scripts": {
     "dev": "tsx src/main.ts",
+    "prebuild": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
     "build": "tsc -p tsconfig.build.json",
     "prepare": "npm run build",
     "start": "node dist/main.js",

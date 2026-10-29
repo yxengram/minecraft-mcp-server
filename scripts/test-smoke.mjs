@@ -205,9 +205,8 @@ async function checkMcp(entry, args, pkg) {
       return;
     }
 
-    // F-051 compares serverInfo with the package.json beside the entry. main.ts still names the server and its version
-    // itself (E-024 takes them from package.json), and both agree with package.json today, so a version bump that
-    // misses main.ts already fails here.
+    // F-051 compares serverInfo with the package.json beside the entry. main.ts takes both from package-info.js (F-049,
+    // E-024), so a packaging error that loses package.json or ships a different one fails here.
     const serverInfo = client.getServerVersion();
     const expectedName = pkg.name.replace(/^@[^/]+\//, '');
     report(
@@ -295,25 +294,18 @@ async function checkShutdown(entry, args) {
   });
   captureStderr('the shutdown run', child.stderr);
   const exited = new Promise(resolve => child.once('exit', (code, signal) => resolve({ code, signal })));
-  // TODO(E-024): wait for the startup line "<command> v<version>, tested with Minecraft ..." on stderr instead. Until
-  // E-024 adds it, the answer to initialize shows the server is running with stdio connected.
-  const answered = new Promise(resolve => {
-    onLines(child.stdout, line => {
-      if (line.includes('"id":1')) resolve();
+  // The startup line "<command> v<version>, tested with Minecraft ..." (E-024) comes once stdio is being served.
+  const started = new Promise(resolve => {
+    onLines(child.stderr, line => {
+      if (/ v\d+\.\d+\.\d+\S*, tested with Minecraft /.test(line)) resolve();
     });
   });
   child.stdin.on('error', () => {});
-  child.stdin.write(JSON.stringify({
-    jsonrpc: '2.0',
-    id: 1,
-    method: 'initialize',
-    params: { protocolVersion: LATEST_PROTOCOL_VERSION, capabilities: {}, clientInfo: CLIENT_INFO }
-  }) + '\n');
 
   try {
-    const first = await withTimeout(Promise.race([answered.then(() => null), exited]), 15000, 'an answer to initialize');
+    const first = await withTimeout(Promise.race([started.then(() => null), exited]), 15000, 'the startup line on stderr');
     if (first) {
-      report(false, name, `exited before answering initialize (code ${first.code}, signal ${first.signal})`);
+      report(false, name, `exited before the startup line (code ${first.code}, signal ${first.signal})`);
       return;
     }
     child.stdin.end();

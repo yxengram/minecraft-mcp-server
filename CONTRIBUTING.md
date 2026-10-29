@@ -8,7 +8,7 @@
 
 ### 1. Fork and Clone the Repository
 
-1. Fork this repository on GitHub
+1. Fork [yxengram/minecraft-mcp-server](https://github.com/yxengram/minecraft-mcp-server) on GitHub
 2. Clone your fork locally:
    ```bash
    git clone https://github.com/YOUR_USERNAME/minecraft-mcp-server.git
@@ -17,8 +17,9 @@
 
 ### 2. Create a Feature Branch
 
-Create a new branch for your feature or bug fix:
+`extra-tools` is the release branch and the repository's default branch, so a fresh clone starts on it. Create a new branch from it for your feature or bug fix:
 ```bash
+git checkout extra-tools
 git checkout -b your-feature-name
 ```
 
@@ -112,5 +113,5 @@ To use the MCP Inspector with your development branch, follow the guide at: http
 
 Once you're happy with your changes:
 1. Push your feature branch to your fork
-2. Create a Pull Request from your fork to the main repository
+2. Create a Pull Request from your fork to the `extra-tools` branch of [yxengram/minecraft-mcp-server](https://github.com/yxengram/minecraft-mcp-server)
 3. Others can test your changes by pointing their config to your fork/branch

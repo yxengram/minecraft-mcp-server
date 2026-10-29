@@ -5,8 +5,8 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { setupStdioFiltering } from './stdio-filter.js';
 import { log } from './logger.js';
 import { ConfigError, parseConfig, usernameWarning, type ServerConfig } from './config.js';
-import { COMMAND_NAME } from './package-info.js';
-import { BotConnection } from './bot-connection.js';
+import { COMMAND_NAME, PACKAGE_VERSION } from './package-info.js';
+import { BotConnection, SUPPORTED_MINECRAFT_VERSION } from './bot-connection.js';
 import { ToolFactory } from './tool-factory.js';
 import { MessageStore } from './message-store.js';
 import { EventStore } from './event-store.js';
@@ -87,9 +87,10 @@ async function main() {
 
   connection.connect();
 
+  // Name and version come from package.json (F-049, E-024); the name is the command name, without the package's scope.
   const server = new McpServer({
-    name: "minecraft-mcp-server",
-    version: "2.0.4"
+    name: COMMAND_NAME,
+    version: PACKAGE_VERSION
   });
 
   const factory = new ToolFactory(server, connection);
@@ -126,6 +127,8 @@ async function main() {
 
   const transport = new StdioServerTransport();
   await server.connect(transport);
+  // After connect, so the line means stdio is being served: F-051 (c) waits for it before closing stdin.
+  log('info', `${COMMAND_NAME} v${PACKAGE_VERSION}, tested with Minecraft ${SUPPORTED_MINECRAFT_VERSION}`);
 }
 
 main().catch((error) => {
