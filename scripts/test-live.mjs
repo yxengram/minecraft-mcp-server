@@ -48,6 +48,10 @@ try {
   let position;
   for (let attempt = 0; attempt < 25; attempt++) {
     const result = await client.callTool({ name: 'get-position', arguments: {} });
+    // The first reply after the join, success or error, would end with the version warning (E-030).
+    if (responseText(result).includes('verified only with')) {
+      throw new Error('A reply carries a version warning:\n' + responseText(result));
+    }
     const match = responseText(result).match(
       /Current position: \((-?\d+), (-?\d+), (-?\d+)\)/
     );
@@ -81,6 +85,13 @@ try {
   await callTool('list-players');
   const events = await callTool('get-events');
   if (!events.includes('nextSince:')) throw new Error('get-events returned unexpected output');
+  // E-030: the join writes a connection event with the server's version; the test world runs 26.1.2, so no warning.
+  const joined = (await callTool('get-events', { types: ['connection'], limit: 1 }))
+    .split('\n').find(line => line.includes('[connection] '));
+  if (!joined) throw new Error('No connection event after joining');
+  const connection = joined.slice(joined.indexOf('[connection] ') + '[connection] '.length);
+  if (connection.includes('verified only with')) throw new Error('Version warning: ' + connection);
+  console.log('Server version: ' + (connection.match(/\(Minecraft ([^)]+)\)/)?.[1] ?? connection));
   console.log('Read-only tool checks passed');
   console.log('Live MCP compatibility test passed');
 } catch (error) {

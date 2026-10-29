@@ -27,6 +27,7 @@ The first release of this fork. It builds on upstream version 2.0.4 (upstream `m
 - **Chat triage**: the decision model sorts chat, and only messages meant for the bot wake the LLM, as `chat_request` events. Players can give the bot chat commands only when the LLM allows them (nobody by default), and chat can never change the policy.
 - **Command line**: `--help`, `--version`, `--waypoint-file` and `--decision-model`.
 - **Connection errors in plain words**: a failed connection or a kick says what went wrong (nothing listening on the port, host not found, no answer, online mode, the same name already playing, a version mismatch, the whitelist, bans, a full server) and what to do about it.
+- **A warning for other Minecraft versions**: when the server is not 26.1.2 (told from the version name the server reports, since 26.1, 26.1.1 and 26.1.2 share protocol 775), the bot still joins, but it writes a warning to stderr and to a new `connection` event, and the first tool reply after each join ends with the same sentence. On 26.1.2 the `connection` event only records the join.
 - A startup line on stderr: `<command> v<version>, tested with Minecraft 26.1.2`.
 - Tests: unit tests, a live test that runs every tool against a real server, a scenario test that compares the bot with and without the Autopilot, and a stdio smoke test. CI runs on Linux, macOS and Windows.
 

@@ -10,6 +10,7 @@ import { BotConnection, CONNECT_TIMEOUT_MS } from '../src/bot-connection.js';
 import { explainFailure, kickInfo } from '../src/connection-errors.js';
 import { ToolFactory } from '../src/tool-factory.js';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { createFactory } from './_helpers.js';
 
 // ---------------------------------------------------------------------------------------------------------------
 // E-021: an attempt that fails before spawning ends in disconnected, so the next tool call connects again.
@@ -45,7 +46,7 @@ function fakeBot(): FakeBot {
   return bot;
 }
 
-function setup(createBot?: sinon.SinonStub) {
+function setup(createBot?: sinon.SinonStub, config: typeof CONFIG = CONFIG) {
   const clock = sinon.useFakeTimers();
   const bots: FakeBot[] = [];
   const create = createBot ?? sinon.stub();
@@ -57,7 +58,7 @@ function setup(createBot?: sinon.SinonStub) {
     onBotReady: sinon.stub(),
     onBotEnd: sinon.stub()
   };
-  const connection = new BotConnection(CONFIG, callbacks, RECONNECT_DELAY_MS, { createBot: create as unknown as (options: mineflayer.BotOptions) => mineflayer.Bot });
+  const connection = new BotConnection(config, callbacks, RECONNECT_DELAY_MS, { createBot: create as unknown as (options: mineflayer.BotOptions) => mineflayer.Bot });
   return { clock, bots, createBot: create, callbacks, connection };
 }
 
@@ -936,4 +937,301 @@ test.serial('E-029 a body command returns as soon as the kicked bot leaves, with
     isError: true
   });
   t.is(factory.inFlight().length, 0);
+});
+
+// ---------------------------------------------------------------------------------------------------------------
+// E-030: after joining, the server's version from its ping response. Not 26.1.2: a warning on stderr, a connection
+// event and the same sentence at the end of the first tool reply after the join. 26.1.2: only the connection event.
+// The bot stays in the game either way.
+// ---------------------------------------------------------------------------------------------------------------
+
+type AutoVersionHook = (response: unknown, client: unknown, options: unknown) => void;
+type PingVersion = { name?: string; protocol?: number };
+type Reply = { content: { type: string; text: string }[]; isError?: boolean };
+type Handler = (args: unknown, extra?: { signal?: AbortSignal }) => Promise<Reply>;
+
+// G3's first example, so the matching case can be checked word for word.
+const G3_CONFIG = { host: '127.0.0.1', port: 25565, username: 'LLMBot' };
+const MATCH = 'Joined localhost:25565 as Bot (Minecraft 26.1.2)';
+const WARN_26_1 = 'Joined localhost:25565 as Bot; the server runs Minecraft 26.1 (protocol 775); this bot is verified only with 26.1.2, so some tools may misbehave';
+const WARN_1_21_11 = 'Joined localhost:25565 as Bot; the server runs Minecraft 1.21.11 (protocol 774); this bot is verified only with 26.1.2, so some tools may misbehave';
+
+function versionHooks(bot: FakeBot): AutoVersionHook[] {
+  return (bot._client as unknown as { autoVersionHooks?: AutoVersionHook[] }).autoVersionHooks ?? [];
+}
+
+/** What minecraft-protocol's autoVersion does with the ping response: it calls every hook, then lets the login go on. */
+function answerPing(bot: FakeBot, version: PingVersion | undefined) {
+  const response = { version, players: { max: 8, online: 1 }, description: { text: 'A Minecraft Server' } };
+  for (const hook of versionHooks(bot)) hook(response, bot._client, { host: 'localhost', port: 25565 });
+}
+
+/** The first connect: the ping is answered, then the bot spawns. */
+function join(s: Setup, version: PingVersion | undefined): FakeBot {
+  s.connection.connect();
+  const bot = s.bots[s.bots.length - 1];
+  answerPing(bot, version);
+  bot.emit('spawn');
+  return bot;
+}
+
+function connectionEvents(s: Setup): string[] {
+  return s.callbacks.onEvent.getCalls().filter(call => call.args[0] === 'connection').map(call => call.args[1] as string);
+}
+
+function warnings(s: Setup): string[] {
+  return s.callbacks.onLog.getCalls().filter(call => call.args[0] === 'warn').map(call => call.args[1] as string);
+}
+
+/** A factory on the real connection with one tool that succeeds and one that fails. */
+function tools(s: Setup) {
+  const server = { tool: sinon.stub() };
+  const factory = new ToolFactory(server as unknown as McpServer, s.connection);
+  factory.registerTool('get-thing', 'Succeeds', {}, async () => factory.createResponse('thing'));
+  factory.registerTool('break-thing', 'Fails', {}, async () => { throw new Error('boom'); });
+  const handler = (name: string) => server.tool.getCalls().find(call => call.args[0] === name)!.args[3] as Handler;
+  return { ok: handler('get-thing'), fail: handler('break-thing') };
+}
+
+const text = (value: string) => ({ type: 'text', text: value });
+
+test.serial('E-030 the hook: connect() adds it to a _client that has no autoVersionHooks array, and it records the name and protocol', (t) => {
+  const bots: FakeBot[] = [];
+  const createBot = sinon.stub().callsFake(() => {
+    const bot = newBot(bots);
+    // minecraft-protocol does not create the array; a plain push would throw.
+    t.false('autoVersionHooks' in bot._client);
+    return bot;
+  });
+  const s = setup(createBot);
+  t.teardown(() => s.clock.restore());
+  t.notThrows(() => s.connection.connect());
+  // With its own createBot, setup does not collect the bots.
+  const bot = bots[0];
+  t.true(Array.isArray(versionHooks(bot)));
+  t.is(versionHooks(bot).length, 1);
+  t.is(s.connection.getServerVersion(), null, 'nothing before the ping is answered');
+
+  answerPing(bot, { name: 'Paper 26.1.2', protocol: 775 });
+  t.deepEqual(s.connection.getServerVersion(), { name: 'Paper 26.1.2', protocol: 775, version: '26.1.2' });
+  t.is(s.connection.getState(), 'connecting', 'recording the version does not change the attempt');
+});
+
+test.serial('E-030 the hook: an autoVersionHooks array that is already there keeps its hooks', (t) => {
+  const bots: FakeBot[] = [];
+  const forgeHook = sinon.stub();
+  const createBot = sinon.stub().callsFake(() => {
+    const bot = newBot(bots);
+    (bot._client as unknown as { autoVersionHooks: AutoVersionHook[] }).autoVersionHooks = [forgeHook];
+    return bot;
+  });
+  const s = setup(createBot);
+  t.teardown(() => s.clock.restore());
+  s.connection.connect();
+  const hooks = versionHooks(bots[0]);
+  t.is(hooks.length, 2);
+  t.is(hooks[0], forgeHook);
+  answerPing(bots[0], { name: '26.1.2', protocol: 775 });
+  t.true(forgeHook.calledOnce);
+  t.is(s.connection.getServerVersion()?.name, '26.1.2');
+});
+
+test.serial('E-030 the hook: a ping response without a version neither throws nor records anything', (t) => {
+  const s = setup();
+  t.teardown(() => s.clock.restore());
+  s.connection.connect();
+  const [hook] = versionHooks(s.bots[0]);
+  t.notThrows(() => hook({ players: { max: 8, online: 0 } }, s.bots[0]._client, {}));
+  t.notThrows(() => hook(undefined, s.bots[0]._client, {}));
+  t.is(s.connection.getServerVersion(), null);
+});
+
+test.serial('E-030 the hook: each attempt starts without a version, and a late ping of an instance let go is ignored', async (t) => {
+  const s = setup();
+  t.teardown(() => s.clock.restore());
+  s.connection.connect();
+  const old = s.bots[0];
+  answerPing(old, { name: '26.1', protocol: 775 });
+  old.emit('error', errno('ECONNREFUSED', 'connect ECONNREFUSED 127.0.0.1:25565'));
+
+  void s.connection.checkConnectionAndReconnect();
+  await s.clock.tickAsync(RECONNECT_DELAY_MS);
+  t.is(s.connection.getServerVersion(), null, 'the earlier attempt\'s server says nothing about this one');
+  answerPing(old, { name: '1.21.11', protocol: 774 });
+  t.is(s.connection.getServerVersion(), null);
+  answerPing(s.bots[1], { name: '26.1.2', protocol: 775 });
+  t.deepEqual(s.connection.getServerVersion(), { name: '26.1.2', protocol: 775, version: '26.1.2' });
+  await s.clock.tickAsync(CALL_WAIT_MS);
+});
+
+test.serial('E-030 "26.1.2" (protocol 775): no warning, only the connection event of G3', (t) => {
+  const s = setup(undefined, G3_CONFIG);
+  t.teardown(() => s.clock.restore());
+  const bot = join(s, { name: '26.1.2', protocol: 775 });
+  t.deepEqual(connectionEvents(s), ['Joined 127.0.0.1:25565 as LLMBot (Minecraft 26.1.2)']);
+  t.deepEqual(warnings(s), []);
+  t.is(s.connection.takeJoinNote(), null);
+  t.is(s.connection.getState(), 'connected');
+  t.true(s.callbacks.onBotReady.calledOnceWith(asBot(bot)), 'the setup after spawn still runs');
+});
+
+test.serial('E-030 "Paper 26.1.2" (protocol 775): the version number is found in the name, and there is no warning', (t) => {
+  const s = setup();
+  t.teardown(() => s.clock.restore());
+  join(s, { name: 'Paper 26.1.2', protocol: 775 });
+  t.is(s.connection.getServerVersion()?.version, '26.1.2');
+  t.deepEqual(connectionEvents(s), [MATCH]);
+  t.deepEqual(warnings(s), []);
+  t.is(s.connection.takeJoinNote(), null);
+});
+
+const otherVersions: { name: string; ping: PingVersion; warning: string }[] = [
+  // Same protocol, so bot.version is "26.1" for 26.1.2 too: only the name tells them apart.
+  { name: '"26.1" (protocol 775)', ping: { name: '26.1', protocol: 775 }, warning: WARN_26_1 },
+  { name: '"1.21.11" (protocol 774)', ping: { name: '1.21.11', protocol: 774 }, warning: WARN_1_21_11 }
+];
+
+for (const { name, ping, warning } of otherVersions) {
+  test.serial(`E-030 ${name}: the same warning on stderr, in the connection event and for the first reply; the bot stays in`, (t) => {
+    const s = setup();
+    t.teardown(() => s.clock.restore());
+    const bot = join(s, ping);
+    t.deepEqual(warnings(s), [warning]);
+    t.deepEqual(connectionEvents(s), [warning]);
+    t.is(s.connection.getState(), 'connected', 'the connection is not refused');
+    t.is(s.connection.getBot(), asBot(bot));
+    t.true(bot.end.notCalled);
+    t.true(s.callbacks.onBotReady.calledOnceWith(asBot(bot)), 'the setup after spawn still runs');
+    t.is(s.connection.takeJoinNote(), warning);
+    t.is(s.connection.takeJoinNote(), null, 'once per join');
+  });
+}
+
+test.serial('E-030 H, P and U are the configured host, port and username', (t) => {
+  const s = setup(undefined, TARGET);
+  t.teardown(() => s.clock.restore());
+  join(s, { name: '26.1', protocol: 775 });
+  t.deepEqual(connectionEvents(s), [
+    'Joined mc.example.test:41234 as Helper; the server runs Minecraft 26.1 (protocol 775); this bot is verified only with 26.1.2, so some tools may misbehave'
+  ]);
+});
+
+test.serial('E-030 without a name only the protocol counts: 775 does not warn', (t) => {
+  const s = setup();
+  t.teardown(() => s.clock.restore());
+  join(s, { protocol: 775 });
+  t.deepEqual(s.connection.getServerVersion(), { name: null, protocol: 775, version: null });
+  t.deepEqual(connectionEvents(s), [MATCH]);
+  t.deepEqual(warnings(s), []);
+  t.is(s.connection.takeJoinNote(), null);
+});
+
+test.serial('E-030 without a name only the protocol counts: 774 warns', (t) => {
+  const s = setup();
+  t.teardown(() => s.clock.restore());
+  join(s, { protocol: 774 });
+  const [warning] = warnings(s);
+  // The contract does not say which version V is without a name, only that it is one.
+  t.regex(warning, /^Joined localhost:25565 as Bot; the server runs Minecraft \d+\.\d+(\.\d+)? \(protocol 774\); this bot is verified only with 26\.1\.2, so some tools may misbehave$/);
+  t.deepEqual(connectionEvents(s), [warning]);
+  t.is(s.connection.takeJoinNote(), warning);
+  t.is(s.connection.getState(), 'connected');
+});
+
+test.serial('E-030 a name without a version number counts as no name: only the protocol is judged', (t) => {
+  const s = setup();
+  t.teardown(() => s.clock.restore());
+  join(s, { name: 'Velocity', protocol: 775 });
+  t.deepEqual(s.connection.getServerVersion(), { name: 'Velocity', protocol: 775, version: null });
+  t.deepEqual(connectionEvents(s), [MATCH]);
+  t.deepEqual(warnings(s), []);
+});
+
+test.serial('E-030 a bot that spawns without a ping answer (a stand-in) gets no judgment: no event, no warning, no note', (t) => {
+  const s = setup();
+  t.teardown(() => s.clock.restore());
+  join(s, undefined);
+  t.deepEqual(connectionEvents(s), []);
+  t.deepEqual(warnings(s), []);
+  t.is(s.connection.takeJoinNote(), null);
+});
+
+test.serial('E-030 a respawn after a death is not a join: no second connection event', (t) => {
+  const s = setup();
+  t.teardown(() => s.clock.restore());
+  const bot = join(s, { name: '26.1', protocol: 775 });
+  bot.emit('death');
+  bot.emit('spawn');
+  t.deepEqual(connectionEvents(s), [WARN_26_1]);
+  t.deepEqual(warnings(s), [WARN_26_1]);
+});
+
+test.serial('E-030 the warning ends only the first reply after the join, then again the first after joining again; errors too', async (t) => {
+  const s = setup();
+  t.teardown(() => s.clock.restore());
+  const { ok, fail } = tools(s);
+  const bot = join(s, { name: '26.1', protocol: 775 });
+
+  t.deepEqual(await ok({}), { content: [text('thing'), text(WARN_26_1)] }, 'the reply itself first, the warning after it');
+  t.deepEqual(await ok({}), { content: [text('thing')] });
+  t.deepEqual(await fail({}), { content: [text('Failed: boom')], isError: true });
+
+  // The bot leaves; the next call joins again, and its reply is the first after that join.
+  bot.emit('end', 'socketClosed');
+  t.is(s.connection.getState(), 'disconnected');
+  const reply = watch(fail({}));
+  await s.clock.tickAsync(RECONNECT_DELAY_MS);
+  t.is(s.bots.length, 2);
+  answerPing(s.bots[1], { name: '26.1', protocol: 775 });
+  s.bots[1].emit('spawn');
+  await s.clock.tickAsync(100);
+  t.true(reply.settled);
+  t.deepEqual(reply.value, { content: [text('Failed: boom'), text(WARN_26_1)], isError: true }, 'an error reply gets it too');
+  t.deepEqual(await ok({}), { content: [text('thing')] });
+  t.deepEqual(connectionEvents(s), [WARN_26_1, WARN_26_1], 'one connection event per join');
+});
+
+test.serial('E-030 with 26.1.2 no reply changes', async (t) => {
+  const s = setup();
+  t.teardown(() => s.clock.restore());
+  const { ok, fail } = tools(s);
+  join(s, { name: '26.1.2', protocol: 775 });
+  t.deepEqual(await ok({}), { content: [text('thing')] });
+  t.deepEqual(await fail({}), { content: [text('Failed: boom')], isError: true });
+});
+
+test.serial('E-030 the note of a join that is over does not end a later "Cannot connect" reply', async (t) => {
+  const s = setup();
+  t.teardown(() => s.clock.restore());
+  const { ok } = tools(s);
+  const bot = join(s, { name: '26.1', protocol: 775 });
+  // No reply took the note before the bot left; the next call's attempt fails.
+  bot.emit('end', 'socketClosed');
+  const reply = watch(ok({}));
+  await s.clock.tickAsync(RECONNECT_DELAY_MS);
+  s.bots[1].emit('error', errno('ECONNREFUSED', 'connect ECONNREFUSED 127.0.0.1:25565'));
+  await s.clock.tickAsync(100);
+  t.true(reply.settled);
+  t.is(reply.value!.content.length, 1);
+  t.true(reply.value!.content[0].text.startsWith(CANNOT_CONNECT));
+  t.false(reply.value!.content[0].text.includes('verified only with'));
+});
+
+test.serial('E-030 a reply the MCP client cancelled, which the SDK drops, leaves the warning for the next reply', async (t) => {
+  const s = setup();
+  t.teardown(() => s.clock.restore());
+  const { ok } = tools(s);
+  join(s, { name: '26.1', protocol: 775 });
+  const cancelled = new AbortController();
+  cancelled.abort();
+  t.deepEqual(await ok({}, { signal: cancelled.signal }), { content: [text('thing')] });
+  t.deepEqual(await ok({}), { content: [text('thing'), text(WARN_26_1)] });
+});
+
+test('E-030 a connection stand-in without takeJoinNote leaves the results as they were', async (t) => {
+  const { factory, getTool } = createFactory();
+  factory.registerTool('get-thing', 'Succeeds', {}, async () => factory.createResponse('thing'));
+  factory.registerTool('break-thing', 'Fails', {}, async () => { throw new Error('boom'); });
+  t.deepEqual(await getTool('get-thing')!.execute({}), { content: [text('thing')] });
+  t.deepEqual(await getTool('break-thing')!.execute({}), { content: [text('Failed: boom')], isError: true });
 });

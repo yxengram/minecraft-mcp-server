@@ -13,6 +13,10 @@ import { fixToolMaterials } from './tools/block-utils.js';
 
 /** The Minecraft version the bot is tested with; the connection errors and the startup line name it (E-024). */
 export const SUPPORTED_MINECRAFT_VERSION = '26.1.2';
+/** Its protocol. 26.1 and 26.1.1 have it too, so only the version name in the server's ping tells them apart (E-030). */
+export const SUPPORTED_PROTOCOL_VERSION = 775;
+// The version number in the ping's version name: "26.1.2", "Paper 26.1.2" (E-030).
+const VERSION_NUMBER = /\d+\.\d+(\.\d+)?/;
 /** How long an attempt may take to spawn before it counts as failed (E-021). */
 export const CONNECT_TIMEOUT_MS = 30_000;
 // The server moves the player off the bed right after waking; look at where the head ended up after that (E-014).
@@ -30,7 +34,21 @@ export interface ConnectionFailure {
   time: number;
 }
 
+/** What the server's ping response says about its version (E-030); E-042's --check reads it too. */
+export interface ServerVersion {
+  /** version.name as the server sent it: "26.1.2", "Paper 26.1.2"; null when it sent none. */
+  name: string | null;
+  /** version.protocol; null when it sent none. */
+  protocol: number | null;
+  /** The version number in the name ("26.1.2" for "Paper 26.1.2"); null when the name has none. */
+  version: string | null;
+}
+
 type CreateBot = (options: mineflayer.BotOptions) => mineflayer.Bot;
+
+// minecraft-protocol calls these with the ping response before it lets the login go on (autoVersion.js). The client
+// does not declare the array, and only reads it when it exists.
+type AutoVersionHook = (response: unknown, client: unknown, options: unknown) => void;
 
 /** One instance's end (E-029). A promise rather than a listener on the bot, which removeAllListeners would remove. */
 interface EndSignal {
@@ -116,6 +134,10 @@ export class BotConnection {
   // The instance whose attempt already has a record: the first error or kick of an attempt says the most.
   private failureRecordedFor: mineflayer.Bot | null = null;
   private readonly endSignals = new WeakMap<mineflayer.Bot, EndSignal>();
+  // The current attempt's server version, from its ping response (E-030).
+  private serverVersion: ServerVersion | null = null;
+  // The version warning of the latest join, until a tool reply takes it (E-030).
+  private joinNote: { bot: mineflayer.Bot; text: string } | null = null;
   private readonly reconnectDelayMs: number;
   private readonly createBot: CreateBot;
 
@@ -143,6 +165,22 @@ export class BotConnection {
   /** Why the latest attempt failed or the bot was kicked; cleared when the bot spawns (E-021). */
   lastFailure(): Readonly<ConnectionFailure> | null {
     return this.failure;
+  }
+
+  /** The server's version from the current attempt's ping response, or null before it arrives (E-030). */
+  getServerVersion(): Readonly<ServerVersion> | null {
+    return this.serverVersion;
+  }
+
+  /**
+   * The warning that the server runs another Minecraft version, once per join (E-030): the tool factory adds it to the
+   * first reply after the bot joined. Null when the versions match, when a reply already took it, or once the bot that
+   * joined is no longer in the game.
+   */
+  takeJoinNote(): string | null {
+    const note = this.joinNote;
+    this.joinNote = null;
+    return note && note.bot === this.bot && this.state === 'connected' ? note.text : null;
   }
 
   /**
@@ -184,6 +222,9 @@ export class BotConnection {
     };
 
     this.clearConnectTimer();
+    // A new attempt may reach a server that has changed since the last join (E-030).
+    this.serverVersion = null;
+    this.joinNote = null;
     let bot: mineflayer.Bot;
     try {
       bot = this.createBot(botOptions);
@@ -201,6 +242,7 @@ export class BotConnection {
     this.state = 'connecting';
     this.isReconnecting = false;
 
+    this.watchServerVersion(bot);
     this.registerEventHandlers(bot);
     this.connectTimer = setTimeout(() => {
       this.failAttempt(bot, { code: 'SPAWN_TIMEOUT', message: `no spawn within ${CONNECT_TIMEOUT_MS / 1000} s` });
@@ -212,6 +254,54 @@ export class BotConnection {
       clearTimeout(this.connectTimer);
       this.connectTimer = null;
     }
+  }
+
+  /**
+   * Records the version name and protocol of the server's ping response (E-030). bot.version cannot tell 26.1, 26.1.1
+   * and 26.1.2 apart: all three are protocol 775 and the data version "26.1". The ping arrives after createBot has
+   * returned, so the hook is in place in time. A stand-in without _client is skipped.
+   */
+  private watchServerVersion(bot: mineflayer.Bot): void {
+    const client = (bot as unknown as { _client?: { autoVersionHooks?: AutoVersionHook[] } })._client;
+    if (!client) return;
+    client.autoVersionHooks ??= [];
+    client.autoVersionHooks.push(response => {
+      // The login goes on right after the hooks; a throw here would stall it until the watchdog.
+      try {
+        if (this.bot !== bot) return;
+        const version = (response as { version?: { name?: unknown; protocol?: unknown } } | null | undefined)?.version;
+        const name = typeof version?.name === 'string' && version.name.trim() !== '' ? version.name : null;
+        const protocol = typeof version?.protocol === 'number' ? version.protocol : null;
+        if (name === null && protocol === null) return;
+        this.serverVersion = { name, protocol, version: name?.match(VERSION_NUMBER)?.[0] ?? null };
+      } catch (err) {
+        this.callbacks.onLog('warn', `Could not read the server version: ${this.formatError(err)}`);
+      }
+    });
+  }
+
+  /**
+   * At a join (E-030): a connection event, and when the server is not 26.1.2, a warning on stderr and for the first
+   * tool reply. The bot stays in: other versions may still work. Without a version name only the protocol counts;
+   * with no ping data at all (a stand-in) there is nothing to judge.
+   */
+  private checkServerVersion(bot: mineflayer.Bot): void {
+    const server = this.serverVersion;
+    if (!server) return;
+    const { host, port, username } = this.config;
+    const joined = `Joined ${host}:${port} as ${username}`;
+    const otherProtocol = server.protocol !== null && server.protocol !== SUPPORTED_PROTOCOL_VERSION;
+    const otherVersion = server.version !== null && server.version !== SUPPORTED_MINECRAFT_VERSION;
+    if (!otherProtocol && !otherVersion) {
+      this.callbacks.onEvent?.('connection', `${joined} (Minecraft ${SUPPORTED_MINECRAFT_VERSION})`);
+      return;
+    }
+    // Without a number in the name, the version mineflayer took the protocol for.
+    const runs = `Minecraft ${server.version ?? bot.version}${server.protocol === null ? '' : ` (protocol ${server.protocol})`}`;
+    const text = `${joined}; the server runs ${runs}; this bot is verified only with ${SUPPORTED_MINECRAFT_VERSION}, so some tools may misbehave`;
+    this.callbacks.onLog('warn', text);
+    this.callbacks.onEvent?.('connection', text);
+    this.joinNote = { bot, text };
   }
 
   /** Keeps the first record of the current instance's attempt; events of an instance already let go are ignored. */
@@ -269,6 +359,8 @@ export class BotConnection {
       this.failureRecordedFor = null;
       this.state = 'connected';
       this.callbacks.onLog('info', 'Bot spawned in world');
+      // Before the setup, which an unsupported version is the likeliest to break (E-030).
+      this.checkServerVersion(bot);
 
       // Before anything estimates a dig: the shared block data understates pickaxe speed for 108 blocks (E-017).
       fixToolMaterials(bot.registry as never);

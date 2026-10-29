@@ -210,31 +210,34 @@ export class ToolFactory {
     options: ToolOptions = {}
   ): void {
     const body = options.body ?? BODY_TOOLS.has(name);
+    const respond = async (call: ToolCall, args: unknown): Promise<McpResponse> => {
+      const connectionCheck = await this.connection.checkConnectionAndReconnect();
+
+      if (!connectionCheck.connected) {
+        return {
+          content: [{ type: "text", text: connectionCheck.message! }],
+          isError: true
+        };
+      }
+
+      try {
+        const parsedArgs = this.shouldValidateSchema(schema)
+          ? this.parseArgs(schema as ZodRawShape, args)
+          : args;
+        if (body) {
+          return await this.runWithBody(call, () => executor(parsedArgs, call.ctx));
+        }
+        return await executor(parsedArgs, call.ctx);
+      } catch (error) {
+        return this.createErrorResponse(error as Error);
+      }
+    };
     const handler = async (args: unknown, extra?: CallExtra): Promise<McpResponse> => {
       // The budget starts now: the connection check and the wait for the lease count too (E-027).
       const call = new ToolCall(name, body, extra);
       this.calls.add(call);
       try {
-        const connectionCheck = await this.connection.checkConnectionAndReconnect();
-
-        if (!connectionCheck.connected) {
-          return {
-            content: [{ type: "text", text: connectionCheck.message! }],
-            isError: true
-          };
-        }
-
-        try {
-          const parsedArgs = this.shouldValidateSchema(schema)
-            ? this.parseArgs(schema as ZodRawShape, args)
-            : args;
-          if (body) {
-            return await this.runWithBody(call, () => executor(parsedArgs, call.ctx));
-          }
-          return await executor(parsedArgs, call.ctx);
-        } catch (error) {
-          return this.createErrorResponse(error as Error);
-        }
+        return this.withJoinNote(call, await respond(call, args));
       } finally {
         this.calls.delete(call);
         call.dispose();
@@ -441,6 +444,18 @@ export class ToolFactory {
     calls.add(call);
     const watched = calls;
     return { dispose: () => { watched.delete(call); } };
+  }
+
+  /**
+   * Ends the first reply after a join with the connection's version warning, when the server is not 26.1.2 (E-030),
+   * whether the reply is a success or an error. A connection without takeJoinNote (a stand-in) leaves the reply as it
+   * is. The SDK drops the reply to a request the client cancelled, so that reply leaves the note for the next one.
+   */
+  private withJoinNote(call: ToolCall, response: McpResponse): McpResponse {
+    if (call.reason === 'cancelled') return response;
+    const note = (this.connection as { takeJoinNote?: () => string | null }).takeJoinNote?.();
+    if (!note) return response;
+    return { ...response, content: [...response.content, { type: "text", text: note }] };
   }
 
   private currentBot(): mineflayer.Bot | null {

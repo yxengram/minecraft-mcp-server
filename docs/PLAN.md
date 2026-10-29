@@ -1548,3 +1548,10 @@
 - **检查**：`npm test` 1168 个通过（新增 22 个，已有断言不改）；`npm run lint`、`tsc --noEmit`、`git diff --check` 无输出；修正时故意改坏四处，对应的用例失败，之后恢复。`npm run build` 后 `npm run test:smoke` 13 项全部 PASS。`npm run test:live:world -- 63320 --allow-world-changes`：第一轮无 key 在 portals 失败（被猪灵打死），有 key 39 步全部 ok；加 resistance 后无 key 再跑一轮，在 portals 失败（提前回到主世界）；改了检查后无 key、有 key 各一轮 39 步全部 ok，覆盖 66 个工具中的 66 个。新步骤在每一轮都通过。
 - **对世界的影响**：每轮 bot 被踢出一次（聊天里有离开与重新加入的消息）；第一轮 bot 在下界死了一次。
 - **文件状态**：F-052 仍为 verified（部分），加上 E-029 的用例（另一部分在 tests/m19-connection.test.ts，F-047）。
+
+### 2026-10-30 M19 第 10 步：E-030 服务器版本警告（Q29）
+
+- **实现**（多代理工作流：一个实现；契约、测试、安全三个角度各一个审查；一个修正。审查提出 3 条，采纳 2 条测试的改进；契约的一条由主会话写入 BLUEPRINT）：`src/bot-connection.ts`：createBot 之后在 `_client.autoVersionHooks` 加一个钩子，记下 ping 里的版本名与协议号；每次连接后的第一次出生时判断一次（死亡后的复活不算加入）：26.1.2（或协议 775、名字里取不出版本号时）写一条 connection 事件 “Joined H:P as U (Minecraft 26.1.2)”；其他版本照常加入，stderr、connection 事件与加入后的第一个工具回复末尾都是 “Joined H:P as U; the server runs Minecraft V (protocol N); this bot is verified only with 26.1.2, so some tools may misbehave”。新增 getServerVersion() 供 E-042 使用。`src/tool-factory.ts` 把这一句附在加入后的第一个回复上（成功、错误与连接失败的回复都算）。G3 的 connection 事件由本步引入。`scripts/test-live.mjs` 读 connection 事件，打印服务器版本并断言没有警告。CHANGELOG 加一行。
+- **实施时补充的规则**（已写入 BLUEPRINT E-030 (4) 与 F-054）：名字里取不出版本号（例如 “Velocity”）时与拿不到名字相同，只按协议号判断。
+- **检查**：`npm test` 1187 个通过（新增 19 个，已有断言不改）；`npm run lint`、`tsc --noEmit`、`git diff --check` 无输出；故意改坏六处，各有用例失败，之后恢复。`npm run build` 后 `npm run test:smoke` 13 项全部 PASS；`npm run test:live -- 63320`（只读）通过，打印 “Server version: 26.1.2”，没有警告；`npm run test:live:world -- 63320 --allow-world-changes` 无 key、有 key 各一轮 39 步全部 ok，覆盖 66 个工具中的 66 个。
+- **没有核对的**：测试世界是 26.1.2，看不到警告的一路；契约中可选的“在 26.1 或 1.21.11 的世界手动跑一次”没有做（要另一个版本的世界）。
