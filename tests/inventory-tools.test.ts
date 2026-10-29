@@ -162,5 +162,6 @@ test('equip-item returns message when item not found', async (t) => {
 
   const result = await executor({ itemName: 'diamond_sword', destination: 'hand' });
 
+  t.true(result.isError);
   t.true(result.content[0].text.includes('Couldn\'t find'));
 });

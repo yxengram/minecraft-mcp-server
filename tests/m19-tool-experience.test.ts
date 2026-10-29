@@ -24,6 +24,8 @@ import { registerInteractionTools } from '../src/tools/interaction-tools.js';
 import { registerEntityTools } from '../src/tools/entity-tools.js';
 import { registerEventTools } from '../src/tools/event-tools.js';
 import { registerGatheringTools } from '../src/tools/gathering-tools.js';
+import { registerInventoryTools } from '../src/tools/inventory-tools.js';
+import { registerFurnaceTools } from '../src/tools/furnace-tools.js';
 import { createFakeWorld } from './_helpers.js';
 
 const STOPPED = 'Path was stopped before it could be completed! Thus, the desired goal was not reached.';
@@ -126,6 +128,8 @@ async function serve(t: ExecutionContext, bot: unknown, extra: (factory: ToolFac
   registerInteractionTools(factory, getBot);
   registerEntityTools(factory, getBot);
   registerEventTools(factory, events, getBot);
+  registerInventoryTools(factory, getBot);
+  registerFurnaceTools(factory, getBot);
   extra(factory, stand);
 
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
@@ -801,4 +805,224 @@ test.serial('E-029: a body command that ends before the bot leaves keeps its res
   t.true(query.settled);
   t.false(query.reply!.isError, query.reply!.text);
   t.is(query.reply!.text, 'answered after 1 s');
+});
+
+// ---------------------------------------------------------------------------------------------------------------
+// E-031: an action tool that did not do what was asked replies with createErrorResponse (isError true, the text
+// after "Failed: "). Queries that find nothing and requests for a state the bot is already in stay successes with
+// the same text (Q29).
+// ---------------------------------------------------------------------------------------------------------------
+
+const SELF_CELL = 'Failed: Cannot place a block where the bot is standing or one block above';
+
+test.serial('E-031: place-block into the bot\'s own cell is an error, at the feet, at the head, and when the walk there ends in the target', async (t) => {
+  useClock(t);
+  const bot = fakeBot({ '10,63,0': 'stone' });
+  const s = await serve(t, bot);
+
+  for (const y of [64, 65]) {
+    const reply = await s.call('place-block', { x: 0, y, z: 0 });
+    t.true(reply.isError, `y ${y}`);
+    t.is(reply.text, SELF_CELL, `y ${y}`);
+  }
+
+  // The bot cannot see the floor at (10, 63, 0) and walks; the walk ends standing in the target.
+  bot.entity.position = new Vec3(7.5, 64, 0.5);
+  bot.canSeeBlock = () => false;
+  bot.pathfinder.goto = sinon.stub().callsFake(async () => { bot.entity.position = new Vec3(10.5, 64, 0.5); });
+  const walkedIn = await s.call('place-block', { x: 10, y: 64, z: 0 });
+  t.true(walkedIn.isError);
+  t.is(walkedIn.text, SELF_CELL);
+  t.false(bot.placeBlock.called, 'nothing placed');
+});
+
+test.serial('E-031: place-block on a cell that holds a block is an error; cave_air and void_air are not a block there', async (t) => {
+  useClock(t);
+  const bot = fakeBot({ '3,64,0': 'dirt', '3,63,0': 'stone', '2,64,0': 'cave_air', '2,63,0': 'stone', '-2,64,0': 'void_air', '-2,63,0': 'stone' });
+  const s = await serve(t, bot);
+
+  const filled = await s.call('place-block', { x: 3, y: 64, z: 0 });
+  t.true(filled.isError);
+  t.is(filled.text, 'Failed: There\'s already a block (dirt) at (3, 64, 0)');
+  t.false(bot.placeBlock.called);
+  t.false(bot.pathfinder.goto.called, 'no walk to a cell that is already filled');
+
+  for (const x of [2, -2]) {
+    const cave = await s.call('place-block', { x, y: 64, z: 0 });
+    t.false(cave.isError, cave.text);
+    t.true(cave.text.startsWith(`Placed block at (${x}, 64, 0)`), cave.text);
+  }
+  t.is(bot.placeBlock.callCount, 2, 'placed into the cave_air and into the void_air');
+});
+
+test.serial('E-031: place-block with nothing to place against is an error that does not read "Failed: Failed to"', async (t) => {
+  useClock(t);
+  // The floor at (2, 63, 0) is in reach and in sight, so no walk.
+  const bot = fakeBot({ '2,63,0': 'stone' });
+  const s = await serve(t, bot);
+
+  // All six neighbours are air.
+  const none = await s.call('place-block', { x: 3, y: 64, z: 0 });
+  t.true(none.isError);
+  t.is(none.text, 'Failed: Could not place a block at (3, 64, 0): no suitable reference block found');
+
+  // The only neighbour is the floor, and placing against it fails: the reply keeps the last error.
+  bot.placeBlock.rejects(new Error('No block has been placed : the block is still air'));
+  const failed = await s.call('place-block', { x: 2, y: 64, z: 0 });
+  t.true(failed.isError);
+  t.is(failed.text, 'Failed: Could not place a block at (2, 64, 0): no suitable reference block found (last error: No block has been placed : the block is still air)');
+  t.false(failed.text.includes('Failed: Failed'));
+  t.true(bot.placeBlock.calledOnce, 'tried against the floor');
+  t.false(bot.pathfinder.goto.called);
+});
+
+test.serial('E-031: dig-block on a block that is not loaded is an error; on air, cave_air included, it is still a success', async (t) => {
+  useClock(t);
+  const bot = fakeBot({ '4,64,0': 'cave_air' });
+  // Past x 100 the chunk is not loaded: mineflayer's blockAt gives null.
+  const loaded = bot.blockAt;
+  Object.assign(bot, { blockAt: (pos: Vec3) => (pos.x >= 100 ? null : loaded(pos)) });
+  const s = await serve(t, bot);
+
+  const unloaded = await s.call('dig-block', { x: 100, y: 64, z: 0 });
+  t.true(unloaded.isError);
+  t.is(unloaded.text, 'Failed: The block at (100, 64, 0) is not loaded (beyond what the bot can see)');
+
+  for (const x of [3, 4]) {
+    const air = await s.call('dig-block', { x, y: 64, z: 0 });
+    t.false(air.isError, air.text);
+    t.is(air.text, `No block found at position (${x}, 64, 0)`);
+  }
+  t.false(bot.dig.called);
+  t.false(bot.pathfinder.goto.called);
+});
+
+type Stack = { name: string; count: number; type: number; stackSize?: number };
+const RAW_IRON: Stack = { name: 'raw_iron', count: 2, type: 1 };
+const COAL: Stack = { name: 'coal', count: 3, type: 5 };
+
+/**
+ * A furnace window whose input and fuel slots hold `input` and `fuel`; nothing ever comes out of it. The bot's part
+ * of the window (slots 3-38) has `emptySlots` empty slots, the rest is full of cobblestone.
+ */
+function fakeFurnace({ input = null, fuel = null, emptySlots = 36 }: { input?: Stack | null; fuel?: Stack | null; emptySlots?: number } = {}) {
+  let fuelSlot = fuel;
+  const filler = Array.from({ length: 36 - emptySlots }, () => ({ name: 'cobblestone', count: 64, type: 99, stackSize: 64 }));
+  return Object.assign(new EventEmitter(), {
+    inventoryStart: 3,
+    inventoryEnd: 39,
+    slots: [null, null, null, ...filler, ...Array(emptySlots).fill(null)],
+    inputItem: () => input,
+    fuelItem: () => fuelSlot,
+    outputItem: () => null,
+    takeFuel: sinon.stub().callsFake(async () => {
+      const taken = fuelSlot;
+      fuelSlot = null;
+      return taken;
+    }),
+    putFuel: sinon.stub().resolves(),
+    putInput: sinon.stub().resolves(),
+    takeOutput: sinon.stub().resolves(null),
+    close: sinon.stub()
+  });
+}
+
+/** A bot next to a furnace at (5, 64, 0) (or none, with `furnaceBlock` 'air') that opens `furnace`. */
+function smeltBot(furnace: ReturnType<typeof fakeFurnace>, items: Stack[] = [RAW_IRON, COAL], furnaceBlock = 'furnace') {
+  const bot = fakeBot({ '5,64,0': furnaceBlock });
+  bot.inventory.items = () => items;
+  return Object.assign(bot, { openFurnace: sinon.stub().resolves(furnace) });
+}
+
+const SMELT = { x: 5, y: 64, z: 0, inputItem: 'raw_iron', fuelItem: 'coal' };
+
+test.serial('E-031: smelt-item without a furnace, input or fuel, or with a slot in the way is an error, and the text is as before', async (t) => {
+  useClock(t);
+  const cases: { what: string; furnace: ReturnType<typeof fakeFurnace>; items?: Stack[]; block?: string; text: string; opened: boolean }[] = [
+    { what: 'no furnace', furnace: fakeFurnace(), block: 'air', text: 'Failed: No furnace block found at (5, 64, 0)', opened: false },
+    { what: 'no input', furnace: fakeFurnace(), items: [COAL], text: 'Failed: Couldn\'t find any item matching \'raw_iron\' in inventory', opened: false },
+    { what: 'no fuel', furnace: fakeFurnace(), items: [RAW_IRON], text: 'Failed: Couldn\'t find any fuel item matching \'coal\' in inventory', opened: false },
+    { what: 'input slot', furnace: fakeFurnace({ input: { name: 'sand', count: 4, type: 12 } }), text: 'Failed: Furnace input slot is occupied by sand', opened: true },
+    {
+      what: 'fuel slot',
+      furnace: fakeFurnace({ fuel: { name: 'oak_planks', count: 10, type: 7, stackSize: 64 }, emptySlots: 0 }),
+      text: 'Failed: Furnace fuel slot holds 10 oak_planks and it could not be taken out (the inventory is full): pass fuelItem \'oak_planks\' to smelt with it, or make room in the inventory',
+      opened: true
+    }
+  ];
+  for (const { what, furnace, items, block, text, opened } of cases) {
+    const bot = smeltBot(furnace, items, block);
+    const s = await serve(t, bot);
+    const reply = await s.call('smelt-item', SMELT);
+    t.true(reply.isError, what);
+    t.is(reply.text, text, what);
+    t.is(bot.openFurnace.called, opened, what);
+    t.false(furnace.putInput.called, `${what}: nothing put in`);
+    t.false(furnace.putFuel.called, `${what}: no fuel put in`);
+    if (opened) t.true(furnace.close.calledOnce, `${what}: the furnace window is closed`);
+  }
+});
+
+test.serial('E-031: smelt-item with no output in time is an error that says the input and fuel are in the furnace and where', async (t) => {
+  const clock = useClock(t);
+  const furnace = fakeFurnace();
+  const s = await serve(t, smeltBot(furnace));
+
+  const pending = track(s.call('smelt-item', { ...SMELT, timeoutMs: 1000 }));
+  await clock.tickAsync(1500);
+  t.true(pending.settled);
+  t.true(pending.reply!.isError);
+  t.is(pending.reply!.text, 'Failed: No output after 1000ms; the input and fuel are in the furnace at (5, 64, 0)');
+  t.true(furnace.putInput.calledOnce, 'the input went in');
+  t.true(furnace.putFuel.calledOnce, 'the fuel went in');
+
+  // Leftover fuel of another kind taken out first: the reply still says where the input and fuel are, and keeps the
+  // took-out note (the contract does not fix the order of the two).
+  const leftover = fakeFurnace({ fuel: { name: 'oak_planks', count: 3, type: 7, stackSize: 64 } });
+  const again = await serve(t, smeltBot(leftover));
+  const tookOut = track(again.call('smelt-item', { ...SMELT, timeoutMs: 1000 }));
+  await clock.tickAsync(1500);
+  t.true(tookOut.settled);
+  t.true(tookOut.reply!.isError);
+  t.true(tookOut.reply!.text.startsWith('Failed: No output after 1000ms; the input and fuel are in the furnace at (5, 64, 0)'), tookOut.reply!.text);
+  t.true(tookOut.reply!.text.includes('; took 3 oak_planks out of the fuel slot first'), tookOut.reply!.text);
+});
+
+test.serial('E-031: equip-item with an item that is not in the inventory is an error', async (t) => {
+  useClock(t);
+  const bot = fakeBot();
+  const s = await serve(t, bot);
+
+  const reply = await s.call('equip-item', { itemName: 'diamond_sword', destination: 'hand' });
+  t.true(reply.isError);
+  t.is(reply.text, 'Failed: Couldn\'t find any item matching \'diamond_sword\' in inventory');
+  t.false(bot.equip.called);
+});
+
+test.serial('E-031: still successes, so the rule does not grow: find-item that finds nothing, unequip-item on an empty slot, wake when not sleeping, dismount when not riding', async (t) => {
+  useClock(t);
+  const bot = Object.assign(fakeBot(), {
+    isSleeping: false,
+    wake: sinon.stub().resolves(),
+    vehicle: null,
+    dismount: sinon.stub(),
+    unequip: sinon.stub().resolves(),
+    getEquipmentDestSlot: () => 5
+  });
+  Object.assign(bot.inventory, { slots: Array(46).fill(null) });
+  const s = await serve(t, bot);
+
+  for (const [name, args, text] of [
+    ['find-item', { nameOrType: 'diamond' }, 'Couldn\'t find any item matching \'diamond\' in inventory'],
+    ['unequip-item', { destination: 'head' }, 'Nothing equipped in \'head\''],
+    ['wake', {}, 'Not sleeping'],
+    ['dismount', {}, 'Not riding anything']
+  ] as const) {
+    const reply = await s.call(name, args);
+    t.false(reply.isError, `${name}: ${reply.text}`);
+    t.is(reply.text, text, name);
+  }
+  t.false(bot.unequip.called);
+  t.false(bot.wake.called);
+  t.false(bot.dismount.called);
 });

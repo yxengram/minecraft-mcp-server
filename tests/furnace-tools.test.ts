@@ -59,6 +59,7 @@ test('smelt-item returns error when no furnace block found', async (t) => {
     fuelItem: 'coal'
   });
 
+  t.true(result.isError);
   t.true(result.content[0].text.includes('No furnace block found'));
 });
 

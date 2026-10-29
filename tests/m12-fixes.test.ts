@@ -585,8 +585,9 @@ test('smelt-item with the same fuel already in the slot just adds to it', async 
 });
 
 const stack = (name: string, count: number, type: number) => Object.assign(item(name, count, type), { stackSize: 64 });
+// An error since E-031: the furnace was not used.
 const holds = (reason: string) =>
-  `Furnace fuel slot holds 10 oak_planks and it could not be taken out (${reason}): pass fuelItem 'oak_planks' to smelt with it, or make room in the inventory`;
+  `Failed: Furnace fuel slot holds 10 oak_planks and it could not be taken out (${reason}): pass fuelItem 'oak_planks' to smelt with it, or make room in the inventory`;
 
 test('smelt-item says what to pass when the leftover fuel cannot be taken out, without trying a move that never finishes', async (t) => {
   const full = fuelFurnace(stack('oak_planks', 10, 7), { emptySlots: 0 });

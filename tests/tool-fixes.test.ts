@@ -196,7 +196,8 @@ test('place-block that ends up standing in the target refuses instead of failing
   world.bot.canSeeBlock = () => false;
   world.bot.pathfinder.goto.callsFake(async () => { world.bot.entity.position = new Vec3(3.5, 64, 0.5); });
   const result = await placeTool(world).execute({ x: 3, y: 64, z: 0 });
-  t.is(result.content[0].text, `You can't place a block where you're standing or one block above`);
+  t.true(result.isError);
+  t.is(result.content[0].text, 'Failed: Cannot place a block where the bot is standing or one block above');
   t.true(world.bot.placeBlock.notCalled);
 });
 
@@ -204,7 +205,8 @@ test('place-block that cannot place says why in the failure', async (t) => {
   const world = createFakeWorld({ '3,63,0': 'grass_block' }, new Vec3(0, 64, 0));
   world.bot.placeBlock.rejects(new Error('No block has been placed : the block is still air'));
   const result = await placeTool(world).execute({ x: 3, y: 64, z: 0 });
-  t.is(result.content[0].text, 'Failed to place block at (3, 64, 0): No suitable reference block found (last error: No block has been placed : the block is still air)');
+  t.true(result.isError);
+  t.is(result.content[0].text, 'Failed: Could not place a block at (3, 64, 0): no suitable reference block found (last error: No block has been placed : the block is still air)');
 });
 
 // ---- smelt-item takes the whole batch ---------------------------------------------------------------------------------

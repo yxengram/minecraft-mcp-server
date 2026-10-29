@@ -10,11 +10,12 @@ import { coerceCoordinates } from './coordinate-utils.js';
 import { blockDetails, faceName } from './block-details.js';
 import { describeEntity, entityDetails, entityKind } from './entity-utils.js';
 import { compassDirection } from './terrain-utils.js';
-import { approachToPlace, digSeconds, equipBestTool, missingHarvestTools, overlapsBot } from './block-utils.js';
+import { approachToPlace, digSeconds, equipBestTool, isAir, missingHarvestTools, overlapsBot } from './block-utils.js';
 import { gotoWithTimeout } from './movement-utils.js';
 
 type FaceDirection = 'up' | 'down' | 'north' | 'south' | 'east' | 'west';
 const MAX_FIND_BLOCKS_COUNT = 256;
+const SELF_CELL = 'Cannot place a block where the bot is standing or one block above';
 
 interface FaceOption {
   direction: string;
@@ -38,15 +39,17 @@ export function registerBlockTools(factory: ToolFactory, getBot: () => mineflaye
       const placePos = new Vec3(x, y, z).floored();
       ({ x, y, z } = placePos);
 
+      // A block that was not placed is an error (E-031).
       const botPos = bot.entity.position.floored();
       if (placePos.equals(botPos) || placePos.equals(botPos.offset(0, 1, 0))) {
-        return factory.createResponse(`You can't place a block where you're standing or one block above`);
+        return factory.createErrorResponse(SELF_CELL);
       }
 
       const blockAtPos = bot.blockAt(placePos);
 
-      if (blockAtPos && blockAtPos.name !== 'air') {
-        return factory.createResponse(`There's already a block (${blockAtPos.name}) at (${x}, ${y}, ${z})`);
+      // Cave air and void air are air: a cell in a cave can be filled.
+      if (blockAtPos && !isAir(blockAtPos)) {
+        return factory.createErrorResponse(`There's already a block (${blockAtPos.name}) at (${x}, ${y}, ${z})`);
       }
 
       const possibleFaces: FaceOption[] = [
@@ -85,7 +88,7 @@ export function registerBlockTools(factory: ToolFactory, getBot: () => mineflaye
             continue;
           }
           if (overlapsBot(bot, placePos)) {
-            return factory.createResponse(`You can't place a block where you're standing or one block above`);
+            return factory.createErrorResponse(SELF_CELL);
           }
 
           await bot.lookAt(placePos, true);
@@ -109,7 +112,8 @@ export function registerBlockTools(factory: ToolFactory, getBot: () => mineflaye
         }
       }
 
-      return factory.createResponse(`Failed to place block at (${x}, ${y}, ${z}): No suitable reference block found${lastError ? ` (last error: ${lastError})` : ''}`);
+      // Not "Failed to …": the error reply already starts with "Failed: ".
+      return factory.createErrorResponse(`Could not place a block at (${x}, ${y}, ${z}): no suitable reference block found${lastError ? ` (last error: ${lastError})` : ''}`);
     }
   );
 
@@ -128,7 +132,11 @@ export function registerBlockTools(factory: ToolFactory, getBot: () => mineflaye
       const blockPos = new Vec3(x, y, z);
       const block = bot.blockAt(blockPos);
 
-      if (!block || block.name === 'air') {
+      // An unloaded block cannot be dug (an error, E-031); air is already what digging would leave (a success).
+      if (!block) {
+        return factory.createErrorResponse(`The block at (${x}, ${y}, ${z}) is not loaded (beyond what the bot can see)`);
+      }
+      if (isAir(block)) {
         return factory.createResponse(`No block found at position (${x}, ${y}, ${z})`);
       }
 

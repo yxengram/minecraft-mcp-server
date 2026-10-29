@@ -70,7 +70,7 @@ export function registerInventoryTools(factory: ToolFactory, getBot: () => minef
       );
 
       if (!item) {
-        return factory.createResponse(`Couldn't find any item matching '${itemName}' in inventory`);
+        return factory.createErrorResponse(`Couldn't find any item matching '${itemName}' in inventory`);
       }
 
       await bot.equip(item, destination as mineflayer.EquipmentDestination);

@@ -292,6 +292,9 @@ try {
 
   await step('blocks: place, dig, fill, clear, tunnel', async () => {
     await placeAndVerify('dirt', cx + 3, y0, cz);
+    // A block that was not placed is an error, not a success (M19 E-031).
+    expectIncludes(await call('place-block', { x: cx + 3, y: y0, z: cz }, { expectError: true }),
+      `There's already a block (dirt) at (${cx + 3}, ${y0}, ${cz})`, 'place-block on a cell that holds a block');
     await call('dig-block', { x: cx + 3, y: y0, z: cz });
     expect((await block(cx + 3, y0, cz)) === 'air', 'dig-block did not remove the block');
 
@@ -642,9 +645,13 @@ try {
   });
 
   await step('portals: light, walk in, sleep refused in the Nether, walk back (M15)', async () => {
+    // With a key the instinct fights the piglins near the Nether portal, and the fight walks the bot through the portal,
+    // which restarts its cooldown (2026-10-30). The step checks portals; the instinct has its own steps.
+    if (hasDecisionKey) await call('set-policy', { instinct: { enabled: false } });
     try {
       await portalChecks();
     } finally {
+      if (hasDecisionKey) await call('set-policy', { instinct: { enabled: true } });
       // Whatever happened, bring the bot back to the overworld arena and remove the frame.
       if (!(await call('get-observation')).includes('dimension: overworld')) {
         await cmd(`/execute in minecraft:overworld run tp @s ${cx} ${y0} ${cz}`);

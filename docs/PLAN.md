@@ -1555,3 +1555,10 @@
 - **实施时补充的规则**（已写入 BLUEPRINT E-030 (4) 与 F-054）：名字里取不出版本号（例如 “Velocity”）时与拿不到名字相同，只按协议号判断。
 - **检查**：`npm test` 1187 个通过（新增 19 个，已有断言不改）；`npm run lint`、`tsc --noEmit`、`git diff --check` 无输出；故意改坏六处，各有用例失败，之后恢复。`npm run build` 后 `npm run test:smoke` 13 项全部 PASS；`npm run test:live -- 63320`（只读）通过，打印 “Server version: 26.1.2”，没有警告；`npm run test:live:world -- 63320 --allow-world-changes` 无 key、有 key 各一轮 39 步全部 ok，覆盖 66 个工具中的 66 个。
 - **没有核对的**：测试世界是 26.1.2，看不到警告的一路；契约中可选的“在 26.1 或 1.21.11 的世界手动跑一次”没有做（要另一个版本的世界）。
+
+### 2026-10-30 M19 第 11a 步：E-031 没做成的动作返回错误（Q29）
+
+- **实现**（多代理工作流：一个实现；契约、测试、安全三个角度各一个审查；一个修正。审查提出 3 条，采纳 2 条）：`src/tools/block-tools.ts`：place-block 的四种没放成（bot 自己的脚或头所在格、目标格已有方块、没有可依靠的面、放置失败）都返回 isError；目标格是否为空改用 isAir，所以 cave_air、void_air 算空；dig-block 在区块未加载（blockAt 为 null）时返回错误，空气仍是成功的 “No block found …”。`src/tools/furnace-tools.ts`：smelt-item 的 6 处失败返回错误，“No output after Nms” 加上 “; the input and fuel are in the furnace at (x, y, z)”。`src/tools/inventory-tools.ts`：equip-item 找不到物品时返回错误。查询类与“本来就是这个状态”的回复（find-item 没找到、unequip-item 空槽、wake 没在睡、dismount 没在骑）仍是成功。已有用例只改契约说行为改变的 6 个。`scripts/test-live-world.mjs` 加一个检查：在已有泥土的格子再 place-block，返回错误 “There's already a block (dirt) at …”。CHANGELOG 加一行。
+- **待办**（没有改）：place-block 选参照面时仍把 cave_air、void_air 当作实心方块（`name !== 'air'`），会白走一趟并等 5 秒；选参照面在 E-031 的“不变的部分”里。
+- **实机测试的调整**（与 E-031 无关）：有 key 时 portals 一步失败一次：bot 在下界被本能拉去打猪灵，打斗中碰到传送门，冷却重新计时，走回传送门 10 秒也没有回到主世界。现在这一步开始时（有 key 时）用 set-policy 关闭本能，结束时打开。
+- **检查**：`npm test` 1195 个通过（新增 8 个）；`npm run lint`、`tsc --noEmit`、`git diff --check` 无输出；故意改坏五处，对应的用例失败，之后恢复。`npm run build` 后 `npm run test:smoke` 13 项全部 PASS。`npm run test:live:world -- 63320 --allow-world-changes`：第一轮无 key 39 步全部 ok，有 key 在 portals 失败（见上）；关闭本能后第二轮无 key 39 步全部 ok，有 key 在 “lead-animal: by lure and on a lead (M18)” 失败：用牵绳牵牛时绳子断了（事件里有 “Picked up 1 lead”），任务报告牛离目标 4.1 格，脚本要求牛在目标旁。这一步此前 7 轮有 key 都通过，第一轮也通过，lead-animal 的代码本步没有改，记为不稳定，没有再跑。两轮中 E-031 的新检查都通过。

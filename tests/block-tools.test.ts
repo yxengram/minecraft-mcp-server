@@ -197,8 +197,11 @@ test('place-block blocks placing at bot position and one block above', async (t)
   const resultAtFeet = await executor({ x: 10, y: 64, z: 20 });
   const resultAtHead = await executor({ x: 10, y: 65, z: 20 });
 
-  t.true(resultAtFeet.content[0].text.includes("can't place a block"));
-  t.true(resultAtHead.content[0].text.includes("can't place a block"));
+  // E-031: a block that was not placed is an error.
+  t.true(resultAtFeet.isError);
+  t.is(resultAtFeet.content[0].text, 'Failed: Cannot place a block where the bot is standing or one block above');
+  t.true(resultAtHead.isError);
+  t.is(resultAtHead.content[0].text, 'Failed: Cannot place a block where the bot is standing or one block above');
 });
 
 test('place-block floors input coordinates before self-placement guard', async (t) => {
@@ -224,7 +227,8 @@ test('place-block floors input coordinates before self-placement guard', async (
 
   const result = await executor({ x: 10.4, y: 64, z: 20.7 });
 
-  t.true(result.content[0].text.includes("can't place a block"));
+  t.true(result.isError);
+  t.is(result.content[0].text, 'Failed: Cannot place a block where the bot is standing or one block above');
 });
 
 test('find-blocks returns not found when block not found', async (t) => {

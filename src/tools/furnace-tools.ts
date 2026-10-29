@@ -78,7 +78,7 @@ export function registerFurnaceTools(factory: ToolFactory, getBot: () => minefla
       const furnaceBlock = bot.blockAt(furnacePos);
 
       if (!furnaceBlock || !FURNACE_BLOCKS.has(furnaceBlock.name)) {
-        return factory.createResponse(`No furnace block found at (${x}, ${y}, ${z})`);
+        return factory.createErrorResponse(`No furnace block found at (${x}, ${y}, ${z})`);
       }
 
       const items = bot.inventory.items();
@@ -87,12 +87,12 @@ export function registerFurnaceTools(factory: ToolFactory, getBot: () => minefla
         items.find((item) => item.name === wanted.toLowerCase()) ?? items.find((item) => item.name.includes(wanted.toLowerCase()));
       const input = match(inputItem);
       if (!input) {
-        return factory.createResponse(`Couldn't find any item matching '${inputItem}' in inventory`);
+        return factory.createErrorResponse(`Couldn't find any item matching '${inputItem}' in inventory`);
       }
 
       const fuel = match(fuelItem);
       if (!fuel) {
-        return factory.createResponse(`Couldn't find any fuel item matching '${fuelItem}' in inventory`);
+        return factory.createErrorResponse(`Couldn't find any fuel item matching '${fuelItem}' in inventory`);
       }
 
       const resolvedInputCount = Math.min(inputCount, input.count);
@@ -110,7 +110,7 @@ export function registerFurnaceTools(factory: ToolFactory, getBot: () => minefla
       try {
         const existingInput = furnace.inputItem();
         if (existingInput && existingInput.name !== input.name) {
-          return factory.createResponse(`Furnace input slot is occupied by ${existingInput.name}`);
+          return factory.createErrorResponse(`Furnace input slot is occupied by ${existingInput.name}`);
         }
 
         // Leftover fuel of another kind goes back to the inventory so the requested fuel fits (E-014).
@@ -126,7 +126,7 @@ export function registerFurnaceTools(factory: ToolFactory, getBot: () => minefla
             if (furnace.fuelItem()) throw new Error('the inventory has no room for all of it');
           } catch (error) {
             const reason = error instanceof Error ? error.message : String(error);
-            return factory.createResponse(
+            return factory.createErrorResponse(
               `Furnace fuel slot holds ${oldCount} ${oldName} and it could not be taken out (${reason}): ` +
               `pass fuelItem '${oldName}' to smelt with it, or make room in the inventory`
             );
@@ -163,7 +163,8 @@ export function registerFurnaceTools(factory: ToolFactory, getBot: () => minefla
           if (taken >= resolvedInputCount || (!furnace.inputItem() && !furnace.outputItem())) break;
         }
         if (taken === 0) {
-          return factory.createResponse(`No output after ${waitMs}ms${tookFuel}`);
+          // The input and fuel went in: say where they are, so the LLM does not take it that nothing happened (E-031).
+          return factory.createErrorResponse(`No output after ${waitMs}ms; the input and fuel are in the furnace at (${x}, ${y}, ${z})${tookFuel}`);
         }
         const left = furnace.inputItem()?.count ?? 0;
         return factory.createResponse(`Smelted ${taken} ${outputName}${left ? `; ${left} ${input.name} still in the furnace (stopped after ${waitMs}ms)` : ''}${tookFuel}`);

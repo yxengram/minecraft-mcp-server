@@ -1254,7 +1254,7 @@ src/main.ts（现有，改动）--创建并注册--> src/autopilot/autopilot.ts�
 
 ### F-052 · `tests/m19-tool-experience.test.ts`
 
-- **模块**：测试（M-VER）　**里程碑**：M19　**状态**：verified（部分，2026-10-30：E-027 的用例；test-live-world 加了“客户端取消的移动立即停下并释放身体”一步，无 key、有 key 各一轮通过；2026-10-30：E-029 的用例，test-live-world 加了“被踢时移动立即返回”一步，无 key、有 key 各一轮通过；E-030、E-031、E-038～E-040 的用例随各步加入）
+- **模块**：测试（M-VER）　**里程碑**：M19　**状态**：verified（部分，2026-10-30：E-027 的用例；test-live-world 加了“客户端取消的移动立即停下并释放身体”一步，无 key、有 key 各一轮通过；2026-10-30：E-029 的用例，test-live-world 加了“被踢时移动立即返回”一步，无 key、有 key 各一轮通过；2026-10-30：E-031 的用例；E-030 的用例在 tests/m19-connection.test.ts；E-038～E-040 的用例随各步加入）
 - **职责**：M19 工具体验类改动的契约测试。由第一个用到它的提交（E-027）创建，之后的提交往里追加：E-027 调用预算、看门狗、MCP 取消、排队时的取消、中止后不再调用 dig、placeBlock、activateBlock、attack（G6 I3 的测试位置之一）；E-029 bot 离开游戏时在途的身体类命令立即返回（与 tests/m19-connection.test.ts 分担）；E-031 没做成的动作返回错误，以及仍为成功的查询与“本来就是这个状态”的回复；E-038 长时间工具的默认时限与 “Still …” 回复；E-039 进度通知；E-040 stop-all 与 I8；E-044 工具注解（注解表与注册名单一一对应）；E-045 服务器说明。
 - **做法**：用真实 McpServer 与 SDK Client，经 InMemoryTransport.createLinkedPair 连接，这样 extra.signal、notifications/cancelled 与进度通知都走 SDK 1.27.1 的真实路径；配替身 bot 与真实 ActionArbiter（E-040 另用真实 TaskManager、InstinctEngine）；与时间有关的用例用 sinon 假时钟。
 - **不负责**：连接类（tests/m19-connection.test.ts，F-047）与安全类（tests/m19-safety.test.ts，F-048）的用例；fly-to 的用例在 tests/flight-tools.test.ts（E-032）。
