@@ -229,3 +229,34 @@ test('E-023: the arguments the live scripts pass still parse under strict', (t) 
   t.is(config.username, 'MCPWorldTest');
   t.is(config.waypointFile, '/tmp/x/waypoints.json');
 });
+
+// ---------------------------------------------------------------------------------------------------------------
+// E-033: --allow-commands, off by default. It is only a start option (send-chat reads it at registration), so these
+// cases are all there is to parse.
+// ---------------------------------------------------------------------------------------------------------------
+
+test('E-033: allowCommands is false by default and true with --allow-commands', (t) => {
+  t.is(parseConfig([]).allowCommands, false);
+  t.is(parseConfig(['--allow-commands']).allowCommands, true);
+  t.is(parseConfig(['--no-allow-commands']).allowCommands, false);
+});
+
+// The option takes no value, so a value after it is left without an option and rejected without being repeated (G6 I4).
+test('E-033: a value after --allow-commands is rejected without repeating it', (t) => {
+  const message = configError(t, ['--allow-commands', 'sk-or-v1-abc'])?.message ?? '';
+  t.true(message.includes('Unknown argument'), message);
+  t.false(message.includes('sk-or-v1-abc'), message);
+});
+
+// scripts/lib/live-arena.mjs starts the server for test-live-world and test-scenarios with --allow-commands.
+test('E-033: the arguments live-arena passes, --allow-commands included, parse under strict', (t) => {
+  const config = parseConfig([
+    '--host', '127.0.0.1', '--port', '63320', '--username', 'MCPWorldTest', '--waypoint-file', '/tmp/x/waypoints.json',
+    '--allow-commands'
+  ]);
+  t.is(config.host, '127.0.0.1');
+  t.is(config.port, 63320);
+  t.is(config.username, 'MCPWorldTest');
+  t.is(config.waypointFile, '/tmp/x/waypoints.json');
+  t.true(config.allowCommands);
+});

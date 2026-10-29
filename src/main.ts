@@ -103,7 +103,7 @@ async function main() {
   registerInventoryTools(factory, getBot);
   registerBlockTools(factory, getBot);
   registerEntityTools(factory, getBot, getAutopilot);
-  registerChatTools(factory, getBot, messageStore);
+  registerChatTools(factory, getBot, messageStore, { allowCommands: config.allowCommands });
   registerFlightTools(factory, getBot);
   registerGameStateTools(factory, getBot);
   registerCraftingTools(factory, getBot);

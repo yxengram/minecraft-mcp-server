@@ -44,6 +44,8 @@ export function responseText(result) {
 /**
  * One connected session: an MCP client driving the bot, plus the helpers the live tests share.
  * `serverEnv` adds environment variables for the server (the stdio transport only passes a whitelist).
+ * The server always gets --allow-commands: the live tests build the arena with server commands sent through send-chat
+ * (E-033).
  */
 export function createArena({ port, botName, helperName, clientName, serverArgs = [], serverEnv = {} }) {
   const waypointDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-live-world-'));
@@ -56,6 +58,7 @@ export function createArena({ port, botName, helperName, clientName, serverArgs 
       '--port', String(port),
       '--username', botName,
       '--waypoint-file', path.join(waypointDir, 'waypoints.json'),
+      '--allow-commands',
       ...serverArgs
     ],
     stderr: 'ignore',
@@ -95,9 +98,11 @@ export function createArena({ port, botName, helperName, clientName, serverArgs 
     throw new Error(`Timed out waiting for ${description}`);
   }
 
+  // Returns send-chat's reply, which names the server command it ran (E-033).
   async function cmd(command) {
-    await call('send-chat', { message: command });
+    const text = await call('send-chat', { message: command });
     await sleep(700);
+    return text;
   }
 
   async function position() {

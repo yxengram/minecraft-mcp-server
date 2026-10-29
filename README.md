@@ -146,6 +146,8 @@ The example names the bot `ClaudeBot`; without `--username` it is `LLMBot`. The 
 
 Leave out `env` to run without a decision model: everything else works, but the instinct is offline.
 
+To let the LLM use server commands such as `/give`, `/fill` or `/tp`, add `"--allow-commands"` to `args`. Without it, `send-chat` sends plain chat and the chat commands `/msg`, `/tell`, `/w`, `/me`, `/teammsg` and `/tm`, and refuses every other command without sending anything, so chat that talks the LLM into a command cannot run one. Only the option turns this on: neither `set-policy` nor chat can.
+
 Restart the client completely. The bot joins the world once the client starts the server. If it does not, see [Troubleshooting](#troubleshooting).
 
 | Option | Default | Meaning |
@@ -155,6 +157,7 @@ Restart the client completely. The bot joins the world once the client starts th
 | `--username` | `LLMBot` | The bot's name |
 | `--waypoint-file` | `~/.minecraft-mcp-server/waypoints.json` | Where waypoints are stored (per server host) |
 | `--decision-model` | `perplexity/pplx-decider-v1.2-20261016` | The OpenRouter decision model |
+| `--allow-commands` | off | Let `send-chat` run server commands (`/give`, `/fill`, `/tp` and so on); chat and `/msg`, `/tell`, `/w`, `/me`, `/teammsg`, `/tm` always work |
 | `--help`, `-h` | — | Print the options and exit |
 | `--version` | — | Print the version and exit |
 
@@ -296,7 +299,7 @@ A command that moves or uses the bot's body stops when the bot dies, and its rep
 - `detect-gamemode`: the game mode
 
 ### Chat
-- `send-chat`: say something, or run a command
+- `send-chat`: say something; server commands need `--allow-commands`
 - `read-chat`: recent chat and system messages
 
 ### Autopilot
@@ -369,6 +372,8 @@ npm run test:scenarios -- <LAN_PORT> --allow-world-changes       # the Autopilot
 ```
 
 **Use a throwaway world** for `test:live:world` and `test:scenarios`. They build an arena at y=240, give items, summon mobs and can kill the bot.
+
+`test:live:world` and `test:scenarios` start the server with `--allow-commands` themselves, because they set up the arena with commands sent through `send-chat`. `test:live` starts it without the option and checks that `send-chat` refuses a command.
 
 **How the scenario test works:**
 - It runs every scenario in three configurations: `llm-only` (instinct off), `no-key` (instinct offline) and `instinct` (with a key).

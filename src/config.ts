@@ -9,6 +9,11 @@ export interface ServerConfig {
   waypointFile?: string;
   /** Decision model id for chat triage and chat commands (BLUEPRINT E-006); the API key comes only from OPENROUTER_API_KEY. */
   decisionModel?: string;
+  /**
+   * send-chat may run server commands besides /msg, /tell, /w, /me, /teammsg and /tm (BLUEPRINT E-033). Only this
+   * option turns it on: it is not part of the policy, so neither set-policy nor chat can change it.
+   */
+  allowCommands: boolean;
 }
 
 /** An unknown argument or an invalid value (BLUEPRINT E-023). parseConfig throws it instead of printing or exiting. */
@@ -90,6 +95,11 @@ export function parseConfig(argv: string[] = hideBin(process.argv)): ServerConfi
     .option('decision-model', {
       type: 'string',
       description: 'OpenRouter decision model id used to sort chat (needs OPENROUTER_API_KEY in the environment)'
+    })
+    .option('allow-commands', {
+      type: 'boolean',
+      description: 'Let send-chat run server commands such as /give, /fill and /tp (without it: chat and /msg, /tell, /w, /me, /teammsg, /tm only)',
+      default: false
     })
     .strict()
     .check(checkArguments)

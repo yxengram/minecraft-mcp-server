@@ -567,7 +567,8 @@ try {
   await step('tasks: return-home (daytime)', async () => {
     expectIncludes(await call('set-waypoint', { name: 'home', x: cx - 4, y: y0, z: cz }), "Saved waypoint 'home'", 'set-waypoint home');
     await call('move-to-position', { x: cx + 5, y: y0, z: cz + 1, range: 0, timeoutMs: 20000 });
-    await cmd('/time set day');
+    // live-arena starts the server with --allow-commands, so send-chat runs the command and says so (E-033).
+    expectIncludes(await cmd('/time set day'), 'ran 1 command: /time set day', 'send-chat with --allow-commands');
     const id = await startTask('return-home', {});
     const done = await waitForTaskEnd(id, 'the return-home task to finish', 60000);
     expectIncludes(done, "Arrived at waypoint 'home'", 'return-home result');

@@ -25,7 +25,8 @@ test('registerChatTools registers send-chat tool', (t) => {
   const sendChatCall = toolCalls.find(call => call.args[0] === 'send-chat');
 
   t.truthy(sendChatCall);
-  t.is(sendChatCall!.args[1], 'Send a chat message in-game');
+  // E-033: without the fourth argument --allow-commands is off, and the description says so.
+  t.is(sendChatCall!.args[1], 'Send a chat message in-game. Chat commands (/msg, /tell, /w, /me, /teammsg, /tm) always work; other server commands are refused because this server was started without --allow-commands');
 });
 
 test('registerChatTools registers read-chat tool', (t) => {

@@ -92,6 +92,18 @@ try {
   const connection = joined.slice(joined.indexOf('[connection] ') + '[connection] '.length);
   if (connection.includes('verified only with')) throw new Error('Version warning: ' + connection);
   console.log('Server version: ' + (connection.match(/\(Minecraft ([^)]+)\)/)?.[1] ?? connection));
+  // E-033: this server runs without --allow-commands, so send-chat refuses a server command, also on a later line,
+  // and sends nothing (the check stays read-only).
+  const refusal = '"/time" is a server command and this MCP server was started without --allow-commands, so nothing was sent. ' +
+    'Plain chat and /msg, /tell, /w, /me, /teammsg, /tm always work; other commands need the user to add ' +
+    "--allow-commands to the server's arguments and restart it";
+  for (const message of ['/time query daytime', 'hi\n/time query daytime']) {
+    const result = await client.callTool({ name: 'send-chat', arguments: { message } }, undefined, { timeout: 10000 });
+    if (!result.isError || !responseText(result).includes(refusal)) {
+      throw new Error(`send-chat ${JSON.stringify(message)} should have been refused:\n${responseText(result)}`);
+    }
+  }
+  console.log('send-chat refuses server commands without --allow-commands');
   console.log('Read-only tool checks passed');
   console.log('Live MCP compatibility test passed');
 } catch (error) {

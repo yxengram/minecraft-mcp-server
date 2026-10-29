@@ -5,6 +5,8 @@ import sinon from 'sinon';
 import { Vec3 } from 'vec3';
 import minecraftData from 'minecraft-data';
 import { registerEntityTools } from '../src/tools/entity-tools.js';
+import { registerChatTools } from '../src/tools/chat-tools.js';
+import { MessageStore } from '../src/message-store.js';
 import { PolicyStore } from '../src/autopilot/policy.js';
 import type { Autopilot } from '../src/autopilot/autopilot.js';
 import { asBot, createFactory } from './_helpers.js';
@@ -528,4 +530,191 @@ test('E-022: a target that is already gone is not refused: the call ends with "t
   t.falsy(result.isError);
   t.false(bot.attack.called);
   t.true(text.startsWith('Attacked MCPHelper (id 5) 0 time(s); target is gone'));
+});
+
+// ---------------------------------------------------------------------------------------------------------------
+// E-033: send-chat runs no server command unless the server was started with --allow-commands (Q22). The check looks
+// at the pieces mineflayer's bot.chat sends: a message that starts with / goes out whole as one command, so it must be
+// a single line, with or without the option; any other message is split at line breaks and cut every 256 characters,
+// and each piece that starts with / is a command. /msg, /tell, /w, /me, /teammsg and /tm always work. Refused means
+// nothing is sent at all.
+// ---------------------------------------------------------------------------------------------------------------
+
+const SINGLE_LINE = 'Nothing was sent: commands must be a single line (a message that starts with / is sent as one command, so it cannot contain line breaks or control characters)';
+const serverCommand = (name: string) =>
+  `"/${name}" is a server command and this MCP server was started without --allow-commands, so nothing was sent. Plain chat and /msg, /tell, /w, /me, /teammsg, /tm always work; other commands need the user to add --allow-commands to the server's arguments and restart it`;
+const DESCRIPTION_OFF = 'Send a chat message in-game. Chat commands (/msg, /tell, /w, /me, /teammsg, /tm) always work; other server commands are refused because this server was started without --allow-commands';
+const DESCRIPTION_ON = 'Send a chat message in-game, or run a server command (this server was started with --allow-commands)';
+
+function sendChat(options?: { allowCommands?: boolean }, extra: Record<string, unknown> = {}) {
+  const { factory, getTool } = createFactory();
+  // supportFeature answers as a 1.11+ server (26.1.2 among them) does, so mineflayer's 256-character chunks apply.
+  const bot = { chat: sinon.stub(), supportFeature: (_feature: string) => false, ...extra };
+  registerChatTools(factory, asBot(bot), new MessageStore(), options);
+  const tool = getTool('send-chat')!;
+  const send = async (message: string) => {
+    const result = await tool.execute({ message });
+    return { result, text: result.content[0].text };
+  };
+  return { bot, tool, send };
+}
+
+const OFF = undefined;
+const ON = { allowCommands: true };
+
+// src/main.ts passes { allowCommands: false } when the option is not given; leaving the argument out is the same.
+for (const [label, options] of [['left out', OFF], ['false', { allowCommands: false }]] as const) {
+  test(`E-033: by default (option ${label}) "/give @s diamond" is refused and bot.chat is never called`, async (t) => {
+    const { bot, send } = sendChat(options);
+
+    const { result, text } = await send('/give @s diamond');
+
+    t.true(result.isError);
+    t.true(text.includes(serverCommand('give')), text);
+    t.false(bot.chat.called);
+  });
+}
+
+test('E-033: by default "hello\\n/op x" is refused: its second line goes out as a command', async (t) => {
+  const { bot, send } = sendChat(OFF);
+
+  const { result, text } = await send('hello\n/op x');
+
+  t.true(result.isError);
+  t.true(text.includes(serverCommand('op')), text);
+  t.false(bot.chat.called);
+});
+
+test('E-033: by default a 300-character line whose 257th character starts "/op x" is refused', async (t) => {
+  const { bot, send } = sendChat(OFF);
+  const message = 'a'.repeat(256) + '/op x' + 'b'.repeat(39);
+  t.is(message.length, 300);
+
+  const { result, text } = await send(message);
+
+  t.true(result.isError);
+  t.true(text.includes(serverCommand('op')), text);
+  t.false(bot.chat.called);
+});
+
+// The same line with the / one character earlier: the second piece starts with "o", so it is plain chat.
+test('E-033: a / inside a long line that does not start a piece is plain chat and is sent', async (t) => {
+  const { bot, send } = sendChat(OFF);
+  const message = 'a'.repeat(255) + '/op x' + 'b'.repeat(40);
+
+  const { result, text } = await send(message);
+
+  t.falsy(result.isError);
+  t.true(bot.chat.calledOnceWithExactly(message));
+  t.is(text, `Sent message: "${message}"`);
+});
+
+for (const [label, options] of [['by default', OFF], ['with allowCommands', ON]] as const) {
+  test(`E-033: ${label} "/msg Steve hi\\n/op Eve" is refused as not a single line`, async (t) => {
+    const { bot, send } = sendChat(options);
+
+    const { result, text } = await send('/msg Steve hi\n/op Eve');
+
+    t.true(result.isError);
+    t.true(text.includes('commands must be a single line'), text);
+    t.true(text.includes(SINGLE_LINE), text);
+    t.false(bot.chat.called);
+  });
+
+  for (const control of ['\u0007', '\t', '\r', '\u0000', '\u001f', '\u007f']) {
+    test(`E-033: ${label} "/me hi" with U+${control.charCodeAt(0).toString(16).padStart(4, '0')} is refused as not a single line`, async (t) => {
+      const { bot, send } = sendChat(options);
+
+      const { result, text } = await send(`/me hi${control}`);
+
+      t.true(result.isError);
+      t.true(text.includes(SINGLE_LINE), text);
+      t.false(bot.chat.called);
+    });
+  }
+
+  for (const message of [
+    '/msg Steve hi', '/tell Steve hi', '/w Steve hi', '/me waves', '/minecraft:tell Steve hi', 'hi\n/msg Steve x',
+    '/teammsg hi team', '/tm hi team', 'hello world'
+  ]) {
+    test(`E-033: ${label} ${JSON.stringify(message)} is sent once as written, with the plain chat reply`, async (t) => {
+      const { bot, send } = sendChat(options);
+
+      const { result, text } = await send(message);
+
+      t.falsy(result.isError);
+      t.true(bot.chat.calledOnceWithExactly(message));
+      t.is(text, `Sent message: "${message}"`);
+    });
+  }
+}
+
+test('E-033: with allowCommands "/time set day" is sent and the reply names the command it ran', async (t) => {
+  const { bot, send } = sendChat(ON);
+
+  const { result, text } = await send('/time set day');
+
+  t.falsy(result.isError);
+  t.true(bot.chat.calledOnceWithExactly('/time set day'));
+  t.true(text.includes('ran 1 command: /time set day'), text);
+  t.is(text, 'Sent message: "/time set day" (ran 1 command: /time set day)');
+});
+
+test('E-033: with allowCommands a command on a later line is sent, and the reply names it', async (t) => {
+  const { bot, send } = sendChat(ON);
+
+  const { text } = await send('hello\n/op x');
+
+  t.true(bot.chat.calledOnceWithExactly('hello\n/op x'));
+  t.is(text, 'Sent message: "hello\n/op x" (ran 1 command: /op x)');
+});
+
+test('E-033: with allowCommands two server commands are listed, chat commands are not', async (t) => {
+  const { bot, send } = sendChat(ON);
+  const message = 'hi\n/time set day\n/msg Steve x\n/weather clear';
+
+  const { text } = await send(message);
+
+  t.true(bot.chat.calledOnceWithExactly(message));
+  t.is(text, `Sent message: "${message}" (ran 2 commands: /time set day, /weather clear)`);
+});
+
+test('E-033: the error names the first refused command, not a chat command before it', async (t) => {
+  const { bot, send } = sendChat(OFF);
+
+  const { result, text } = await send('hi\n/msg Steve x\n/give @s diamond\n/op Eve');
+
+  t.true(result.isError);
+  t.true(text.includes(serverCommand('give')), text);
+  t.false(bot.chat.called);
+});
+
+test('E-033: the command name is read in lower case and without the minecraft: prefix', async (t) => {
+  const { bot, send } = sendChat(OFF);
+
+  const upper = await send('/GIVE @s diamond');
+  const namespaced = await send('/Minecraft:Give @s diamond');
+  const chat = await send('/MINECRAFT:MSG Steve hi');
+
+  t.true(upper.text.includes(serverCommand('give')), upper.text);
+  t.true(namespaced.text.includes(serverCommand('give')), namespaced.text);
+  t.falsy(chat.result.isError);
+  t.true(bot.chat.calledOnceWithExactly('/MINECRAFT:MSG Steve hi'));
+});
+
+// mineflayer cuts chat at 100 characters on servers before 1.11 (lessCharsInChat); the pieces follow it.
+test('E-033: on a server where mineflayer cuts chat at 100 characters, a / at the 101st character is a command', async (t) => {
+  const { bot, send } = sendChat(OFF, { supportFeature: (feature: string) => feature === 'lessCharsInChat' });
+
+  const { result, text } = await send('a'.repeat(100) + '/op x');
+
+  t.true(result.isError);
+  t.true(text.includes(serverCommand('op')), text);
+  t.false(bot.chat.called);
+});
+
+test('E-033: the description says whether the server was started with --allow-commands', (t) => {
+  t.is(sendChat(OFF).tool.description, DESCRIPTION_OFF);
+  t.is(sendChat({ allowCommands: false }).tool.description, DESCRIPTION_OFF);
+  t.is(sendChat(ON).tool.description, DESCRIPTION_ON);
 });

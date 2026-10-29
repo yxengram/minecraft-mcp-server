@@ -146,6 +146,8 @@ npm run build
 
 去掉 `env` 即可在没有决策模型的情况下运行：其他功能都正常，只是本能处于离线状态。
 
+要让 LLM 使用 `/give`、`/fill`、`/tp` 这类服务器命令，在 `args` 里加上 `"--allow-commands"`。不加时，`send-chat` 只发送普通聊天和聊天类命令 `/msg`、`/tell`、`/w`、`/me`、`/teammsg`、`/tm`，其他命令一律拒绝、什么都不发送；这样即使聊天内容诱使 LLM 去执行命令，也执行不了。只有这个启动参数能打开它：`set-policy` 和聊天都不能。
+
 完全重启客户端。客户端启动服务器后，机器人会加入世界。如果没有加入，见[故障排查（Troubleshooting）](#故障排查troubleshooting)。
 
 | 选项 | 默认值 | 含义 |
@@ -155,6 +157,7 @@ npm run build
 | `--username` | `LLMBot` | 机器人的名字 |
 | `--waypoint-file` | `~/.minecraft-mcp-server/waypoints.json` | 路点的保存位置（按服务器地址分开） |
 | `--decision-model` | `perplexity/pplx-decider-v1.2-20261016` | OpenRouter 上的决策模型 |
+| `--allow-commands` | 关闭 | 允许 `send-chat` 执行服务器命令（`/give`、`/fill`、`/tp` 等）；聊天和 `/msg`、`/tell`、`/w`、`/me`、`/teammsg`、`/tm` 始终可用 |
 | `--help`、`-h` | — | 显示选项后退出 |
 | `--version` | — | 显示版本号后退出 |
 
@@ -296,7 +299,7 @@ API key 只从环境变量 `OPENROUTER_API_KEY` 读取，不要把它写进仓�
 - `detect-gamemode`：游戏模式
 
 ### 聊天
-- `send-chat`：说话或执行命令
+- `send-chat`：说话；服务器命令需要 `--allow-commands`
 - `read-chat`：最近的聊天和系统消息
 
 ### Autopilot
@@ -369,6 +372,8 @@ npm run test:scenarios -- <局域网端口> --allow-world-changes       # Autopi
 ```
 
 **请使用一次性世界**运行 `test:live:world` 和 `test:scenarios`。它们会在 y=240 搭建场地、给予物品、召唤生物，还可能让机器人死亡。
+
+`test:live:world` 和 `test:scenarios` 会自己给服务器加上 `--allow-commands`，因为它们经 `send-chat` 用命令搭建场地。`test:live` 不加这个参数启动服务器，并检查 `send-chat` 拒绝命令。
 
 **情景测试的方式：**
 - 每个情景在三种配置下运行：`llm-only`（关闭本能）、`no-key`（本能离线）和 `instinct`（有 key）。
