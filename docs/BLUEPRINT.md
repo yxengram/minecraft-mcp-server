@@ -1263,7 +1263,7 @@ src/main.ts（现有，改动）--创建并注册--> src/autopilot/autopilot.ts�
 
 ### F-053 · `src/connection-errors.ts`
 
-- **模块**：M-MCP 工具接口（BotConnection 的辅助）　**里程碑**：M19　**状态**：verified（2026-10-26：单元测试；实机核对了主机不存在、/kick、同名登录三种；2026-10-29 又实机核对了服务器已满（LAN 世界上限 8 人；回复与契约一致，但其中“调高 server.properties 的 max-players”的建议不适用于局域网世界，改不改等用户决定，见 PLAN 2026-10-29 M19 条目）与端口没有监听；版本不符、白名单、封禁、在线模式只有单元测试；LAN 世界没有 /whitelist 与 /ban 命令，白名单与封禁要在专用服务器上才能实测）
+- **模块**：M-MCP 工具接口（BotConnection 的辅助）　**里程碑**：M19　**状态**：verified（2026-10-26：单元测试；实机核对了主机不存在、/kick、同名登录三种；2026-10-29 又实机核对了服务器已满（LAN 世界上限 8 人）与端口没有监听；同日经用户同意，server_full 的说明加上局域网世界的情形（旧说明只让人调 server.properties 的 max-players，局域网世界没有这个文件），实机看到的是旧文字，新文字只有单元测试，见 PLAN 2026-10-29 的两条 M19 条目；版本不符、白名单、封禁、在线模式只有单元测试；LAN 世界没有 /whitelist 与 /ban 命令，白名单与封禁要在专用服务器上才能实测）
 - **职责**：把连接失败与踢出原因变成用户能照着做的英文说明（E-028）。导出两个纯函数：
   - kickInfo(reason)：reason 可以是 JSON 字符串、网络 NBT 或对象，用 `src/text-component.ts` 的 simplifyNbt 与 componentToText 读取。返回 { key?, text }：key 是翻译键（例如 multiplayer.disconnect.duplicate_login）；text 是纯文字，翻译键按 minecraft-data 26.1.2 的 language.json 换成英文原文，%s 依次代入 with 参数（例如 “Kicked by an operator”、“Incompatible client! Please use 26.1.2”）；没有翻译键时是组件本身的文字。
   - explainFailure(failure, { host, port, username })：failure 是 E-021 记录的 lastFailure（错误码、消息、踢出原因、时间）。返回 { explanation, code }：explanation 按下表；code 是错误码、翻译键，或 E-021 看门狗的 “no spawn within 30 s” 一类消息，供回复括号里使用。
@@ -1275,7 +1275,8 @@ src/main.ts（现有，改动）--创建并注册--> src/autopilot/autopilot.ts�
   - unverified_username：“The server checks Microsoft accounts (online mode); this bot joins with an offline account. See Accounts in the README”
   - duplicate_login、name_taken：“Another player or bot named U joined (maybe you, if the bot has your name). Give the bot its own --username”
   - outdated_client、outdated_server、incompatible，以及 E-021 的版本类错误（“is not supported”、“Unsupported protocol version”）：“The server runs Minecraft V; this bot is verified with 26.1.2”（V 取自原因的参数或错误文字，取不到时写 another version）
-  - banned、banned.reason、ip_banned、not_whitelisted、server_full、kicked：按原因直说，例如 not_whitelisted 为 “U is not on the whitelist: run /whitelist add U on the server”；kicked 为 “An operator kicked the bot”（/kick 带理由时服务器只发理由的文字，没有翻译键，归入“其他”）
+  - server_full：“The server is full: wait for a player to leave. A world opened to LAN takes at most 8 players, the host included; on a dedicated server, raise max-players in server.properties and restart the server”（bot 只知道主机、端口和用户名，分不出局域网世界与专用服务器，所以两种都写；局域网世界的 8 人取自 26.1.2）
+  - banned、banned.reason、ip_banned、not_whitelisted、kicked：按原因直说，例如 not_whitelisted 为 “U is not on the whitelist: run /whitelist add U on the server”；kicked 为 “An operator kicked the bot”（/kick 带理由时服务器只发理由的文字，没有翻译键，归入“其他”）
   - 其他：原始代码和原文
 - **不负责**：不决定是否重连、何时重连（E-021）；retryable() 随推迟的 background-reconnect 以后再加；不写事件、不记日志；不拼接回复的开头 “Cannot connect to Minecraft server at H:P” 与网址行（`src/bot-connection.ts`，网址见 E-024）。
 - **输入**：kickInfo：踢出原因（kicked 事件或登录阶段的 disconnect）；explainFailure：失败记录与连接配置。

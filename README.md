@@ -193,7 +193,7 @@ The reply starts with `Cannot connect to Minecraft server at <host>:<port>:`, th
 | `<name> is not on the whitelist: run /whitelist add <name> on the server` | `multiplayer.disconnect.not_whitelisted` | |
 | `<name> is banned from this server: run /pardon <name> on the server`, with `(reason: …)` after "server" when the ban has a reason | `multiplayer.disconnect.banned`, `multiplayer.disconnect.banned.reason` | |
 | `The IP address of this computer is banned from this server: run /pardon-ip <address> on the server` | `multiplayer.disconnect.ip_banned` | |
-| `The server is full: wait for a player to leave, or raise max-players in server.properties` | `multiplayer.disconnect.server_full` | |
+| `The server is full: wait for a player to leave. A world opened to LAN takes at most 8 players, the host included; on a dedicated server, raise max-players in server.properties and restart the server` | `multiplayer.disconnect.server_full` | |
 
 A server that sends plain text instead of a translation key gets the same explanations; the parentheses then hold its text. Any other reason is given as it came, in the server's or the system's own words, with its code when there is one.
 

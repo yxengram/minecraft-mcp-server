@@ -463,7 +463,7 @@ const kickRows: { key: string; args?: string[]; explanation: string }[] = [
   { key: 'banned.reason', args: ['Griefing'], explanation: 'Helper is banned from this server (reason: Griefing): run /pardon Helper on the server' },
   { key: 'ip_banned', explanation: 'The IP address of this computer is banned from this server: run /pardon-ip <address> on the server' },
   { key: 'not_whitelisted', explanation: NOT_WHITELISTED },
-  { key: 'server_full', explanation: 'The server is full: wait for a player to leave, or raise max-players in server.properties' },
+  { key: 'server_full', explanation: 'The server is full: wait for a player to leave. A world opened to LAN takes at most 8 players, the host included; on a dedicated server, raise max-players in server.properties and restart the server' },
   { key: 'kicked', explanation: 'An operator kicked the bot' }
 ];
 

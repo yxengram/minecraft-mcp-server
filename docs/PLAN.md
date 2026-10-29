@@ -26,7 +26,7 @@
 | M16 | 岩浆与死亡时的命令：寻路器与岩浆保持距离、本能按碰撞箱和岩浆伤害判断“在岩浆里”、身体类工具在 bot 死亡时停止并报告 | M15；M15 验收中重做下界实测时的死亡（2026-10-22）；用户指示（2026-10-22，只规划） | verified（2026-10-22；见进展 M16 实现与实机验收） |
 | M17 | 修复任务式生存测试发现的问题：寻路器不在栅栏、墙、屋内放脚手架，不挖门和栅栏脚下的方块；移动工具报告途中放下和挖掉的方块；被围住（dig_in 的洞）时移动工具不会悄悄挖开掩体；紧急线索的决策请求对冲 | M15；任务式生存测试（2026-10-20）；会话指示（2026-10-22） | verified（2026-10-22；见进展 M17 实现与实机验收） |
 | M18 | 新工具 ground-height（远处地面高度，下界有顶时找附近的落脚层）与 lead-animal（拴绳或诱饵带动物走，新行为 lead） | M17；任务式生存测试中记下的问题；用户指示（2026-10-24） | verified（2026-10-24；见进展 M18 实现与验收） |
-| M19 | 发布前的阻塞问题、首次体验与安全：连接卡住、attack-entity 违反 I1、没有 key 时说清楚、安装与发行（npm、MCPB、CI、发布流程）、命令行、调用时限与取消、stop-all、连接错误说明、安全默认值（send-chat 的命令、问候、玩家文字不可信）、决策错误与统计、路标按世界分开、自检、工具注解、服务器说明 | M18；发布前评估（2026-10-26）；用户指示（2026-10-26，只规划） | 部分实现（2026-10-26：不需要批准的部分；2026-10-28：剩下的几件小事；2026-10-29：审计后剩下的检查与文档修正，见进展 M19 的三条记录；其余等待 Q16～Q33） |
+| M19 | 发布前的阻塞问题、首次体验与安全：连接卡住、attack-entity 违反 I1、没有 key 时说清楚、安装与发行（npm、MCPB、CI、发布流程）、命令行、调用时限与取消、stop-all、连接错误说明、安全默认值（send-chat 的命令、问候、玩家文字不可信）、决策错误与统计、路标按世界分开、自检、工具注解、服务器说明 | M18；发布前评估（2026-10-26）；用户指示（2026-10-26，只规划） | 部分实现（2026-10-26：不需要批准的部分；2026-10-28：剩下的几件小事；2026-10-29：审计后剩下的检查与文档修正，以及经用户同意改写的服务器已满说明，见进展 M19 的四条记录；其余等待 Q16～Q33） |
 
 ---
 
@@ -288,7 +288,7 @@
 | 本步不做 | connect-to-server 与后台重连（M20）；--owner；决策调用与费用的上限、--chat-triage；--auth microsoft；toolsets、--protect-builds；熔炉接入容器工具；play 提示；提交扩展目录（详见 BLUEPRINT H 节） |
 | 验收 | 每一步：单元测试覆盖该 E 行的成功与失败场景，`npm test`、`npm run lint` 通过；涉及运行时行为的步骤跑全量实机测试（无 key 与有 key 各一轮）；E-036、E-037 之后跑情景测试。整体：CI 在三平台通过；冒烟测试通过；所有者在 macOS 与 Windows 上各实际安装一次 npx 与 .mcpb，并完成一次从零开始的上手（不看源码） |
 | 恢复 | 契约一个提交；之后每一步一个独立提交，回退那一步的提交即可 |
-| 状态与证据 | 部分实现（2026-10-26）：不需要批准的第 1、2（第一部分）、5、6、8、21（部分）步与附加的 E-048、E-049 已完成，见进展记录「M19：先做不需要批准的部分（实现与验收）」；2026-10-28 的进展记录「M19：剩下的几件小事（不需要批准）」：tests/motor.test.ts 改为每个假世界一个 sinon sandbox（a3ccd0e），`npm test` 1056 个通过、不再有 leak 警告；E-049 已实机检查（lead-animal 的回复列出寻路器挖掉的 2 块泥土）；E-028 的白名单与封禁在局域网世界里无法实测（没有这两类命令）；推送不触发 CI 的原因未查明，4099322 的推送触发了 CI Build（运行 40627211179，4 个作业通过）。2026-10-29 的进展记录「M19：审计后剩下的、不需要批准的事」：7bf298c 的推送也触发了 CI（运行 40628157781）；F-051 的两种故意失败在当前代码上重跑通过；test-live-world 新增 E-022 的“不打玩家”一步，全量实机测试无 key、有 key 各一轮 36 步全部 ok；服务器已满与端口后来才监听两种连接情况实机核对通过；全套情景测试（有 key，1 轮）instinct 配置 12 个情景全部通过；过时的文档说法已改正。其余各步等待 Q16～Q33 |
+| 状态与证据 | 部分实现（2026-10-26）：不需要批准的第 1、2（第一部分）、5、6、8、21（部分）步与附加的 E-048、E-049 已完成，见进展记录「M19：先做不需要批准的部分（实现与验收）」；2026-10-28 的进展记录「M19：剩下的几件小事（不需要批准）」：tests/motor.test.ts 改为每个假世界一个 sinon sandbox（a3ccd0e），`npm test` 1056 个通过、不再有 leak 警告；E-049 已实机检查（lead-animal 的回复列出寻路器挖掉的 2 块泥土）；E-028 的白名单与封禁在局域网世界里无法实测（没有这两类命令）；推送不触发 CI 的原因未查明，4099322 的推送触发了 CI Build（运行 40627211179，4 个作业通过）。2026-10-29 的进展记录「M19：审计后剩下的、不需要批准的事」：7bf298c 的推送也触发了 CI（运行 40628157781）；F-051 的两种故意失败在当前代码上重跑通过；test-live-world 新增 E-022 的“不打玩家”一步，全量实机测试无 key、有 key 各一轮 36 步全部 ok；服务器已满与端口后来才监听两种连接情况实机核对通过；全套情景测试（有 key，1 轮）instinct 配置 12 个情景全部通过；过时的文档说法已改正。同日的进展记录「M19：服务器已满的说明加上局域网世界（E-028）」：经用户同意，server_full 的说明加上局域网世界的情形（新文字只有单元测试）；3ee13ef 的推送触发 CI（运行 40821915614，4 个作业通过）。其余各步等待 Q16～Q33 |
 
 **实施顺序**（每步一个提交；发布阻塞项在前；改名放在最后，免得测试和文档反复修改）：
 
@@ -1445,11 +1445,21 @@
 - **全套情景测试**（`npm run test:scenarios -- 63320 --allow-world-changes`，有 key，1 轮，三种配置；E-048 之后第一次跑全套）：**instinct 配置 12 个情景全部通过**，包括 creeper-ambush 压力测试（8.0 格）、zombie-chase（flee → dig_in）、zombie-chase-task（dig_in 之后任务被挂起，原因 “held by the instinct after dig_in: the bot is walled in, …”）、intent-dive（10 格氧时才行动）、lava-shore。llm-only 与 no-key 两种对照配置照旧只通过 zombie-wave、lava-shore、chat-triage。
 - **CI**：7bf298c 的推送也触发了 CI Build（运行 40628157781，event push，extra-tools，success，4 个作业通过；用 `gh run view` 只读查到）。
 - **发现的、需要用户决定或只有所有者能做的**：
-  - server_full 的说明让人去 server.properties 调 max-players，但局域网世界没有这个文件，上限固定 8 人（审计代理反汇编 26.1.2 客户端的 IntegratedServer.getMaxPlayers 得到 8，今天的 ping 也是 8）。改文字要改 F-053 的回复、README 的 Troubleshooting 与 tests/m19-connection.test.ts，属于回复文字的改动，先问用户。
+  - server_full 的说明让人去 server.properties 调 max-players，但局域网世界没有这个文件，上限固定 8 人（审计代理反汇编 26.1.2 客户端的 IntegratedServer.getMaxPlayers 得到 8，今天的 ping 也是 8）。改文字要改 F-053 的回复、README 的 Troubleshooting 与 tests/m19-connection.test.ts，属于回复文字的改动，先问用户。（用户同意修改，已改，见下一条「M19：服务器已满的说明加上局域网世界（E-028）」。）
   - 从包安装时，9 个 prismarine-* 比 package-lock.json 新（2026-10-26 的 tarball 安装：prismarine-block 1.23.0 对 1.22.0、prismarine-chat 1.13.0 对 1.11.0、prismarine-registry 1.12.0 对 1.11.0 等），单元测试与实机测试都没有用过这些版本。E-024（Q17）把 npm-shrinkwrap.json 放进包后才能固定。
   - Dependabot：2026-10-26 的两次运行（npm 与 github-actions）都显示成功，但仓库从来没有过 PR；Dependabot alerts 是关着的（API 返回 403）。只有所有者能在 GitHub 的设置里查看。
-  - CI 费用：现在每次推送都跑 macOS（按 10 倍计分钟）与 Windows（2 倍）；E-026 写明这是要先说明的费用，PLAN 里没有所有者表示接受的记录。
+  - CI 费用：现在每次推送都跑 macOS（按 10 倍计分钟）与 Windows（2 倍）；E-026 写明这是要先说明的费用，PLAN 里没有所有者表示接受的记录。（同日告诉用户这笔费用后，用户同意推送 3ee13ef，见下一条「M19：服务器已满的说明加上局域网世界（E-028）」；是否接受以后每次推送的费用仍没有记录。）
   - pull_request 触发从来没有运行过（要开一个 PR 才能核对）。
 - **没有做的**：E-048 的原场景（坡上、雷雨、带牛）仍没有重跑（审查意见不一致：E-048 的验收已由单元测试与 zombie-chase-task 满足）；E-041 的 hashedSeed 探测（Q30 获批前用处不大）；本地的 tarball 安装（见上）；需要所有者的检查（同一端口两次开放局域网、全新原版世界里的离线账号、Windows 的日志路径、Claude Desktop 的配置示例）与需要下载专用服务器的检查（白名单、封禁、在线模式、版本不符）。
 - **对世界的影响**：探针账号在世界里停留约 1 分钟，用户的聊天里有它们进出的消息；MCPProbe、MCPProbe2～MCPProbe5 是新名字，存档里多了它们的 playerdata 文件。全量实机测试与情景测试各自在高空搭场地，结束时的清理步骤都是 ok。
 - **文件状态**：F-051 改为 verified（部分）：故意失败已重跑，验收中本地 macOS 的 tarball 安装没有记录；F-053 补上服务器已满与端口没有监听的实机核对；F-048 补上 test-live-world 的新步骤。
+
+### 2026-10-29 M19：服务器已满的说明加上局域网世界（E-028）
+
+- 用户的回答（2026-10-29）：问“把‘服务器已满’的提示改成适合局域网世界的说法吗？”，用户答“改提示”。在这之前，告诉用户每次推送都会跑 macOS（10 倍分钟）与 Windows（2 倍）的 CI 后，用户说“推送”：extra-tools 快进到 3ee13ef 并推送，推送触发 CI Build（运行 40821915614，event push，4 个作业通过）。
+- **旧方案**：server_full 的说明为 “The server is full: wait for a player to leave, or raise max-players in server.properties”。
+- **新方案**：“The server is full: wait for a player to leave. A world opened to LAN takes at most 8 players, the host included; on a dedicated server, raise max-players in server.properties and restart the server”。
+- **原因**：局域网世界没有 server.properties，上限固定 8 人，主机占一个名额（上一条：反汇编 26.1.2 客户端的 IntegratedServer.getMaxPlayers 得 8，实机 ping 为 8，主机加 7 个探针即满）。explainFailure 只拿到主机、端口和用户名，两种世界满员时发来同一个翻译键，分不出是哪一种，所以两种情形都写；没有为此加判断或参数。原版专用服务器只在启动时读 server.properties，所以加上 “and restart the server”。
+- **影响**：只改回复文字：BLUEPRINT F-053 对照表中 server_full 单列一行并写出原文，状态行改写；src/connection-errors.ts；tests/m19-connection.test.ts 的 server_full 一行；README.md 与 README.zh-CN.md 的 Troubleshooting 表（两份用同一句英文）。进入游戏后被踢的 kicked 事件不变：server_full 不在附加说明的种类里，进入游戏后也不会因满员被踢。上一条记下的实机回复是当时的旧文字，保留原样。
+- **检查**：`npm test` 1056 个通过；`npm run lint` 无输出；`tsc --noEmit` 无输出；`git diff --check` 干净。新文字只有单元测试，没有在实机上重跑（2026-10-29 的实机检查走的是同一条路径，只是当时的文字不同）。
+- **文件状态**：F-053 仍为 verified，状态行注明新文字只有单元测试。

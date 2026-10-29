@@ -193,7 +193,7 @@ API key 只从环境变量 `OPENROUTER_API_KEY` 读取，不要把它写进仓�
 | `<name> is not on the whitelist: run /whitelist add <name> on the server` | `multiplayer.disconnect.not_whitelisted` | |
 | `<name> is banned from this server: run /pardon <name> on the server`；封禁写了原因时，“server” 后面多一段 `(reason: …)` | `multiplayer.disconnect.banned`、`multiplayer.disconnect.banned.reason` | |
 | `The IP address of this computer is banned from this server: run /pardon-ip <address> on the server` | `multiplayer.disconnect.ip_banned` | |
-| `The server is full: wait for a player to leave, or raise max-players in server.properties` | `multiplayer.disconnect.server_full` | |
+| `The server is full: wait for a player to leave. A world opened to LAN takes at most 8 players, the host included; on a dedicated server, raise max-players in server.properties and restart the server` | `multiplayer.disconnect.server_full` | |
 
 服务器发来的是纯文字而不是翻译键时，说明相同，括号里是它的原文。其他原因按原样给出，用服务器或系统自己的文字，有错误代码时附上代码。
 

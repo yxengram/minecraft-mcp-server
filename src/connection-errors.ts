@@ -49,7 +49,7 @@ const EXPLAIN: Record<FailureKind, Explain> = {
   banned: ({ username }, [reason]) => `${username} is banned from this server${reason ? ` (reason: ${reason})` : ''}: run /pardon ${username} on the server`,
   ip_banned: () => 'The IP address of this computer is banned from this server: run /pardon-ip <address> on the server',
   not_whitelisted: ({ username }) => `${username} is not on the whitelist: run /whitelist add ${username} on the server`,
-  server_full: () => 'The server is full: wait for a player to leave, or raise max-players in server.properties',
+  server_full: () => 'The server is full: wait for a player to leave. A world opened to LAN takes at most 8 players, the host included; on a dedicated server, raise max-players in server.properties and restart the server',
   kicked: () => 'An operator kicked the bot',
 };
 
