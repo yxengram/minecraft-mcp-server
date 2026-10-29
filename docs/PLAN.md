@@ -1575,3 +1575,10 @@
 - **实施时的补充**（已写入 BLUEPRINT E-033）：切块长度按 mineflayer 的 CHAT_LENGTH_LIMIT，1.11 之前的服务器是 100 字符，26.1.2 是 256；tests/chat-tools.test.ts 中断言工具说明的一处改为关闭时的说明。H 节补上“MCPB 设置项里的 --allow-commands 开关（要另行批准）”。
 - **检查**：`npm test` 1251 个通过（新增 47 个，改了 1 个已有断言：工具说明）；`npm run lint`、`tsc --noEmit`、`git diff --check` 无输出。`npm run build` 后 `npm run test:smoke` 13 项全部 PASS；`npm run test:live -- 63320`（不带开关，只读）通过，两条拒绝检查通过；`npm run test:live:world -- 63320 --allow-world-changes` 无 key、有 key 各一轮 39 步全部 ok，覆盖 66 个工具中的 66 个；`npm run test:scenarios -- 63320 --allow-world-changes`（有 key，1 轮，三种配置）：instinct 配置 12 个情景全部通过（包括 creeper-ambush 压力测试，8.0 格），llm-only 与 no-key 两种对照配置照旧只通过 zombie-wave、lava-shore、chat-triage，退出码 0。
 - **文件状态**：F-048 仍为 verified（部分），加上 E-033 的用例；E-035 的用例随第 13 步加入。
+
+### 2026-10-30 M19 第 12b 步：E-034 去掉公开问候，可选 --greeting（Q23）
+
+- **实现**（多代理工作流：一个实现；契约、测试、安全三个角度各一个审查；一个修正。审查提出 2 条，都是文档的说法，由主会话写入 BLUEPRINT）：`src/bot-connection.ts` 不再在进入世界时说 “LLM-powered bot ready to receive instructions!”；只有给了 `--greeting` 时，在原来的位置（每个实例第一次出生时，重连后再说一次，复活不说）发送这句话。`src/config.ts` 新增 `--greeting <text>`：空、超过 256 个字符、含换行或控制字符（包括 C1、U+2028、U+2029）、以 / 开头时，启动失败并以 1 退出，stderr 一行 “Invalid --greeting: expected one line of plain chat (not a command), at most 256 characters”，不重复问候的原文；`--no-greeting` 与重复的 `--greeting` 也拒绝。README 中英文的选项表与以 1 退出的说明；CHANGELOG 加两处。scripts/ 中没有依赖旧问候的地方。
+- **实施时补充的说法**（已写入 BLUEPRINT）：E-034 的错误前缀是 COMMAND_NAME（与 E-023 相同）。H 节记下：--greeting 的 256 字符上限假定 mineflayer 按 256 字符切段，在 1.8～1.10.2 的服务器上（100 字符）第 100 或 200 个字符为 / 的问候会作为命令发出，要不要在发送时再挡一次等所有者决定。
+- **检查**：`npm test` 1267 个通过（新增 16 个，已有用例不改）；`npm run lint`、`tsc --noEmit`、`git diff --check` 无输出。`npm run build` 后 `npm run test:smoke` 13 项全部 PASS；dist 上 `--greeting /op` 与 257 个字符的问候都以 1 退出并给出上面的一行。一次性探测脚本（辅助玩家先进入测试世界，服务器先后两次启动）：不带参数时 bot 进入后 5 秒内没有说话；`--greeting "hello all"` 时恰好一条 “hello all”。`npm run test:live:world -- 63320 --allow-world-changes` 无 key、有 key 各一轮 39 步全部 ok，覆盖 66 个工具中的 66 个。
+- **对世界的影响**：探测时辅助玩家与 bot 进出两次，聊天里有一条 “hello all”。

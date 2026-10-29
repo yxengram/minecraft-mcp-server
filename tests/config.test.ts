@@ -260,3 +260,67 @@ test('E-033: the arguments live-arena passes, --allow-commands included, parse u
   t.is(config.waypointFile, '/tmp/x/waypoints.json');
   t.true(config.allowCommands);
 });
+
+// ---------------------------------------------------------------------------------------------------------------
+// E-034: --greeting <text>, unset by default. bot.chat sends a line that starts with / as a command, each line of a
+// message separately, and a line of more than 256 characters in pieces, so only one line of plain chat passes.
+// ---------------------------------------------------------------------------------------------------------------
+
+const GREETING_ERROR = 'Invalid --greeting: expected one line of plain chat (not a command), at most 256 characters';
+
+test('E-034: greeting is undefined by default', (t) => {
+  t.is(parseConfig([]).greeting, undefined);
+});
+
+test('E-034: --greeting "hello all" parses as given', (t) => {
+  t.is(parseConfig(['--greeting', 'hello all']).greeting, 'hello all');
+});
+
+test('E-034: a greeting of 256 characters is accepted', (t) => {
+  t.is(parseConfig(['--greeting', 'a'.repeat(256)]).greeting, 'a'.repeat(256));
+});
+
+for (const [name, greeting] of [
+  ['a command ("/op x")', '/op x'],
+  ['a command on the second line ("hi\\n/op x")', 'hi\n/op x'],
+  ['257 characters', 'a'.repeat(257)],
+  ['an empty string', '']
+]) {
+  test(`E-034: --greeting with ${name} throws the greeting error`, (t) => {
+    t.is(configError(t, ['--greeting', greeting])?.message, GREETING_ERROR);
+  });
+}
+
+// "One line, no control characters": a carriage return, a tab, DEL and the line separator are refused as well.
+for (const [name, greeting] of [
+  ['a carriage return', 'hi\r/op x'],
+  ['a tab', 'hi\tthere'],
+  ['DEL (U+007F)', 'hi\u007f'],
+  ['a line separator (U+2028)', 'hi\u2028/op x']
+]) {
+  test(`E-034: --greeting with ${name} throws the greeting error`, (t) => {
+    t.is(configError(t, ['--greeting', greeting])?.message, GREETING_ERROR);
+  });
+}
+
+// --no-greeting sets false, as empty as '' (as --no-host is for E-023); a repeated --greeting is an array, which is
+// not one line either.
+test('E-034: --no-greeting and a repeated --greeting throw the greeting error', (t) => {
+  t.is(configError(t, ['--no-greeting'])?.message, GREETING_ERROR);
+  t.is(configError(t, ['--greeting', 'hi', '--greeting', '/op x'])?.message, GREETING_ERROR);
+});
+
+// The error line goes to the client's log; it names the rule, not the text (G6 I4: a pasted key stays out of it).
+test('E-034: the greeting error does not repeat the text', (t) => {
+  const message = configError(t, ['--greeting', 'sk-or-v1-abc\n'])?.message ?? '';
+  t.is(message, GREETING_ERROR);
+  t.false(message.includes('sk-or-v1-abc'), message);
+});
+
+// The greeting is the user's own start option: it needs no --allow-commands, and the two do not affect each other.
+test('E-034: --greeting goes together with the other options', (t) => {
+  const config = parseConfig(['--host', '127.0.0.1', '--port', '63320', '--username', 'MCPWorldTest', '--greeting', 'hello all']);
+  t.is(config.greeting, 'hello all');
+  t.false(config.allowCommands);
+  t.is(parseConfig(['--allow-commands', '--greeting', 'hi']).greeting, 'hi');
+});

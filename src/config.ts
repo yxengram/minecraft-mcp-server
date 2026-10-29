@@ -14,6 +14,11 @@ export interface ServerConfig {
    * option turns it on: it is not part of the policy, so neither set-policy nor chat can change it.
    */
   allowCommands: boolean;
+  /**
+   * What the bot says in chat each time it joins the world (BLUEPRINT E-034); unset, it says nothing. parseConfig lets
+   * through only one line of plain chat of at most 256 characters, so bot.chat sends it as one message, never a command.
+   */
+  greeting?: string;
 }
 
 /** An unknown argument or an invalid value (BLUEPRINT E-023). parseConfig throws it instead of printing or exiting. */
@@ -35,11 +40,18 @@ const BARE_VALUE = 'a value without an option';
 // are written as \uXXXX, so the error stays one line. A repeated --username reaches here as an array, hence String().
 const UNPRINTABLE = /[\p{Cc}\u2028\u2029]/gu;
 
+// bot.chat sends each line of a message separately, and a line that starts with / as a command; it also cuts a line
+// longer than 256 characters (counted as String.length, as the server does) into pieces, and a later piece may start
+// with / too (E-034). Line separators count as line breaks, so the greeting stays one line.
+const MAX_GREETING_LENGTH = 256;
+const LINE_BREAK_OR_CONTROL = /[\p{Cc}\u2028\u2029]/u;
+const GREETING_ERROR = `Invalid --greeting: expected one line of plain chat (not a command), at most ${MAX_GREETING_LENGTH} characters`;
+
 function quoted(value: unknown): string {
   return `"${String(value).replace(UNPRINTABLE, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`)}"`;
 }
 
-function checkArguments(argv: { _: (string | number)[]; host: unknown; port: number; username: unknown }): true {
+function checkArguments(argv: { _: (string | number)[]; host: unknown; port: number; username: unknown; greeting?: unknown }): true {
   // .strict() lets positional arguments after "--" through; they are rejected with yargs's wording, without the values.
   if (argv._.length > 0) {
     throw new Error(`Unknown argument${argv._.length > 1 ? 's' : ''}: ${argv._.map(() => BARE_VALUE).join(', ')}`);
@@ -61,6 +73,16 @@ function checkArguments(argv: { _: (string | number)[]; host: unknown; port: num
     throw new Error(
       `Invalid --username ${quoted(name)}: use at most ${MAX_USERNAME_LENGTH} characters, with no spaces or control characters`
     );
+  }
+  // The error does not repeat the text. --no-greeting (false) is as empty as ''; a repeated --greeting is an array,
+  // which bot.chat would throw on in the spawn handler, before the Autopilot binds.
+  const greeting = argv.greeting;
+  if (
+    greeting !== undefined &&
+    (typeof greeting !== 'string' || greeting === '' || greeting.length > MAX_GREETING_LENGTH ||
+      LINE_BREAK_OR_CONTROL.test(greeting) || greeting.startsWith('/'))
+  ) {
+    throw new Error(GREETING_ERROR);
   }
   return true;
 }
@@ -100,6 +122,10 @@ export function parseConfig(argv: string[] = hideBin(process.argv)): ServerConfi
       type: 'boolean',
       description: 'Let send-chat run server commands such as /give, /fill and /tp (without it: chat and /msg, /tell, /w, /me, /teammsg, /tm only)',
       default: false
+    })
+    .option('greeting', {
+      type: 'string',
+      description: 'Say this in chat each time the bot joins the world (without it: say nothing); one line of plain chat, at most 256 characters, not starting with /'
     })
     .strict()
     .check(checkArguments)

@@ -77,6 +77,8 @@ interface BotConfig {
   host: string;
   port: number;
   username: string;
+  /** Said in chat when an instance first spawns (--greeting, E-034); without it the bot says nothing when it joins. */
+  greeting?: string;
 }
 
 interface ConnectionCallbacks {
@@ -370,7 +372,8 @@ export class BotConnection {
       bot.pathfinder.setMovements(defaultMove);
       installDoorHelper(bot);
 
-      bot.chat('LLM-powered bot ready to receive instructions!');
+      // Once per instance, so again after a reconnect but not on a respawn. No public greeting by default (E-034).
+      if (this.config.greeting) bot.chat(this.config.greeting);
       this.callbacks.onBotReady?.(bot);
       this.callbacks.onLog('info', `Bot connected successfully. Username: ${this.config.username}, Server: ${this.config.host}:${this.config.port}`);
     });

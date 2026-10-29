@@ -158,12 +158,13 @@ Restart the client completely. The bot joins the world once the client starts th
 | `--waypoint-file` | `~/.minecraft-mcp-server/waypoints.json` | Where waypoints are stored (per server host) |
 | `--decision-model` | `perplexity/pplx-decider-v1.2-20261016` | The OpenRouter decision model |
 | `--allow-commands` | off | Let `send-chat` run server commands (`/give`, `/fill`, `/tp` and so on); chat and `/msg`, `/tell`, `/w`, `/me`, `/teammsg`, `/tm` always work |
+| `--greeting` | not set: the bot says nothing when it joins | A line the bot says in chat each time it joins the world (not when it respawns): one line of plain chat, at most 256 characters, not starting with `/` |
 | `--help`, `-h` | — | Print the options and exit |
 | `--version` | — | Print the version and exit |
 
 The API key is read only from the `OPENROUTER_API_KEY` environment variable. Do not put it in any file inside the repository.
 
-The server checks the options when it starts. An unknown option, a `--port` that is not a whole number from 1 to 65535, an empty `--host`, or a `--username` that is empty, longer than 16 characters or contains spaces or control characters makes it write one line to stderr and exit with 1 before it connects. The MCP client then shows the server as failed, and the line is in the client's log for the server (see [Where to look](#where-to-look)). A name that passes but is not 3 to 16 letters, digits or underscores (for example `Bot-1`, `ab` or a name in Chinese) only gets a warning in that log, because some servers refuse such names.
+The server checks the options when it starts. An unknown option, a `--port` that is not a whole number from 1 to 65535, an empty `--host`, a `--username` that is empty, longer than 16 characters or contains spaces or control characters, or a `--greeting` that is empty, longer than 256 characters, contains a line break or control character or starts with `/` makes it write one line to stderr and exit with 1 before it connects. The MCP client then shows the server as failed, and the line is in the client's log for the server (see [Where to look](#where-to-look)). A name that passes but is not 3 to 16 letters, digits or underscores (for example `Bot-1`, `ab` or a name in Chinese) only gets a warning in that log, because some servers refuse such names.
 
 ### 4. Play
 Ask the LLM to do things in Minecraft. A few habits make it much better at the game:
