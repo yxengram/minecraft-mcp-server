@@ -4,7 +4,8 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { setupStdioFiltering } from './stdio-filter.js';
 import { log } from './logger.js';
-import { parseConfig } from './config.js';
+import { ConfigError, parseConfig, usernameWarning, type ServerConfig } from './config.js';
+import { COMMAND_NAME } from './package-info.js';
 import { BotConnection } from './bot-connection.js';
 import { ToolFactory } from './tool-factory.js';
 import { MessageStore } from './message-store.js';
@@ -32,8 +33,6 @@ import { registerTaskTools } from './tools/task-tools.js';
 import { registerPolicyTools } from './tools/policy-tools.js';
 import { registerTradeTools } from './tools/trade-tools.js';
 
-setupStdioFiltering();
-
 process.on('unhandledRejection', (reason) => {
   log('error', `Unhandled rejection: ${reason}`);
 });
@@ -43,7 +42,22 @@ process.on('uncaughtException', (error) => {
 });
 
 async function main() {
-  const config = parseConfig();
+  // Parsed before setupStdioFiltering, which would drop the --help and --version text that yargs prints.
+  let config: ServerConfig;
+  try {
+    config = parseConfig();
+  } catch (error) {
+    if (!(error instanceof ConfigError)) throw error;
+    // Nothing is running yet (no connection, timer or transport), so the process ends by itself once stderr is written;
+    // process.exit could cut that line short on a pipe. E-042: with --check, the same line exits with 2 instead.
+    process.stderr.write(`${COMMAND_NAME}: ${error.message}; run with --help for the options\n`);
+    process.exitCode = 1;
+    return;
+  }
+  setupStdioFiltering();
+  const warning = usernameWarning(config.username);
+  if (warning) log('warn', warning);
+
   const messageStore = new MessageStore();
   const eventStore = new EventStore();
   const waypointStore = new WaypointStore(config.waypointFile ?? defaultWaypointFile(), config.host);

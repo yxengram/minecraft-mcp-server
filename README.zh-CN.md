@@ -155,8 +155,12 @@ npm run build
 | `--username` | `LLMBot` | 机器人的名字 |
 | `--waypoint-file` | `~/.minecraft-mcp-server/waypoints.json` | 路点的保存位置（按服务器地址分开） |
 | `--decision-model` | `perplexity/pplx-decider-v1.2-20261016` | OpenRouter 上的决策模型 |
+| `--help`、`-h` | — | 显示选项后退出 |
+| `--version` | — | 显示版本号后退出 |
 
 API key 只从环境变量 `OPENROUTER_API_KEY` 读取，不要把它写进仓库里的任何文件。
+
+服务器启动时检查选项。未知的选项、不是 1～65535 之间整数的 `--port`、空的 `--host`，或者为空、超过 16 个字符、含空格或控制字符的 `--username`，都会让服务器在 stderr 写一行错误，并在连接之前以 1 退出。这时 MCP 客户端显示这个服务器启动失败，这一行在客户端为它保存的日志里（见[去哪里看](#去哪里看)）。通过了检查、但不是 3～16 个字母、数字或下划线的名字（例如 `Bot-1`、`ab` 或中文名字）只在这份日志里得到一条警告，因为有些服务器会拒绝这样的名字。
 
 ### 4. 开始玩
 让 LLM 在 Minecraft 里做事。几个习惯能让它玩得好得多：
@@ -176,7 +180,7 @@ API key 只从环境变量 `OPENROUTER_API_KEY` 读取，不要把它写进仓�
 ### 去哪里看
 - **工具回复。**机器人断开时调用任何工具，都会先重新连接；连不上时，回复会说明原因。
 - **`get-events`。**机器人进入游戏之后被踢出，会记为一个 `kicked` 事件。
-- **MCP 客户端的日志。**服务器把日志写到 stderr，格式是 `<时间> [minecraft] [mcp-server] [<级别>] <内容>`，例如 `Bot error [ECONNREFUSED]: …` 或 `Bot was kicked from server: …`。Claude Desktop 把它保存在 `~/Library/Logs/Claude/mcp-server-<key>.log`（macOS）和 `%APPDATA%\Claude\logs\mcp-server-<key>.log`（Windows），其中 `<key>` 是这个服务器在 `mcpServers` 下的键名（上面的例子里是 `minecraft`）。
+- **MCP 客户端的日志。**服务器把日志写到 stderr，格式是 `<时间> [minecraft] [mcp-server] [<级别>] <内容>`，例如 `Bot error [ECONNREFUSED]: …` 或 `Bot was kicked from server: …`。Claude Desktop 把它保存在 `~/Library/Logs/Claude/mcp-server-<key>.log`（macOS）和 `%APPDATA%\Claude\logs\mcp-server-<key>.log`（Windows），其中 `<key>` 是这个服务器在 `mcpServers` 下的键名（上面的例子里是 `minecraft`）。选项有误时，服务器改为只写一行不带时间的 `<命令名>: <错误>; run with --help for the options`，然后以 1 退出。
 
 ### 机器人连不上
 回复以 `Cannot connect to Minecraft server at <host>:<port>:` 开头，接着说明出了什么问题、该怎么做，括号里是依据的错误代码或消息。回复是英文的，下表原样引用；`<host>`、`<port>`、`<name>` 分别代表你的 `--host`、`--port`、`--username`。

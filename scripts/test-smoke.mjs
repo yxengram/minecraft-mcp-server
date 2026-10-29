@@ -103,14 +103,89 @@ async function closedPort() {
   return port;
 }
 
-// TODO(E-023): the command-line checks of F-051 (a) come with E-023. Until then --help and --version print nothing
-// (setupStdioFiltering drops yargs's output) and invalid or unknown arguments start the server anyway. Each runs with
-// node:child_process and env: getDefaultEnvironment():
-// - --help exits with 0, and stdout contains "--port" and "OPENROUTER_API_KEY";
-// - --version prints the version of package.json;
-// - --port 0 exits with 1, and stderr contains "Invalid --port";
-// - with a port listening on 127.0.0.1, `--host 127.0.0.1 --port <it> --hots x` exits with 1 within 2 s, stderr
-//   contains "Unknown argument", and the listening port receives no connection.
+// Runs the entry once with node:child_process and only the SDK's default environment; resolves when it exits, or with
+// timedOut after `ms` (the child is then killed). stdin stays an open pipe, as an MCP client leaves it, so a server that
+// waits on stdin instead of exiting runs into the deadline.
+function runCli(entry, args, label, ms) {
+  const child = spawn(process.execPath, [entry, ...args], {
+    env: getDefaultEnvironment(),
+    stdio: ['pipe', 'pipe', 'pipe']
+  });
+  child.stdin.on('error', () => {});
+  let stdout = '';
+  let stderr = '';
+  child.stdout.setEncoding('utf8');
+  child.stdout.on('data', chunk => { stdout += chunk; });
+  captureStderr(label, child.stderr);
+  child.stderr.on('data', chunk => { stderr += chunk; });
+  return new Promise(resolve => {
+    const timer = setTimeout(() => {
+      child.kill('SIGKILL');
+      resolve({ timedOut: true, code: null, stdout, stderr });
+    }, ms);
+    // 'close' rather than 'exit': by then stdout and stderr have been read to the end.
+    child.once('close', code => {
+      clearTimeout(timer);
+      resolve({ timedOut: false, code, stdout, stderr });
+    });
+  });
+}
+
+function exitDetail(run) {
+  return run.timedOut ? 'still running at the deadline' : `exit code ${run.code}`;
+}
+
+// The command line (E-023): --help and --version print and exit with 0; a wrong argument stops the server with one
+// stderr line and exit code 1 before it connects anywhere.
+async function checkCommandLine(entry, pkg) {
+  const command = pkg.name.replace(/^@[^/]+\//, '');
+
+  const help = await runCli(entry, ['--help'], 'the --help run', 15000);
+  const helpMissing = ['--port', 'OPENROUTER_API_KEY'].filter(text => !help.stdout.includes(text));
+  report(
+    help.code === 0 && helpMissing.length === 0,
+    '--help exits with 0 and lists --port and OPENROUTER_API_KEY',
+    help.code === 0 ? (helpMissing.length > 0 ? `stdout lacks ${helpMissing.join(' and ')}` : undefined) : exitDetail(help)
+  );
+
+  const version = await runCli(entry, ['--version'], 'the --version run', 15000);
+  report(
+    version.code === 0 && version.stdout.trim() === pkg.version,
+    '--version prints the version of package.json',
+    `${exitDetail(version)}, printed ${JSON.stringify(version.stdout.trim())}, package.json has ${pkg.version}`
+  );
+
+  const badPort = await runCli(entry, ['--port', '0'], 'the --port 0 run', 15000);
+  const badPortLines = badPort.stderr.split(/\r?\n/).filter(line => line !== '');
+  report(
+    badPort.code === 1 && badPort.stderr.includes('Invalid --port') &&
+      badPortLines.length === 1 && badPortLines[0].startsWith(`${command}: `),
+    `--port 0 exits with 1 and one stderr line "${command}: Invalid --port ..."`,
+    `${exitDetail(badPort)}, ${badPortLines.length} stderr line(s): ${badPortLines.slice(0, 2).join(' | ')}`
+  );
+
+  // A listening port shows that an unknown argument stops the server before the bot connects.
+  let connections = 0;
+  const listener = createServer(socket => {
+    connections += 1;
+    socket.destroy();
+  });
+  await new Promise((resolve, reject) => {
+    listener.once('error', reject);
+    listener.listen(0, '127.0.0.1', resolve);
+  });
+  try {
+    const { port } = listener.address();
+    const unknown = await runCli(entry, ['--host', '127.0.0.1', '--port', String(port), '--hots', 'x'], 'the --hots x run', 2000);
+    report(
+      unknown.code === 1 && unknown.stderr.includes('Unknown argument') && connections === 0,
+      '--hots x exits with 1 within 2 s, says "Unknown argument" and never connects',
+      `${exitDetail(unknown)}, ${connections} connection(s), stderr: ${unknown.stderr.trim().split(/\r?\n/)[0] ?? ''}`
+    );
+  } finally {
+    await new Promise(resolve => listener.close(resolve));
+  }
+}
 
 async function checkMcp(entry, args, pkg) {
   const client = new Client(CLIENT_INFO);
@@ -264,6 +339,7 @@ async function smoke(entryArg) {
     return;
   }
 
+  await checkCommandLine(entry, pkg);
   const port = await closedPort();
   const args = ['--host', '127.0.0.1', '--port', String(port), '--username', 'SmokeTest'];
   await checkMcp(entry, args, pkg);

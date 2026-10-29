@@ -3,8 +3,11 @@
 // number that a dependency update would have to edit by hand.
 import test from 'ava';
 import fs from 'node:fs';
+import { COMMAND_NAME, PACKAGE_NAME, PACKAGE_VERSION } from '../src/package-info.js';
 
 interface PackageJson {
+  name?: string;
+  version?: string;
   dependencies?: Record<string, string>;
 }
 
@@ -36,3 +39,19 @@ for (const name of PINNED) {
     t.is(declared, locked, `${name} in package.json differs from node_modules/${name} in package-lock.json`);
   });
 }
+
+// ---------------------------------------------------------------------------------------------------------------
+// F-049 (created by E-023): src/package-info.ts is the package's only source of its name and version, which the
+// command line (scriptName, --version and the error line) shows. The command name is the name without "@scope/".
+// ---------------------------------------------------------------------------------------------------------------
+
+test('F-049: PACKAGE_NAME, PACKAGE_VERSION and COMMAND_NAME follow package.json', (t) => {
+  const { name = '', version = '' } = readJson<PackageJson>('package.json');
+  t.truthy(name, 'package.json has no name');
+  t.truthy(version, 'package.json has no version');
+  t.is(PACKAGE_NAME, name);
+  t.is(PACKAGE_VERSION, version);
+  const unscoped = name.startsWith('@') ? name.slice(name.indexOf('/') + 1) : name;
+  t.is(COMMAND_NAME, unscoped);
+  t.false(COMMAND_NAME.includes('/'), `COMMAND_NAME "${COMMAND_NAME}" still has a scope`);
+});

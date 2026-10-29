@@ -1516,3 +1516,11 @@
 - **检查**：`npm test` 1089 个通过（原 1056 个，新增 33 个，改了 2 个已有用例：按 type 选中玩家的回复；out of reach 的被驯服的狼只断言不出手）；`npm run lint`、`tsc --noEmit`、`git diff --check` 无输出；`npm run build` 后 `npm run test:live:world -- 63320 --allow-world-changes` 无 key、有 key 各一轮：37 步全部 ok（新增一步 “safety: attack-entity never hits a tamed wolf (M19 E-022)”：召唤一只 Owner 为辅助玩家的狼，按 id 与按 type wolf 都被拒绝，狼仍在），覆盖 66 个工具中的 66 个。
 - **对世界的影响**：新步骤在场地旁召唤一只不动的狼，结束时用 /kill 清掉 16 格内的狼。
 - **文件状态**：F-048 仍为 verified（部分），E-022 的用例已齐；E-033、E-035 的用例随各步加入。
+
+### 2026-10-30 M19 第 3 步：E-023 命令行（Q20）
+
+- **实现**（多代理工作流：一个实现；契约、测试、安全三个角度各一个审查；一个修正。审查提出 7 条，全部采纳）：新文件 F-049 `src/package-info.ts`（PACKAGE_NAME、PACKAGE_VERSION、COMMAND_NAME，从包根目录的 package.json 读一次）。`src/config.ts`：--help、--version（取自 F-049）、strict 模式，契约写的几种错误抛出 ConfigError（不打印、不退出），宽松的用户名规则只给 usernameWarning。`src/main.ts`：解析失败时 stderr 写一行 “<命令名>: <错误>; run with --help for the options” 并以 1 退出；stdio 过滤改到解析成功之后。README 中英文的选项表与说明。`scripts/test-smoke.mjs` 的 TODO(E-023) 换成 F-051 (a) 的命令行检查。
+- **实施时的补充**（契约没有写，审查后加入，已记入 BLUEPRINT E-023）：错误行里不以 “-” 开头的值写成 “a value without an option”，免得误放在参数里的 key 写进客户端日志；`--no-host`、`--no-username` 按空值处理；错误与警告里的用户名原样加引号，控制字符写成 \uXXXX。
+- **待办**（没有改）：重复的选项（两次 --host 时值为数组，服务器照常启动）；点号写法（--host.a b）；`--no-waypoint-file`、`--no-decision-model` 使值为 false 并传给 WaypointStore 与 Autopilot。改这些要新的错误文字，留给所有者决定。
+- **检查**：`npm test` 1120 个通过（新增 31 个，已有用例不改）；`npm run lint`、`tsc --noEmit`、`git diff --check` 无输出。`npm run build` 后直接运行 dist：--help、-h 以 0 退出，stdout 19 行；--version 打印 2.0.4；--port 0、--hots x、--username "Bad Name" 都以 1 退出，stderr 只有一行，以 minecraft-mcp-server 开头，约 0.35 秒；把伪造的 key 当作参数时 stderr 为 “Unknown argument: a value without an option”。`npm run test:smoke` 13 项全部 PASS（含新的 4 项命令行检查）。`npm run test:live:world -- 63320 --allow-world-changes` 无 key 一轮：37 步全部 ok，覆盖 66 个工具中的 66 个。
+- **文件状态**：F-049 改为 verified（部分）：serverInfo 改用它要等 E-024。
