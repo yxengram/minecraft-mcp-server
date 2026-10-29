@@ -37,7 +37,8 @@ export interface Lease extends HolderInfo {
 
 export type AcquireResult =
   | { ok: true; lease: Lease; preempted: HolderInfo[]; waitedMs: number; waitedFor?: HolderInfo }
-  | { ok: false; busy: HolderInfo; waitedMs: number };
+  // aborted: the caller's signal ended the wait (E-027); `busy` is who held the body then.
+  | { ok: false; busy: HolderInfo; waitedMs: number; aborted?: true };
 
 const DEFAULT_MANUAL_WAIT_MS = 10000;
 
@@ -80,6 +81,8 @@ interface Waiter {
   blockedBy: HolderInfo | null;
   resolve: (result: AcquireResult) => void;
   timer: ReturnType<typeof setTimeout>;
+  // Removes the abort listener of the caller's signal, if any.
+  unlisten: () => void;
 }
 
 export interface ArbiterOptions {
@@ -129,9 +132,20 @@ export class ActionArbiter {
     return this.grant(request, Date.now()).lease;
   }
 
-  /** Take the body, preempting lower priorities and waiting up to `waitMs` behind equal or higher ones. */
-  acquire(request: LeaseRequest, waitMs = request.priority === PRIORITY.MANUAL ? DEFAULT_MANUAL_WAIT_MS : 0): Promise<AcquireResult> {
+  /**
+   * Take the body, preempting lower priorities and waiting up to `waitMs` behind equal or higher ones. Once `signal` is
+   * aborted the request leaves the queue and never gets the lease (E-027: a manual command the MCP client cancelled).
+   */
+  acquire(
+    request: LeaseRequest,
+    waitMs = request.priority === PRIORITY.MANUAL ? DEFAULT_MANUAL_WAIT_MS : 0,
+    signal?: AbortSignal
+  ): Promise<AcquireResult> {
     const started = Date.now();
+    const busy = () => this.holder() ?? { holder: 'unknown', priority: request.priority };
+    if (signal?.aborted) {
+      return Promise.resolve({ ok: false, busy: busy(), waitedMs: 0, aborted: true });
+    }
     if (this.canTake(request.priority)) {
       return Promise.resolve(this.grant(request, started));
     }
@@ -139,16 +153,27 @@ export class ActionArbiter {
       return Promise.resolve({ ok: false, busy: this.holder()!, waitedMs: 0 });
     }
     return new Promise(resolve => {
+      const leave = () => {
+        this.waiters = this.waiters.filter(w => w !== waiter);
+        clearTimeout(waiter.timer);
+        waiter.unlisten();
+      };
+      const onAbort = () => {
+        leave();
+        resolve({ ok: false, busy: busy(), waitedMs: Date.now() - started, aborted: true });
+      };
       const waiter: Waiter = {
         request,
         started,
         blockedBy: this.holder(),
         resolve,
         timer: setTimeout(() => {
-          this.waiters = this.waiters.filter(w => w !== waiter);
-          resolve({ ok: false, busy: this.holder() ?? { holder: 'unknown', priority: request.priority }, waitedMs: Date.now() - started });
-        }, waitMs)
+          leave();
+          resolve({ ok: false, busy: busy(), waitedMs: Date.now() - started });
+        }, waitMs),
+        unlisten: () => signal?.removeEventListener('abort', onAbort)
       };
+      signal?.addEventListener('abort', onAbort, { once: true });
       this.waiters.push(waiter);
     });
   }
@@ -219,6 +244,7 @@ export class ActionArbiter {
     if (bestWaiter && (!topSuspended || bestWaiter.request.priority >= topSuspended.priority)) {
       this.waiters = this.waiters.filter(waiter => waiter !== bestWaiter);
       clearTimeout(bestWaiter.timer);
+      bestWaiter.unlisten();
       bestWaiter.resolve({ ...this.grant(bestWaiter.request, bestWaiter.started), waitedFor: bestWaiter.blockedBy ?? undefined });
       return;
     }

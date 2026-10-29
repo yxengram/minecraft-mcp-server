@@ -4,13 +4,14 @@ import pathfinderPkg from 'mineflayer-pathfinder';
 const { goals } = pathfinderPkg;
 import { Vec3 } from 'vec3';
 import minecraftData from 'minecraft-data';
-import { ToolFactory } from '../tool-factory.js';
+import { ToolFactory, type ToolContext } from '../tool-factory.js';
 import { log } from '../logger.js';
 import { coerceCoordinates } from './coordinate-utils.js';
 import { blockDetails, faceName } from './block-details.js';
 import { describeEntity, entityDetails, entityKind } from './entity-utils.js';
 import { compassDirection } from './terrain-utils.js';
 import { approachToPlace, digSeconds, equipBestTool, missingHarvestTools, overlapsBot } from './block-utils.js';
+import { gotoWithTimeout } from './movement-utils.js';
 
 type FaceDirection = 'up' | 'down' | 'north' | 'south' | 'east' | 'west';
 const MAX_FIND_BLOCKS_COUNT = 256;
@@ -30,7 +31,7 @@ export function registerBlockTools(factory: ToolFactory, getBot: () => mineflaye
       z: z.coerce.number().describe("Z coordinate"),
       faceDirection: z.enum(['up', 'down', 'north', 'south', 'east', 'west']).optional().describe("Direction to place against (default: 'down')")
     },
-    async ({ x, y, z, faceDirection = 'down' }: { x: number, y: number, z: number, faceDirection?: FaceDirection }) => {
+    async ({ x, y, z, faceDirection = 'down' }: { x: number, y: number, z: number, faceDirection?: FaceDirection }, ctx: ToolContext) => {
       ({ x, y, z } = coerceCoordinates(x, y, z));
 
       const bot = getBot();
@@ -69,14 +70,17 @@ export function registerBlockTools(factory: ToolFactory, getBot: () => mineflaye
       const intended = bot.heldItem?.name ?? null;
       let lastError = '';
       for (const face of possibleFaces) {
+        // After an abort the next face is not tried: the tool factory stopped the walk to this one (E-027).
+        ctx.throwIfAborted();
         const referencePos = placePos.plus(face.vector);
         const referenceBlock = bot.blockAt(referencePos);
 
         if (referenceBlock && referenceBlock.name !== 'air') {
           try {
             // A spot within reach that can see a face to click, never inside the target (E-013).
-            await approachToPlace(bot, placePos, referenceBlock);
+            await approachToPlace(bot, placePos, referenceBlock, ctx.signal);
           } catch (moveError) {
+            ctx.throwIfAborted();
             lastError = `could not get to a spot to place from: ${moveError instanceof Error ? moveError.message : moveError}`;
             continue;
           }
@@ -93,9 +97,11 @@ export function registerBlockTools(factory: ToolFactory, getBot: () => mineflaye
           }
 
           try {
+            ctx.throwIfAborted();
             await bot.placeBlock(referenceBlock, face.vector.scaled(-1));
             return factory.createResponse(`Placed block at (${x}, ${y}, ${z}) using ${face.direction} face`);
           } catch (placeError) {
+            ctx.throwIfAborted();
             log('warn', `Failed to place using ${face.direction} face: ${placeError}`);
             lastError = placeError instanceof Error ? placeError.message : String(placeError);
             continue;
@@ -115,7 +121,7 @@ export function registerBlockTools(factory: ToolFactory, getBot: () => mineflaye
       y: z.coerce.number().describe("Y coordinate"),
       z: z.coerce.number().describe("Z coordinate"),
     },
-    async ({ x, y, z }) => {
+    async ({ x, y, z }, ctx: ToolContext) => {
       ({ x, y, z } = coerceCoordinates(x, y, z));
 
       const bot = getBot();
@@ -137,12 +143,15 @@ export function registerBlockTools(factory: ToolFactory, getBot: () => mineflaye
 
       if (!bot.canDigBlock(block) || !bot.canSeeBlock(block)) {
         const goal = new goals.GoalNear(x, y, z, 2);
-        await bot.pathfinder.goto(goal);
+        await gotoWithTimeout(bot, goal, undefined, ctx.signal);
       }
 
+      ctx.throwIfAborted();
       await equipBestTool(bot, block);
       const tool = bot.heldItem?.name ?? 'bare hand';
       const started = Date.now();
+      // A dig that has started is ended by the tool factory's bot.stopDigging() (E-027).
+      ctx.throwIfAborted();
       await bot.dig(block);
       return factory.createResponse(`Dug ${block.name} at (${x}, ${y}, ${z}) with ${tool} (${((Date.now() - started) / 1000).toFixed(1)} s)`);
     }

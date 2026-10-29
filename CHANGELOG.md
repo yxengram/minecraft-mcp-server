@@ -36,6 +36,7 @@ The first release of this fork. It builds on upstream version 2.0.4 (upstream `m
 - mineflayer 4.39.0, mineflayer-pathfinder 2.4.5 and minecraft-data 3.117.0 are pinned to exact versions, and the package carries `npm-shrinkwrap.json`, so an install from npm gets the dependency tree that was tested.
 - The package holds only the built JavaScript, `package.json`, `npm-shrinkwrap.json`, the READMEs, the license and this changelog. The MCP server reports the version from `package.json`.
 - The link at the end of a connection error points to Getting started in this fork's README.
+- Commands that drive the bot's body (moving, digging, placing, attacking, using items and the like) stop after about 50 seconds, before an MCP client's usual 60-second request timeout, and the reply says where the bot stopped. For now the region tools also stop at about 50 seconds, although their descriptions still give a default of 120 seconds. Tools that do not drive the body (queries, `wait-for-event`), `collect-block` and `lead-animal` are not stopped at 50 seconds.
 
 ### Fixed
 
@@ -45,3 +46,4 @@ The first release of this fork. It builds on upstream version 2.0.4 (upstream `m
 - `smelt-item` takes out all of the furnace's output, and first takes back a different fuel left in the furnace.
 - `dig-block` picks a suitable tool and waits long enough for blocks that need an iron pickaxe or better.
 - Body commands stop and say so when the bot dies.
+- A body command that the MCP client cancels stops the bot at once; before, the bot kept walking toward the old target. The client drops the reply to a cancelled request, so a `command` event says what was cancelled and where the bot stopped. A cancelled `collect-block` or `lead-animal` cancels its task.

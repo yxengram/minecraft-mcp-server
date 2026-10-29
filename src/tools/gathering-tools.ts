@@ -1,12 +1,40 @@
 import { z } from "zod";
-import { ToolFactory } from '../tool-factory.js';
+import { ToolFactory, type ToolContext } from '../tool-factory.js';
 import type { Autopilot } from '../autopilot/autopilot.js';
+import type { TaskRecord } from '../autopilot/task-manager.js';
 import { DEFAULT_GATHER_TIMEOUT_MS, MAX_GATHER_COUNT } from '../autopilot/behaviors/gather.js';
 import { DEFAULT_LEAD_TIMEOUT_MS, MAX_LEAD_TIMEOUT_MS } from '../autopilot/behaviors/lead.js';
 import { watchPathEdits } from './movement-utils.js';
 
 // Extra time on top of timeoutMs before collect-block gives up waiting, e.g. when its task never got to run.
 const WAIT_GRACE_MS = 5000;
+
+/**
+ * Waits for the task the tool started, at most timeoutMs + WAIT_GRACE_MS, and cancels it when the call is aborted
+ * (E-027): these two tools have no watchdog, but a call the MCP client cancelled must not leave its task running. The
+ * reason is the abort's ('cancelled by the MCP client'). Null when the wait ran out first.
+ */
+async function waitForTask(tasks: Autopilot['tasks'], id: string, timeoutMs: number, signal: AbortSignal): Promise<TaskRecord | null> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let onAbort: (() => void) | undefined;
+  const gaveUp = new Promise<null>(resolve => { timer = setTimeout(() => resolve(null), timeoutMs + WAIT_GRACE_MS); });
+  const aborted = new Promise<TaskRecord>(resolve => {
+    onAbort = () => {
+      const reason: unknown = signal.reason;
+      void tasks.cancel(id, reason instanceof Error ? reason.message : 'cancelled by the MCP client')
+        .then(() => tasks.waitForEnd(id))
+        .then(resolve, () => {});
+    };
+    if (signal.aborted) onAbort();
+    else signal.addEventListener('abort', onAbort, { once: true });
+  });
+  try {
+    return await Promise.race([tasks.waitForEnd(id), gaveUp, aborted]);
+  } finally {
+    clearTimeout(timer);
+    signal.removeEventListener('abort', onAbort!);
+  }
+}
 
 // collect-block runs a gather task and waits for it (BLUEPRINT E-004); its arguments and replies stay the same. It does
 // not report the pathfinder's edits as lead-animal does (E-049): the blocks a gather digs are the task itself.
@@ -20,7 +48,7 @@ export function registerGatheringTools(factory: ToolFactory, getAutopilot: () =>
       maxDistance: z.coerce.number().finite().positive().optional().describe("Maximum search distance (default: 32)"),
       timeoutMs: z.number().int().min(1000).optional().describe(`Stop after this many milliseconds and report progress (default: ${DEFAULT_GATHER_TIMEOUT_MS})`)
     },
-    async ({ blockType, count = 1, maxDistance = 32, timeoutMs = DEFAULT_GATHER_TIMEOUT_MS }) => {
+    async ({ blockType, count = 1, maxDistance = 32, timeoutMs = DEFAULT_GATHER_TIMEOUT_MS }, ctx: ToolContext) => {
       const tasks = getAutopilot().tasks;
       const previous = tasks.currentTask();
       const started = await tasks.start('gather', { blockType, count, maxDistance, timeoutMs }, { source: 'tool' });
@@ -29,9 +57,7 @@ export function registerGatheringTools(factory: ToolFactory, getAutopilot: () =>
       const replaced = previous ? `\nReplaced ${tasks.describe(previous)}: it was cancelled.` : '';
 
       const id = started.task.id;
-      let timer: ReturnType<typeof setTimeout> | undefined;
-      const gaveUp = new Promise<null>(resolve => { timer = setTimeout(() => resolve(null), timeoutMs + WAIT_GRACE_MS); });
-      let final = await Promise.race([tasks.waitForEnd(id), gaveUp]).finally(() => clearTimeout(timer));
+      let final = await waitForTask(tasks, id, timeoutMs, ctx.signal);
       if (!final) {
         // The time limit counts inside the task, which only starts counting once it runs; don't wait forever.
         await tasks.cancel(id, 'time limit reached');
@@ -60,7 +86,7 @@ export function registerGatheringTools(factory: ToolFactory, getAutopilot: () =>
       item: z.string().trim().min(1).optional().describe("Food to lure with (default: one the animal follows)"),
       timeoutMs: z.number().int().min(1000).max(MAX_LEAD_TIMEOUT_MS).optional().describe(`Give up after this many milliseconds (default: ${DEFAULT_LEAD_TIMEOUT_MS})`)
     },
-    async ({ entityId, type, maxDistance, x, y, z, range, method, item, timeoutMs = DEFAULT_LEAD_TIMEOUT_MS }) => {
+    async ({ entityId, type, maxDistance, x, y, z, range, method, item, timeoutMs = DEFAULT_LEAD_TIMEOUT_MS }, ctx: ToolContext) => {
       if (entityId === undefined && type === undefined) return factory.createErrorResponse('Give entityId or type');
       const autopilot = getAutopilot();
       const tasks = autopilot.tasks;
@@ -76,9 +102,7 @@ export function registerGatheringTools(factory: ToolFactory, getAutopilot: () =>
         const replaced = previous ? `\nReplaced ${tasks.describe(previous)}: it was cancelled.` : '';
 
         const id = started.task.id;
-        let timer: ReturnType<typeof setTimeout> | undefined;
-        const gaveUp = new Promise<null>(resolve => { timer = setTimeout(() => resolve(null), timeoutMs + WAIT_GRACE_MS); });
-        let final = await Promise.race([tasks.waitForEnd(id), gaveUp]).finally(() => clearTimeout(timer));
+        let final = await waitForTask(tasks, id, timeoutMs, ctx.signal);
         if (!final) {
           await tasks.cancel(id, 'time limit reached');
           final = await tasks.waitForEnd(id);

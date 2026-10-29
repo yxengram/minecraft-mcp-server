@@ -1,10 +1,11 @@
 import { z } from "zod";
 import mineflayer from 'mineflayer';
 import minecraftData from 'minecraft-data';
-import { ToolFactory } from '../tool-factory.js';
+import { ToolFactory, type ToolContext } from '../tool-factory.js';
 import { log } from '../logger.js';
 import pathfinderPkg from 'mineflayer-pathfinder';
 const { goals } = pathfinderPkg;
+import { gotoWithTimeout } from './movement-utils.js';
 
 const CRAFTING_TABLE_REACH = 4;
 const CRAFT_SETTLE_MS = 250;
@@ -173,13 +174,13 @@ function rawRecipeNeedsTable(recipe: unknown): boolean {
   return Array.isArray(r.ingredients) && r.ingredients.length > 4;
 }
 
-async function moveWithinReach(bot: mineflayer.Bot, table: unknown): Promise<void> {
+async function moveWithinReach(bot: mineflayer.Bot, table: unknown, signal?: AbortSignal): Promise<void> {
   const position = (table as { position?: { x: number; y: number; z: number } }).position;
   const pathfinder = (bot as unknown as { pathfinder?: mineflayer.Bot['pathfinder'] }).pathfinder;
   if (!position || !pathfinder || !bot.entity?.position) return;
   const distance = bot.entity.position.distanceTo(position as never);
   if (distance > CRAFTING_TABLE_REACH) {
-    await pathfinder.goto(new goals.GoalNear(position.x, position.y, position.z, 2));
+    await gotoWithTimeout(bot, new goals.GoalNear(position.x, position.y, position.z, 2), undefined, signal);
   }
 }
 
@@ -456,7 +457,7 @@ export function registerCraftingTools(factory: ToolFactory, getBot: () => minefl
       outputItem: z.string().trim().min(1).describe("Name of the item to craft"),
       amount: z.number().int().min(1).optional().describe("Number of times to craft (default: 1)")
     },
-    async ({ outputItem, amount = 1 }) => {
+    async ({ outputItem, amount = 1 }, ctx: ToolContext) => {
       const outputQuery = normalizeItemName(outputItem);
 
       const bot = getBot();
@@ -508,15 +509,19 @@ export function registerCraftingTools(factory: ToolFactory, getBot: () => minefl
           }
 
           for (let tries = 0; tries < CRAFT_TRIES && !craftedThisAttempt; tries++) {
+            // After an abort no further craft or retry starts (E-027).
+            ctx.throwIfAborted();
             const before = countInInventory(bot, candidate.resultName);
             try {
               if (candidate.craftingTable) {
-                await moveWithinReach(bot, candidate.craftingTable);
+                await moveWithinReach(bot, candidate.craftingTable, ctx.signal);
+                ctx.throwIfAborted();
                 await bot.craft(candidate.recipe as Parameters<typeof bot.craft>[0], 1, candidate.craftingTable as Parameters<typeof bot.craft>[2]);
               } else {
                 await bot.craft(candidate.recipe as Parameters<typeof bot.craft>[0], 1);
               }
               await settleCraftingGrid(bot);
+              ctx.throwIfAborted();
               if (countInInventory(bot, candidate.resultName) <= before) await sleep(CRAFT_SYNC_WAIT_MS);
               if (countInInventory(bot, candidate.resultName) <= before) {
                 throw new Error(`crafting did not add any ${candidate.resultName} to the inventory`);
@@ -525,6 +530,8 @@ export function registerCraftingTools(factory: ToolFactory, getBot: () => minefl
               craftedThisAttempt = true;
               log('info', `Crafted ${candidate.resultName}`);
             } catch (err) {
+              // The tool factory's stop makes the walk to the table fail with the pathfinder's own error.
+              ctx.throwIfAborted();
               lastError = err instanceof Error ? err.message : String(err);
               log('warn', `Failed to craft ${outputItem}: ${lastError}`);
               await settleCraftingGrid(bot);

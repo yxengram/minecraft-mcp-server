@@ -1,8 +1,9 @@
 import { z } from "zod";
 import mineflayer from 'mineflayer';
 import { Vec3 } from 'vec3';
-import { ToolFactory } from '../tool-factory.js';
+import { ToolFactory, type ToolContext } from '../tool-factory.js';
 import { coerceCoordinates } from './coordinate-utils.js';
+import { throwIfAborted } from './movement-utils.js';
 
 function createCancellableFlightOperation(
   bot: mineflayer.Bot,
@@ -41,7 +42,7 @@ export function registerFlightTools(factory: ToolFactory, getBot: () => mineflay
       y: z.coerce.number().describe("Y coordinate"),
       z: z.coerce.number().describe("Z coordinate")
     },
-    async ({ x, y, z }) => {
+    async ({ x, y, z }, ctx: ToolContext) => {
       ({ x, y, z } = coerceCoordinates(x, y, z));
 
       const bot = getBot();
@@ -58,12 +59,17 @@ export function registerFlightTools(factory: ToolFactory, getBot: () => mineflay
           controller.abort();
         }
       }, FLIGHT_TIMEOUT_MS);
+      // The call's abort (E-027) ends the flight the same way as the time limit, but is not reported as a timeout.
+      const onAbort = () => controller.abort();
+      ctx.signal.addEventListener('abort', onAbort, { once: true });
 
       try {
+        throwIfAborted(ctx.signal);
         const destination = new Vec3(x, y, z);
         await createCancellableFlightOperation(bot, destination, controller);
         return factory.createResponse(`Successfully flew to position (${x}, ${y}, ${z}).`);
       } catch (error) {
+        throwIfAborted(ctx.signal);
         if (controller.signal.aborted) {
           const currentPosAfterTimeout = bot.entity.position;
           return factory.createErrorResponse(
@@ -74,6 +80,7 @@ export function registerFlightTools(factory: ToolFactory, getBot: () => mineflay
         throw error;
       } finally {
         clearTimeout(timeoutId);
+        ctx.signal.removeEventListener('abort', onAbort);
         bot.creative.stopFlying();
       }
     }

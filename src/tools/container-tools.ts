@@ -3,9 +3,10 @@ import mineflayer from 'mineflayer';
 import pathfinderPkg from 'mineflayer-pathfinder';
 const { goals } = pathfinderPkg;
 import { Vec3 } from 'vec3';
-import { ToolFactory } from '../tool-factory.js';
+import { ToolFactory, type ToolContext } from '../tool-factory.js';
 import { coerceCoordinates } from './coordinate-utils.js';
 import { countItems, resolveItemsByName } from './item-utils.js';
+import { gotoWithTimeout, throwIfAborted } from './movement-utils.js';
 
 const CONTAINER_PATTERN = /(chest|barrel|shulker_box|hopper|dispenser|dropper)$/;
 const CONTAINER_REACH = 4;
@@ -17,7 +18,8 @@ async function withContainer<T>(
   x: number,
   y: number,
   z: number,
-  action: (container: OpenContainer, blockName: string) => Promise<T>
+  action: (container: OpenContainer, blockName: string) => Promise<T>,
+  signal?: AbortSignal
 ): Promise<T> {
   const pos = new Vec3(x, y, z).floored();
   const block = bot.blockAt(pos);
@@ -27,9 +29,10 @@ async function withContainer<T>(
   }
 
   if (bot.entity.position.distanceTo(pos.offset(0.5, 0.5, 0.5)) > CONTAINER_REACH) {
-    await bot.pathfinder.goto(new goals.GoalNear(pos.x, pos.y, pos.z, 2));
+    await gotoWithTimeout(bot, new goals.GoalNear(pos.x, pos.y, pos.z, 2), undefined, signal);
   }
 
+  throwIfAborted(signal);
   const container = await bot.openContainer(block);
   try {
     return await action(container, block.name);
@@ -55,7 +58,7 @@ export function registerContainerTools(factory: ToolFactory, getBot: () => minef
     "read-container",
     "Look inside a chest, barrel, shulker box, hopper, dispenser or dropper. Opens it, lists the contents and closes it again",
     coordinates,
-    async ({ x, y, z }) => {
+    async ({ x, y, z }, ctx: ToolContext) => {
       ({ x, y, z } = coerceCoordinates(x, y, z));
       const bot = getBot();
 
@@ -66,7 +69,7 @@ export function registerContainerTools(factory: ToolFactory, getBot: () => minef
           return factory.createResponse(`The ${where} is empty`);
         }
         return factory.createResponse(`The ${where} contains: ${summarize(items)}`);
-      });
+      }, ctx.signal);
     }
   );
 
@@ -79,7 +82,7 @@ export function registerContainerTools(factory: ToolFactory, getBot: () => minef
       count: z.coerce.number().int().min(1).optional().describe("Number of items to deposit (default: 1)"),
       all: z.boolean().optional().describe("Deposit every matching item (overrides count)")
     },
-    async ({ x, y, z, itemName, count = 1, all = false }) => {
+    async ({ x, y, z, itemName, count = 1, all = false }, ctx: ToolContext) => {
       ({ x, y, z } = coerceCoordinates(x, y, z));
       const bot = getBot();
 
@@ -97,7 +100,7 @@ export function registerContainerTools(factory: ToolFactory, getBot: () => minef
       return withContainer(bot, x, y, z, async (container, blockName) => {
         await container.deposit(resolved.items[0].type, null, amount);
         return factory.createResponse(`Deposited ${amount} ${resolved.items[0].name} into ${blockName}`);
-      });
+      }, ctx.signal);
     }
   );
 
@@ -110,7 +113,7 @@ export function registerContainerTools(factory: ToolFactory, getBot: () => minef
       count: z.coerce.number().int().min(1).optional().describe("Number of items to withdraw (default: 1)"),
       all: z.boolean().optional().describe("Withdraw every matching item (overrides count)")
     },
-    async ({ x, y, z, itemName, count = 1, all = false }) => {
+    async ({ x, y, z, itemName, count = 1, all = false }, ctx: ToolContext) => {
       ({ x, y, z } = coerceCoordinates(x, y, z));
       const bot = getBot();
 
@@ -128,7 +131,7 @@ export function registerContainerTools(factory: ToolFactory, getBot: () => minef
 
         await container.withdraw(resolved.items[0].type, null, amount);
         return factory.createResponse(`Withdrew ${amount} ${resolved.items[0].name} from ${blockName}`);
-      });
+      }, ctx.signal);
     }
   );
 }

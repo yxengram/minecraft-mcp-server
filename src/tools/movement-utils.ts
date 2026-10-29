@@ -366,30 +366,72 @@ export function arrivalProblem(bot: mineflayer.Bot, target: { x: number; y: numb
   return `stopped at (${at.x}, ${at.y}, ${at.z}), ${distance.toFixed(1)} blocks from the target: the pathfinder found no way closer`;
 }
 
-export async function gotoWithTimeout(bot: mineflayer.Bot, goal: Goal, timeoutMs?: number): Promise<void> {
+/**
+ * Thrown once a tool call's signal is aborted (E-027): the MCP client cancelled the call, its time budget ran out or
+ * the bot died. The tool factory has already stopped the body; a loop that catches walking or placing errors and
+ * tries the next face or cell stops on it instead (G6 I3: nothing moves the body after the abort).
+ */
+export class AbortError extends Error {
+  constructor(message = 'the command was stopped') {
+    super(message);
+    this.name = 'AbortError';
+  }
+}
+
+/** The error an aborted signal stands for: its reason when that is an AbortError (the tool factory's are). */
+export function abortError(signal: AbortSignal): AbortError {
+  const reason: unknown = signal.reason;
+  return reason instanceof AbortError ? reason : new AbortError();
+}
+
+/** Throws the signal's AbortError once it is aborted; does nothing without a signal. */
+export function throwIfAborted(signal: AbortSignal | undefined): void {
+  if (signal?.aborted) throw abortError(signal);
+}
+
+/**
+ * pathfinder.goto with an optional time limit and an optional abort signal (E-027). On abort it throws AbortError at
+ * once, also when goto would never settle, and leaves stopping the pathfinder to the tool factory, which holds the
+ * lease (G4); a pathfinder error that the factory's stop caused is reported as the abort too.
+ */
+export async function gotoWithTimeout(bot: mineflayer.Bot, goal: Goal, timeoutMs?: number, signal?: AbortSignal): Promise<void> {
+  throwIfAborted(signal);
   const gotoPromise = bot.pathfinder.goto(goal);
-  if (timeoutMs === undefined) {
+  if (timeoutMs === undefined && !signal) {
     await gotoPromise;
     return;
   }
 
   let timeoutId: ReturnType<typeof setTimeout> | undefined;
   let timedOut = false;
-  const timeoutPromise = new Promise<never>((_, reject) => {
-    timeoutId = setTimeout(() => {
-      timedOut = true;
-      reject(new Error(`Move timed out after ${timeoutMs}ms`));
-    }, timeoutMs);
-  });
+  let onAbort: (() => void) | undefined;
+  const stops: Promise<never>[] = [];
+  if (timeoutMs !== undefined) {
+    stops.push(new Promise<never>((_, reject) => {
+      timeoutId = setTimeout(() => {
+        timedOut = true;
+        reject(new Error(`Move timed out after ${timeoutMs}ms`));
+      }, timeoutMs);
+    }));
+  }
+  if (signal) {
+    stops.push(new Promise<never>((_, reject) => {
+      onAbort = () => reject(abortError(signal));
+      signal.addEventListener('abort', onAbort, { once: true });
+    }));
+  }
 
   try {
-    await Promise.race([gotoPromise, timeoutPromise]);
+    await Promise.race([gotoPromise, ...stops]);
+  } catch (error) {
+    throwIfAborted(signal);
+    throw error;
   } finally {
     clearTimeout(timeoutId);
-    if (timedOut) {
-      stopPathfinder(bot);
-      gotoPromise.catch(() => {});
-    }
+    if (onAbort) signal!.removeEventListener('abort', onAbort);
+    // After an abort the tool factory has stopped the body already, and only while it held the lease (G4).
+    if (timedOut && !signal?.aborted) stopPathfinder(bot);
+    gotoPromise.catch(() => {});
   }
 }
 

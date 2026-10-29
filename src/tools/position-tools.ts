@@ -3,9 +3,9 @@ import mineflayer from 'mineflayer';
 import pathfinderPkg from 'mineflayer-pathfinder';
 const { goals } = pathfinderPkg;
 import { Vec3 } from 'vec3';
-import { ToolFactory } from '../tool-factory.js';
+import { ToolFactory, type ToolContext } from '../tool-factory.js';
 import { coerceCoordinates } from './coordinate-utils.js';
-import { stopPathfinder, arrivalProblem, portalReport, watchPathEdits } from './movement-utils.js';
+import { AbortError, abortError, gotoWithTimeout, stopPathfinder, arrivalProblem, portalReport, throwIfAborted, watchPathEdits } from './movement-utils.js';
 import type { Autopilot } from '../autopilot/autopilot.js';
 import { enclosedNow } from '../autopilot/hazards.js';
 import { assessThreats } from '../autopilot/threats.js';
@@ -82,7 +82,7 @@ export function registerPositionTools(factory: ToolFactory, getBot: () => minefl
       timeoutMs: z.number().int().min(50).optional().describe("Timeout in milliseconds before cancelling (min: 50, default: no timeout)"),
       leaveShelter: z.boolean().optional().describe(LEAVE_SHELTER_DESCRIPTION)
     },
-    async ({ x, y, z, range = 1, timeoutMs, leaveShelter = false }: { x: number; y: number; z: number; range?: number; timeoutMs?: number; leaveShelter?: boolean }) => {
+    async ({ x, y, z, range = 1, timeoutMs, leaveShelter = false }: { x: number; y: number; z: number; range?: number; timeoutMs?: number; leaveShelter?: boolean }, ctx: ToolContext) => {
       ({ x, y, z } = coerceCoordinates(x, y, z));
 
       const bot = getBot();
@@ -90,49 +90,23 @@ export function registerPositionTools(factory: ToolFactory, getBot: () => minefl
       const sheltered = leavingShelter(bot, { x, y, z }, range);
       if (sheltered && !leaveShelter) return factory.createErrorResponse(shelterRefusal(bot));
       const left = () => (sheltered && !walledIn(bot) ? leftShelterNote(bot) : '');
-      let timeoutId: ReturnType<typeof setTimeout> | null = null;
-      let timeoutPromise: Promise<never> | null = null;
-      let timedOut = false;
-
-      if (timeoutMs !== undefined) {
-        timeoutPromise = new Promise((_, reject) => {
-          timeoutId = setTimeout(() => {
-            timedOut = true;
-            reject(new Error(`Move timed out after ${timeoutMs}ms`));
-          }, timeoutMs);
-        });
-      }
-
       const edits = watchPathEdits(bot);
-      const gotoPromise = bot.pathfinder.goto(goal);
 
       try {
-        if (timeoutPromise) {
-          await Promise.race([gotoPromise, timeoutPromise]);
-        } else {
-          await gotoPromise;
-        }
+        // Stops the pathfinder itself when timeoutMs runs out; on an abort the tool factory has stopped it (E-027).
+        await gotoWithTimeout(bot, goal, timeoutMs, ctx.signal);
         const problem = arrivalProblem(bot, { x, y, z }, range);
         if (problem) return factory.createErrorResponse(`Did not reach (${x}, ${y}, ${z}): ${problem}${edits()}${left()}`);
         // The notes describe the walk, so they are made before the wait in a portal (and a change of dimension).
         const changed = edits() + left();
         return factory.createResponse(`Successfully moved to position near (${x}, ${y}, ${z})${changed}${await portalReport(bot)}`);
       } catch (error) {
-        if (timedOut) {
-          throw new Error(`Move timed out after ${timeoutMs}ms${edits()}${left()}`);
-        }
         const changed = edits() + left();
-        if (changed && error instanceof Error) error.message += changed;
+        // An abort's reason is shared by the whole call; its reply is written by the tool factory.
+        if (changed && error instanceof Error && !(error instanceof AbortError)) error.message += changed;
         throw error;
       } finally {
         edits();
-        if (timeoutId) {
-          clearTimeout(timeoutId);
-        }
-        if (timedOut) {
-          stopPathfinder(bot);
-          gotoPromise.catch(() => {});
-        }
       }
     }
   );
@@ -173,14 +147,22 @@ export function registerPositionTools(factory: ToolFactory, getBot: () => minefl
       direction: z.enum(['forward', 'back', 'left', 'right']).describe("Direction to move"),
       duration: z.number().optional().describe("Duration in milliseconds (default: 1000)")
     },
-    async ({ direction, duration = 1000 }: { direction: Direction, duration?: number }) => {
+    async ({ direction, duration = 1000 }: { direction: Direction, duration?: number }, ctx: ToolContext) => {
       const bot = getBot();
-      return new Promise((resolve) => {
+      throwIfAborted(ctx.signal);
+      return new Promise((resolve, reject) => {
+        // On an abort the timer goes and the call ends at once; the tool factory has cleared the controls (E-027).
+        const onAbort = () => {
+          clearTimeout(timer);
+          reject(abortError(ctx.signal));
+        };
         bot.setControlState(direction, true);
-        setTimeout(() => {
+        const timer = setTimeout(() => {
+          ctx.signal.removeEventListener('abort', onAbort);
           bot.setControlState(direction, false);
           resolve(factory.createResponse(`Moved ${direction} for ${duration}ms`));
         }, duration);
+        ctx.signal.addEventListener('abort', onAbort, { once: true });
       });
     }
   );

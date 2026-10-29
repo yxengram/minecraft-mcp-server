@@ -2,7 +2,7 @@ import { z } from "zod";
 import mineflayer from 'mineflayer';
 import type { Item } from 'prismarine-item';
 import { Vec3 } from 'vec3';
-import { ToolFactory } from '../tool-factory.js';
+import { ToolFactory, type ToolContext } from '../tool-factory.js';
 import { coerceCoordinates } from './coordinate-utils.js';
 
 const FURNACE_BLOCKS = new Set(['furnace', 'blast_furnace', 'smoker']);
@@ -69,7 +69,7 @@ export function registerFurnaceTools(factory: ToolFactory, getBot: () => minefla
       fuelCount?: number;
       takeOutput?: boolean;
       timeoutMs?: number;
-    }) => {
+    }, ctx: ToolContext) => {
       ({ x, y, z } = coerceCoordinates(x, y, z));
 
       const bot = getBot();
@@ -150,7 +150,10 @@ export function registerFurnaceTools(factory: ToolFactory, getBot: () => minefla
         let taken = 0;
         let outputName = '';
         while (Date.now() < deadline) {
-          const output = await waitForOutput(furnace, deadline - Date.now());
+          // After an abort nothing more is taken out; the furnace closes as the call ends (E-027).
+          ctx.throwIfAborted();
+          const output = await waitForOutput(furnace, deadline - Date.now(), ctx.signal);
+          ctx.throwIfAborted();
           if (!output) break;
           const item = await furnace.takeOutput();
           if (!item) break;
@@ -171,7 +174,8 @@ export function registerFurnaceTools(factory: ToolFactory, getBot: () => minefla
   );
 }
 
-async function waitForOutput(furnace: mineflayer.Furnace, timeoutMs: number): Promise<Item | null> {
+/** Resolves null after `timeoutMs`, or at once when `signal` is aborted. */
+async function waitForOutput(furnace: mineflayer.Furnace, timeoutMs: number, signal?: AbortSignal): Promise<Item | null> {
   const existing = furnace.outputItem();
   if (existing) {
     return existing;
@@ -188,14 +192,21 @@ async function waitForOutput(furnace: mineflayer.Furnace, timeoutMs: number): Pr
       }
     };
 
+    const onAbort = () => {
+      cleanup();
+      resolve(null);
+    };
+
     const cleanup = () => {
       furnace.removeListener('update', onUpdate);
+      signal?.removeEventListener('abort', onAbort);
       if (timeoutId) {
         clearTimeout(timeoutId);
       }
     };
 
     furnace.on('update', onUpdate);
+    signal?.addEventListener('abort', onAbort, { once: true });
 
     timeoutId = setTimeout(() => {
       cleanup();

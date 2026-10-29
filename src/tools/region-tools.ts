@@ -1,9 +1,10 @@
 import { z } from "zod";
 import mineflayer from 'mineflayer';
 import { Vec3 } from 'vec3';
-import { ToolFactory } from '../tool-factory.js';
+import { ToolFactory, type ToolContext } from '../tool-factory.js';
 import { coerceCoordinates } from './coordinate-utils.js';
 import { digBlockAt, isAir, isLiquid, overlapsBot, placeBlockAt } from './block-utils.js';
+import { throwIfAborted } from './movement-utils.js';
 
 const MAX_REGION_VOLUME = 512;
 const DEFAULT_TIMEOUT_MS = 120000;
@@ -60,7 +61,11 @@ function sortByDistance(bot: mineflayer.Bot, positions: Vec3[], verticalOrder: '
   });
 }
 
-async function clearPositions(bot: mineflayer.Bot, positions: Vec3[], timeoutMs: number, verticalOrder: 'top-down' | 'none') {
+/**
+ * Once `signal` is aborted (E-027) no further cell is walked to or dug: the loop stops, and the cell it was on counts
+ * as not processed, so the reply's counts say how far it got.
+ */
+async function clearPositions(bot: mineflayer.Bot, positions: Vec3[], timeoutMs: number, verticalOrder: 'top-down' | 'none', signal?: AbortSignal) {
   const stats = { dug: 0, empty: 0, unbreakable: 0, nearLava: 0, failed: 0, remaining: 0, lastError: '' };
   const queue = sortByDistance(bot, positions, verticalOrder);
   const deadline = Date.now() + timeoutMs;
@@ -73,13 +78,19 @@ async function clearPositions(bot: mineflayer.Bot, positions: Vec3[], timeoutMs:
     }
 
     try {
-      const result = await digBlockAt(bot, queue[i]);
+      throwIfAborted(signal);
+      const result = await digBlockAt(bot, queue[i], undefined, signal);
       consecutiveFailures = 0;
       if (result === 'dug') stats.dug++;
       else if (result === 'air') stats.empty++;
       else if (result === 'unbreakable') stats.unbreakable++;
       else stats.nearLava++;
     } catch (error) {
+      // An abort, or the error the tool factory's stop caused (a stopped walk, an aborted dig).
+      if (signal?.aborted) {
+        stats.remaining = queue.length - i;
+        break;
+      }
       stats.failed++;
       consecutiveFailures++;
       stats.lastError = error instanceof Error ? error.message : String(error);
@@ -104,9 +115,9 @@ export function registerRegionTools(factory: ToolFactory, getBot: () => mineflay
     "clear-region",
     `Dig out every block in a box between two corners (max ${MAX_REGION_VOLUME} blocks). Digs top to bottom, picks the best tool, and skips blocks next to lava. Dropped items are not collected`,
     regionShape,
-    async ({ timeoutMs = DEFAULT_TIMEOUT_MS, ...corners }) => {
+    async ({ timeoutMs = DEFAULT_TIMEOUT_MS, ...corners }, ctx: ToolContext) => {
       const positions = regionPositions(corners as Corners);
-      const stats = await clearPositions(getBot(), positions, timeoutMs, 'top-down');
+      const stats = await clearPositions(getBot(), positions, timeoutMs, 'top-down', ctx.signal);
       return factory.createResponse(describeClearStats(stats, `Cleared region of ${positions.length} blocks`));
     }
   );
@@ -118,7 +129,7 @@ export function registerRegionTools(factory: ToolFactory, getBot: () => mineflay
       ...regionShape,
       blockName: z.string().trim().min(1).describe("Name of the block item to place, e.g. 'cobblestone'")
     },
-    async ({ blockName, timeoutMs = DEFAULT_TIMEOUT_MS, ...corners }) => {
+    async ({ blockName, timeoutMs = DEFAULT_TIMEOUT_MS, ...corners }, ctx: ToolContext) => {
       const bot = getBot();
       const positions = sortByDistance(bot, regionPositions(corners as Corners), 'bottom-up');
       const wanted = blockName.toLowerCase();
@@ -127,7 +138,8 @@ export function registerRegionTools(factory: ToolFactory, getBot: () => mineflay
 
       for (let i = 0; i < positions.length; i++) {
         const pos = positions[i];
-        if (Date.now() > deadline) {
+        // After an abort no further space is filled (E-027); the counts say how far it got.
+        if (Date.now() > deadline || ctx.signal.aborted) {
           stats.remaining = positions.length - i;
           break;
         }
@@ -152,7 +164,15 @@ export function registerRegionTools(factory: ToolFactory, getBot: () => mineflay
           await bot.equip(item, 'hand');
         }
 
-        if (await placeBlockAt(bot, pos)) stats.placed++;
+        let placed: boolean;
+        try {
+          placed = await placeBlockAt(bot, pos, ctx.signal);
+        } catch (error) {
+          if (!ctx.signal.aborted) throw error;
+          stats.remaining = positions.length - i;
+          break;
+        }
+        if (placed) stats.placed++;
         else stats.failed++;
       }
 
@@ -182,7 +202,7 @@ export function registerRegionTools(factory: ToolFactory, getBot: () => mineflay
     },
     async ({ direction, length, width = 1, height = 2, timeoutMs = DEFAULT_TIMEOUT_MS }: {
       direction: keyof typeof DIRECTIONS; length: number; width?: number; height?: number; timeoutMs?: number;
-    }) => {
+    }, ctx: ToolContext) => {
       const volume = length * width * height;
       if (volume > MAX_REGION_VOLUME) {
         return factory.createErrorResponse(`Tunnel has ${volume} blocks, the maximum is ${MAX_REGION_VOLUME}. Use a shorter length`);
@@ -203,7 +223,7 @@ export function registerRegionTools(factory: ToolFactory, getBot: () => mineflay
         }
       }
 
-      const stats = await clearPositions(bot, positions, timeoutMs, 'none');
+      const stats = await clearPositions(bot, positions, timeoutMs, 'none', ctx.signal);
       return factory.createResponse(describeClearStats(stats, `Dug ${direction} tunnel ${length}x${width}x${height}`));
     }
   );

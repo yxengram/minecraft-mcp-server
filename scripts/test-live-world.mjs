@@ -136,6 +136,33 @@ try {
     await call('move-to-position', { x: cx, y: y0, z: cz, range: 0, timeoutMs: 20000 });
   });
 
+  await step('a move the MCP client cancels stops at once and frees the body (M19 E-027)', async () => {
+    await call('move-to-position', { x: cx - 8, y: y0, z: cz - 8, range: 0, timeoutMs: 20000 });
+    const since = Number((await call('get-events', { limit: 1 })).match(/nextSince: (\d+)/)[1]);
+    const controller = new AbortController();
+    const pending = client.callTool({ name: 'move-to-position', arguments: { x: cx + 8, y: y0, z: cz + 8, range: 0 } }, undefined,
+      { signal: controller.signal, timeout: 60000 });
+    const rejected = pending.then(() => false, () => true);
+    await sleep(1000);
+    controller.abort();
+    expect(await rejected, 'the cancelled request did not end on the client');
+    // The bot must not walk on toward the first target. Positions are whole cells, so a slide after the stop can read
+    // as up to about 1.4; walking on for that second covers about 4 blocks.
+    const [px, , pz] = await position();
+    await sleep(1000);
+    const [qx, , qz] = await position();
+    expect(Math.hypot(qx - px, qz - pz) <= 2, `after the cancel the bot walked on from ${px}, ${pz} to ${qx}, ${qz}`);
+    // Right away: the cancel released the lease, so this is not Busy (call() fails on an error reply) and does not
+    // wait for the cancelled move either (the reply would say "Waited N s for manual move-to-position").
+    const second = await call('move-to-position', { x: cx - 7, y: y0, z: cz - 7, range: 0, timeoutMs: 20000 });
+    expect(!second.includes('for manual move-to-position'), `the second move waited for the cancelled one:\n${second}`);
+    const [ax, , az] = await position();
+    expect(ax === cx - 7 && az === cz - 7, `the second move ended at ${ax}, ${az}`);
+    const events = await call('get-events', { since, types: ['command'], limit: 10 });
+    expectIncludes(events, 'move-to-position was cancelled by the MCP client after', 'the command event');
+    await call('move-to-position', { x: cx, y: y0, z: cz, range: 0, timeoutMs: 20000 });
+  });
+
   await step('waypoints', async () => {
     expectIncludes(await call('set-waypoint', { name: 'Arena', x: cx, y: y0, z: cz, note: 'center' }), "Saved waypoint 'arena'", 'set-waypoint');
     expectIncludes(await call('list-waypoints'), '- arena:', 'list-waypoints');
@@ -275,7 +302,8 @@ try {
     }
 
     await call('move-to-position', { x: cx - 2, y: y0, z: cz + 6, range: 0, timeoutMs: 20000 });
-    await cmd(`/fill ${cx - 6} ${y0} ${cz + 6} ${cx - 3} ${y0 + 1} ${cz + 6} stone`);
+    // Dirt, not stone: by hand 8 stone blocks take about 60 s, more than a body call's 50 s budget (E-027).
+    await cmd(`/fill ${cx - 6} ${y0} ${cz + 6} ${cx - 3} ${y0 + 1} ${cz + 6} dirt`);
     await sleep(500);
     expectIncludes(await call('dig-tunnel', { direction: 'west', length: 4, height: 2 }), 'dug 8', 'dig-tunnel');
     await cmd(`/kill @e[type=item,distance=..16]`);

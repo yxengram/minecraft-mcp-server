@@ -94,6 +94,7 @@ async function main() {
   });
 
   const factory = new ToolFactory(server, connection);
+  factory.setEvents(eventStore);
   const getBot = () => connection.getBot()!;
   const getAutopilot = () => autopilot;
   factory.setAutopilot(getAutopilot);

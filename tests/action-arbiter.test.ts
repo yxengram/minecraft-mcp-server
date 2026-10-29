@@ -294,3 +294,53 @@ test.serial('a manual command waiting behind a critical reflex keeps waiting thr
   t.is(manual.waitedMs, 1000);
   t.is(a.holder()?.holder, 'manual move-to-position');
 });
+
+// E-027 (6): a manual command the MCP client cancels while it waits for the lease leaves the queue for good.
+test.serial('E-027: an acquire aborted while it waits returns ok false and aborted, and does not get the lease when it is released', async (t) => {
+  const clock = sinon.useFakeTimers({ now: 1.7e12 });
+  t.teardown(() => clock.restore());
+  const { arbiter: a, stopBody } = arbiter();
+  const urgent = await a.acquire(holder('instinct leave_lava', PRIORITY.URGENT_INSTINCT));
+  t.true(urgent.ok);
+  if (!urgent.ok) return;
+  const controller = new AbortController();
+  const manual = holder('manual move-to-position', PRIORITY.MANUAL);
+
+  const pending = a.acquire(manual, undefined, controller.signal);
+  await clock.tickAsync(2000);
+  controller.abort();
+  const result = await pending;
+
+  t.false(result.ok);
+  if (result.ok) return;
+  t.true(result.aborted);
+  t.is(result.busy.holder, 'instinct leave_lava');
+  t.is(result.waitedMs, 2000);
+
+  urgent.lease.release();
+  t.is(a.holder(), null, 'the aborted request is not granted later');
+  await clock.tickAsync(10000);
+  t.is(a.holder(), null, 'nor when its wait would have run out');
+  t.false(manual.onSuspend.called);
+  t.false(stopBody.called, 'leaving the queue stops nobody\'s body');
+});
+
+test.serial('E-027: a signal that is never aborted changes nothing: the waiting command gets the lease once it is free', async (t) => {
+  const clock = sinon.useFakeTimers({ now: 1.7e12 });
+  t.teardown(() => clock.restore());
+  const { arbiter: a } = arbiter();
+  const urgent = await a.acquire(holder('instinct leave_lava', PRIORITY.URGENT_INSTINCT));
+  const controller = new AbortController();
+
+  const pending = a.acquire(holder('manual move-to-position', PRIORITY.MANUAL), undefined, controller.signal);
+  await clock.tickAsync(1000);
+  if (urgent.ok) urgent.lease.release();
+  const result = await pending;
+
+  t.true(result.ok);
+  if (!result.ok) return;
+  t.is(a.holder()?.holder, 'manual move-to-position');
+  controller.abort();
+  t.true(result.lease.isActive(), 'an abort after the grant does not take the lease back; its holder stops (E-027)');
+  result.lease.release();
+});

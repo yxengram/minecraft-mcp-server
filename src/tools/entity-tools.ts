@@ -1,6 +1,6 @@
 import { z } from "zod";
 import type { Bot } from 'mineflayer';
-import { ToolFactory } from '../tool-factory.js';
+import { ToolFactory, type ToolContext } from '../tool-factory.js';
 import type { Autopilot } from '../autopilot/autopilot.js';
 import { CombatRules, DEFAULT_COMBAT_RULES, TargetRules, checkTarget, isPlayer, isTamed } from '../autopilot/threats.js';
 import { isSword, sweepBystanders } from '../autopilot/combat.js';
@@ -161,7 +161,7 @@ export function registerEntityTools(factory: ToolFactory, getBot: () => Bot, get
       type: z.string().optional().describe("If no entityId is given, attack the nearest entity matching this type/name (e.g. 'zombie')"),
       times: z.coerce.number().int().min(1).max(MAX_ATTACKS).optional().describe(`Number of attacks, stops early if the target dies (default: 1, max: ${MAX_ATTACKS})`)
     },
-    async ({ entityId, type = '', times = 1 }) => {
+    async ({ entityId, type = '', times = 1 }, ctx: ToolContext) => {
       const bot = getBot();
       // The type the target was picked by; undefined when it was picked by id (an id wins over a type, as before).
       const pickedBy = entityId === undefined && type ? type : undefined;
@@ -185,6 +185,8 @@ export function registerEntityTools(factory: ToolFactory, getBot: () => Bot, get
       // A function, so the check after the awaited look is not narrowed away by the one at the top of the loop.
       const gone = () => target.isValid === false;
       for (let i = 0; i < times; i++) {
+        // After an abort (e.g. during the pause between hits) not even a look at the target (E-027).
+        ctx.throwIfAborted();
         if (target.isValid === false) break;
 
         const distance = bot.entity.position.distanceTo(target.position);
@@ -206,6 +208,8 @@ export function registerEntityTools(factory: ToolFactory, getBot: () => Bot, get
           stopped = `stopped: ${reason}; `;
           break;
         }
+        // After an abort no further hit (E-027).
+        ctx.throwIfAborted();
         bot.attack(target);
         attacks++;
 

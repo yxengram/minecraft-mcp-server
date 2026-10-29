@@ -1,8 +1,9 @@
 // Contract: docs/BLUEPRINT.md F-043. Lists a villager's trades and trades with it by the number list-trades shows.
 import { z } from "zod";
 import mineflayer from 'mineflayer';
-import { ToolFactory } from '../tool-factory.js';
+import { ToolFactory, type ToolContext } from '../tool-factory.js';
 import { approachEntity, entityLabel, metadataValue, resolveTargetEntity } from './entity-utils.js';
+import { throwIfAborted } from './movement-utils.js';
 
 type BotEntity = mineflayer.Bot['entity'];
 type Villager = Awaited<ReturnType<mineflayer.Bot['openVillager']>>;
@@ -109,7 +110,7 @@ export function registerTradeTools(factory: ToolFactory, getBot: () => mineflaye
     maxDistance: z.coerce.number().finite().positive().optional().describe(`Search distance when using type (default: ${DEFAULT_SEARCH})`)
   };
 
-  async function open(bot: mineflayer.Bot, args: { entityId?: number; type?: string; maxDistance?: number }):
+  async function open(bot: mineflayer.Bot, args: { entityId?: number; type?: string; maxDistance?: number }, signal: AbortSignal):
     Promise<{ villager: Villager; entity: BotEntity; label: string } | { error: string }> {
     const resolved = resolveTargetEntity(bot, { entityId: args.entityId, type: args.type ?? 'villager', maxDistance: args.maxDistance ?? DEFAULT_SEARCH });
     if ('error' in resolved) return { error: resolved.error };
@@ -118,7 +119,8 @@ export function registerTradeTools(factory: ToolFactory, getBot: () => mineflaye
       return { error: `${entityLabel(entity)} (id ${entity.id}) is not a villager: only villagers can be traded with (wandering traders are not supported)` };
     }
     const label = describeVillager(bot, entity);
-    await approachEntity(bot, entity, TRADE_REACH);
+    await approachEntity(bot, entity, TRADE_REACH, signal);
+    throwIfAborted(signal);
     const opening = bot.openVillager(entity);
     try {
       return { villager: await withTimeout(opening, OPEN_TIMEOUT_MS), entity, label };
@@ -136,9 +138,9 @@ export function registerTradeTools(factory: ToolFactory, getBot: () => mineflaye
     "list-trades",
     "List what a villager offers: the price, how often each trade can still be used and how many times you can afford it. Walks to the villager. Use the numbers with trade",
     target,
-    async (args: { entityId?: number; type?: string; maxDistance?: number }) => {
+    async (args: { entityId?: number; type?: string; maxDistance?: number }, ctx: ToolContext) => {
       const bot = getBot();
-      const opened = await open(bot, args);
+      const opened = await open(bot, args, ctx.signal);
       if ('error' in opened) return factory.createErrorResponse(opened.error);
       const { villager, entity, label } = opened;
       try {
@@ -164,10 +166,10 @@ export function registerTradeTools(factory: ToolFactory, getBot: () => mineflaye
       index: z.coerce.number().int().min(1).describe("Trade number as shown by list-trades (starting at 1)"),
       times: z.coerce.number().int().min(1).max(64).optional().describe("How many times to make the trade (default: 1)")
     },
-    async (args: { entityId?: number; type?: string; maxDistance?: number; index: number; times?: number }) => {
+    async (args: { entityId?: number; type?: string; maxDistance?: number; index: number; times?: number }, ctx: ToolContext) => {
       const bot = getBot();
       const times = args.times ?? 1;
-      const opened = await open(bot, args);
+      const opened = await open(bot, args, ctx.signal);
       if ('error' in opened) return factory.createErrorResponse(opened.error);
       const { villager, entity, label } = opened;
       try {

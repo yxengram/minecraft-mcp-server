@@ -2,7 +2,7 @@ import mineflayer from 'mineflayer';
 import pathfinderPkg from 'mineflayer-pathfinder';
 const { goals } = pathfinderPkg;
 import { Vec3 } from 'vec3';
-import { gotoWithTimeout } from './movement-utils.js';
+import { gotoWithTimeout, throwIfAborted } from './movement-utils.js';
 
 type Block = NonNullable<ReturnType<mineflayer.Bot['blockAt']>>;
 
@@ -102,10 +102,6 @@ export class DigInterrupted extends Error {
   }
 }
 
-/**
- * `shouldStop` lets a background task back off when it loses the body: it is checked before each step, and the
- * dig then uses a forced look so nothing can run between the last check and the start of digging.
- */
 /** Why a block must not or cannot be dug, checked before walking to it; null when it can be dug. */
 export function digPrecheck(bot: mineflayer.Bot, pos: Vec3, { avoidWater = false } = {}): Exclude<DigResult, 'dug'> | null {
   const block = bot.blockAt(pos);
@@ -116,13 +112,18 @@ export function digPrecheck(bot: mineflayer.Bot, pos: Vec3, { avoidWater = false
   return null;
 }
 
-export async function digBlockAt(bot: mineflayer.Bot, pos: Vec3, shouldStop?: () => boolean): Promise<DigResult> {
+/**
+ * `shouldStop` lets a background task back off when it loses the body: it is checked before each step, and the
+ * dig then uses a forced look so nothing can run between the last check and the start of digging. `signal` is a tool
+ * call's (E-027): once it is aborted, nothing more is walked to, equipped or dug.
+ */
+export async function digBlockAt(bot: mineflayer.Bot, pos: Vec3, shouldStop?: () => boolean, signal?: AbortSignal): Promise<DigResult> {
   const unsafe = digPrecheck(bot, pos);
   if (unsafe) return unsafe;
   const block = bot.blockAt(pos);
 
   if (!bot.canDigBlock(block!) || !bot.canSeeBlock(block!)) {
-    await bot.pathfinder.goto(new goals.GoalNear(pos.x, pos.y, pos.z, 2));
+    await gotoWithTimeout(bot, new goals.GoalNear(pos.x, pos.y, pos.z, 2), undefined, signal);
   }
 
   // The pathfinder may break blocks that are in its way, including the target itself.
@@ -130,7 +131,9 @@ export async function digBlockAt(bot: mineflayer.Bot, pos: Vec3, shouldStop?: ()
   if (isAir(current)) return 'dug';
 
   if (shouldStop?.()) throw new DigInterrupted();
+  throwIfAborted(signal);
   await equipBestTool(bot, current!);
+  throwIfAborted(signal);
   if (!shouldStop) {
     await bot.dig(current!);
     return 'dug';
@@ -152,28 +155,33 @@ const EYE_HEIGHT = 1.62;
  * a wall; and "within 2 blocks of the reference" can be the target cell itself. Does nothing when the bot can already
  * place from where it stands.
  */
-export async function approachToPlace(bot: mineflayer.Bot, pos: Vec3, reference: Block | null): Promise<void> {
+export async function approachToPlace(bot: mineflayer.Bot, pos: Vec3, reference: Block | null, signal?: AbortSignal): Promise<void> {
   const eyes = bot.entity.position.offset(0, EYE_HEIGHT, 0);
   const inReach = reference && eyes.distanceTo(reference.position.offset(0.5, 0.5, 0.5)) <= PLACE_REACH;
   if (inReach && bot.canSeeBlock(reference) && !overlapsBot(bot, pos)) return;
   // faces and facing are optional at runtime (all faces, any facing); the type marks them required.
   const options = { range: PLACE_REACH, LOS: true } as unknown as ConstructorParameters<typeof goals.GoalPlaceBlock>[2];
   // Bounded: an unreachable spot must fail this placement, not hang the tool (fill-region has no other limit per block).
-  await gotoWithTimeout(bot, new goals.GoalPlaceBlock(pos, bot.world, options), APPROACH_TIMEOUT_MS);
+  await gotoWithTimeout(bot, new goals.GoalPlaceBlock(pos, bot.world, options), APPROACH_TIMEOUT_MS, signal);
 }
 
-export async function placeBlockAt(bot: mineflayer.Bot, pos: Vec3): Promise<boolean> {
+/** Tries each face in turn; once `signal` is aborted it throws AbortError instead of trying the next one (E-027). */
+export async function placeBlockAt(bot: mineflayer.Bot, pos: Vec3, signal?: AbortSignal): Promise<boolean> {
   for (const offset of NEIGHBOR_OFFSETS) {
+    throwIfAborted(signal);
     const reference = bot.blockAt(pos.plus(offset));
     if (isAir(reference) || isLiquid(reference)) continue;
 
     try {
-      await approachToPlace(bot, pos, reference);
+      await approachToPlace(bot, pos, reference, signal);
       if (overlapsBot(bot, pos)) return false;
       await bot.lookAt(pos.offset(0.5, 0.5, 0.5), true);
+      throwIfAborted(signal);
       await bot.placeBlock(reference!, offset.scaled(-1));
       return true;
     } catch {
+      // The tool factory's stop makes the walk fail with the pathfinder's own error: the abort is what happened.
+      throwIfAborted(signal);
       continue;
     }
   }

@@ -316,7 +316,7 @@ src/main.ts（现有，改动）--创建并注册--> src/autopilot/autopilot.ts�
 │   ├── trade-tools.test.ts           新增（M13，F-044）
 │   ├── m19-connection.test.ts        新增（M19，F-047；已有 E-021、E-028 的用例）：连接类改动
 │   ├── m19-safety.test.ts            新增（M19，F-048；已有 E-022 的用例）：安全类改动
-│   ├── m19-tool-experience.test.ts   计划新增（M19，F-052）：调用预算、取消、回复语义、stop-all
+│   ├── m19-tool-experience.test.ts   新增（M19，F-052；已有 E-027 的用例）：调用预算、取消、回复语义、stop-all
 │   ├── release.test.ts               新增（M19，F-050；已有 E-025 的版本固定断言）：版本、包内容与工具名单
 │   ├── m18-tools.test.ts             新增（M18，F-046）：ground-height 与 lead 行为
 │   ├── m16-lava.test.ts              新增（M16，E-018）：寻路器与岩浆、在岩浆里、死亡时停止命令
@@ -354,7 +354,7 @@ src/main.ts（现有，改动）--创建并注册--> src/autopilot/autopilot.ts�
 
 ## F. 文件契约（新增文件）
 
-每个新增的代码、测试和脚本文件一个条目。M1～M18 的条目都已实现（其中 F-012、F-013、F-025 在 M9 删除）；M19 的条目中状态为 placeholder 的（F-049、F-052、F-054～F-059）还没有实现。状态 verified 表示对应的单元测试与实机验收已实际完成（证据见 PLAN 的进展记录）。M1～M6 条目的验收末尾原来写着规划阶段的“（计划，未执行）”，现已改为指向实际执行的记录（M9 删除的 F-012、F-013、F-025 改为说明删除）。
+每个新增的代码、测试和脚本文件一个条目。M1～M18 的条目都已实现（其中 F-012、F-013、F-025 在 M9 删除）；M19 的条目中状态为 placeholder 的（F-054～F-059）还没有实现。状态 verified 表示对应的单元测试与实机验收已实际完成（证据见 PLAN 的进展记录）。M1～M6 条目的验收末尾原来写着规划阶段的“（计划，未执行）”，现已改为指向实际执行的记录（M9 删除的 F-012、F-013、F-025 改为说明删除）。
 
 
 ### F1-a 组装、仲裁与任务
@@ -378,7 +378,7 @@ src/main.ts（现有，改动）--创建并注册--> src/autopilot/autopilot.ts�
 - **模块**：M-ARB 动作仲裁　**里程碑**：M1　**状态**：verified　**设计**：已确定：唯一控制权与抢占/恢复；优先级数值暂定
 - **职责**：维护 bot 身体（移动、视角、攻击、使用手中物品）的唯一控制权：按优先级（关键反射 30、手动 20、日常反射 15、任务 10；M9 起改名为紧急本能 30、手动 20、本能 15、任务 10，见 G1 与 E-012）授予、抢占、暂停、恢复和释放租约。被反射或本能动作（M9 起只有本能动作）抢占的持有者在它结束后自动恢复；被手动命令抢占的持有者被挂起且不自动恢复，需要重新申请。
 - **不负责**：不知道持有者在做什么；不决定做什么；不写事件（由持有者写）。只在抢占时做兜底停止，不替持有者执行动作。
-- **输入**：来源：src/autopilot/instinct/instinct-engine.ts（紧急本能级与本能级请求，经 acquireNow，M8 起；M3～M8 另有 src/autopilot/reflex-engine.ts 的关键反射级与日常反射级请求，M9 删除）、src/tool-factory.ts（手动级请求）、src/autopilot/task-manager.ts（任务级请求，包括 resume-task 时的重新申请）。 内容：请求者名称、优先级、暂停回调（附带抢占者类型：'instinct' 或 'manual'，M9 前为反射或手动）、恢复回调、可选的等待超时（手动级遇到紧急本能（M9 前为关键反射）或另一个手动级持有者时默认最长等待 10 秒）。 限制：优先级只能是四个固定值之一；同一请求者不能同时持有两个租约。
+- **输入**：来源：src/autopilot/instinct/instinct-engine.ts（紧急本能级与本能级请求，经 acquireNow，M8 起；M3～M8 另有 src/autopilot/reflex-engine.ts 的关键反射级与日常反射级请求，M9 删除）、src/tool-factory.ts（手动级请求）、src/autopilot/task-manager.ts（任务级请求，包括 resume-task 时的重新申请）。 内容：请求者名称、优先级、暂停回调（附带抢占者类型：'instinct' 或 'manual'，M9 前为反射或手动）、恢复回调、可选的等待超时（手动级遇到紧急本能（M9 前为关键反射）或另一个手动级持有者时默认最长等待 10 秒）；M19 E-027 起另有可选的 AbortSignal：排队时被中止就移出队列，返回 ok:false、aborted:true，之后也不会得到租约。 限制：优先级只能是四个固定值之一；同一请求者不能同时持有两个租约。
 - **输出**：去向：请求者（返回租约或忙碌结果）；被抢占的持有者（暂停回调）；恢复时的持有者（恢复回调）。 内容：租约（可释放、可查询是否仍有效），并附带“被抢占者”信息（名称与类型，没有则为空），供手动调用报告中断前的状态；或“忙碌”结果，包含当前持有者名称、优先级与已等待时长。 成功含义：任一时刻至多一个有效租约；被反射抢占者在反射释放时按后进先出顺序恢复；被手动抢占者不会被自动恢复。
 - **使用方**：src/autopilot/instinct/instinct-engine.ts（M8 起；M3～M8 另有 src/autopilot/reflex-engine.ts）、src/autopilot/task-manager.ts、src/tool-factory.ts（请求租约）；src/autopilot/autopilot.ts（创建）；tests/action-arbiter.test.ts（验证）；tests/instinct.test.ts、tests/task-manager.test.ts 等（作为被测本能与任务的依赖；M3～M8 为 tests/reflexes.test.ts）。
 - **依赖**：src/tools/movement-utils.ts（现有，抢占时调用 stopPathfinder 兜底）。 外部：mineflayer：抢占时调用 clearControlStates 兜底。
@@ -1254,7 +1254,7 @@ src/main.ts（现有，改动）--创建并注册--> src/autopilot/autopilot.ts�
 
 ### F-052 · `tests/m19-tool-experience.test.ts`
 
-- **模块**：测试（M-VER）　**里程碑**：M19　**状态**：placeholder
+- **模块**：测试（M-VER）　**里程碑**：M19　**状态**：verified（部分，2026-10-30：E-027 的用例；test-live-world 加了“客户端取消的移动立即停下并释放身体”一步，无 key、有 key 各一轮通过；E-029～E-031、E-038～E-040 的用例随各步加入）
 - **职责**：M19 工具体验类改动的契约测试。由第一个用到它的提交（E-027）创建，之后的提交往里追加：E-027 调用预算、看门狗、MCP 取消、排队时的取消、中止后不再调用 dig、placeBlock、activateBlock、attack（G6 I3 的测试位置之一）；E-031 没做成的动作返回错误，以及仍为成功的查询与“本来就是这个状态”的回复；E-038 长时间工具的默认时限与 “Still …” 回复；E-039 进度通知；E-040 stop-all 与 I8；E-044 工具注解（注解表与注册名单一一对应）；E-045 服务器说明。
 - **做法**：用真实 McpServer 与 SDK Client，经 InMemoryTransport.createLinkedPair 连接，这样 extra.signal、notifications/cancelled 与进度通知都走 SDK 1.27.1 的真实路径；配替身 bot 与真实 ActionArbiter（E-040 另用真实 TaskManager、InstinctEngine）；与时间有关的用例用 sinon 假时钟。
 - **不负责**：连接类（tests/m19-connection.test.ts，F-047）与安全类（tests/m19-safety.test.ts，F-048）的用例；fly-to 的用例在 tests/flight-tools.test.ts（E-032）。
@@ -1504,14 +1504,14 @@ M19 对现有类型正文的改动（不新增类型）：E-035 让 chat、whisp
 |---|---|---|---|
 | I1 | 除非策略显式开启 `combat.attackPlayers`，任何代码路径都不会攻击玩家；任何代码路径都不会攻击被驯服的动物；剑的横扫不波及玩家和被驯服的动物（即使开启 attackPlayers） | `src/autopilot/threats.ts`、`src/autopilot/combat.ts`、`src/tools/entity-tools.ts`（attack-entity，M19 E-022 起：没有开启 combat.attackPlayers 时拒绝攻击玩家；一律拒绝被驯服的动物；手持剑、横扫会波及玩家或被驯服的动物时不出手） | `tests/threats.test.ts`、`tests/combat.test.ts`、`tests/motor.test.ts`（M9：本能的 fight / hold 永不针对玩家，即使开启 attackPlayers）、`tests/m19-safety.test.ts`（E-022） |
 | I2 | 来自聊天的内容不能修改策略或授权名单；默认（无人授权）时聊天不会直接改变 bot 的行为；被授权玩家的聊天也只能启动安全清单内的行为 | `src/decisions/decision-hooks.ts`、`src/autopilot/policy.ts` | `tests/decision-hooks.test.ts`、`tests/policy.test.ts` |
-| I3 | 同一时刻至多一个主体控制 bot 身体 | `src/autopilot/action-arbiter.ts` | `tests/action-arbiter.test.ts` |
+| I3 | 同一时刻至多一个主体控制 bot 身体 | `src/autopilot/action-arbiter.ts`、`src/tool-factory.ts`（M19 E-027 起：身体类调用中止之后、释放租约之后不再动身体；只有持有租约时才停身体） | `tests/action-arbiter.test.ts`、`tests/m19-tool-experience.test.ts`（E-027） |
 | I4 | OpenRouter API key 不出现在任何日志、事件、错误或工具输出中 | `src/decisions/openrouter-client.ts`、`src/tools/policy-tools.ts` | `tests/openrouter-client.test.ts`、`tests/policy-tools.test.ts` |
 | I5 | 没有 key 或决策失败时，反射与任务的功能不受影响。M8 起（设计 v0.4，用户决定）：本能在这些情况下不动身体，只写 instinct 事件，交给 LLM | `src/autopilot/autopilot.ts`、`src/decisions/decision-hooks.ts`、`src/autopilot/instinct/instinct-engine.ts` | `tests/autopilot.test.ts`、`tests/decision-hooks.test.ts`、`tests/instinct.test.ts` |
 | I6 | 注意力门与菜单构建不等待网络或磁盘；决策请求在后台进行，通常同一时刻至多一个，新信号可以顶替（只有最新的答复能执行）；M17 起紧急线索的对冲请求例外：同一问题至多两个请求，只执行一个答复（E-019） | `src/autopilot/instinct/attention.ts`、`src/autopilot/instinct/instinct-engine.ts` | `tests/instinct.test.ts` |
 | I7 | use-item 不把岩浆倒进 bot 自己的脚、头两格或与它们相邻的格子，也不倒在其他玩家 10 格以内（M15，用户决定 2026-10-22） | `src/tools/interaction-tools.ts`（lavaProblem，走近前后各检查一次） | `tests/m15-tools.test.ts` |
 | I8（M19 计划；Q28 已于 2026-10-29 获批，未实现） | stop-all 成功返回（isError 为 false）时：当前任务已取消；没有在途或排队的身体类调用，也没有在途的 collect-block、lead-animal；仲裁器没有持有者，寻路器没有目标，按键已清除。唯一例外：暂停期内为 in_lava、trapped_underwater、low_air、creeper_swelling 新开始的本能动作，回复中写明。暂停期内本能不为其他线索请求决策或申请租约；暂停最长 300 秒，重新进入游戏时结束 | `src/tools/position-tools.ts`（stop-all）、`src/tool-factory.ts`（在途调用表、stopAll）、`src/autopilot/instinct/instinct-engine.ts`（pauseFor、interrupt） | `tests/m19-tool-experience.test.ts` |
 
-M19 的变化：上表 I1 的文字已按 E-022 扩展到被驯服的动物与横扫（Q21 已于 2026-10-29 获批）。拒绝攻击玩家只是落实原有的 I1，在 E-022 第一部分实现（2026-10-26）；被驯服的动物与横扫在 E-022 第二部分实现（2026-10-30）。计划中的其余变化（实施时才改上表）：I3 的保证位置加入 `src/tool-factory.ts`（中止之后、释放租约之后不再动身体），测试加入 `tests/m19-tool-experience.test.ts`（E-027）。I2、I4～I7 的文字不变。
+M19 的变化：上表 I1 的文字已按 E-022 扩展到被驯服的动物与横扫（Q21 已于 2026-10-29 获批）。拒绝攻击玩家只是落实原有的 I1，在 E-022 第一部分实现（2026-10-26）；被驯服的动物与横扫在 E-022 第二部分实现（2026-10-30）。I3 的文字不变，保证位置已按 E-027 加入 `src/tool-factory.ts`（中止之后、释放租约之后不再动身体），测试加入 `tests/m19-tool-experience.test.ts`（2026-10-30）。I2、I4～I7 的文字不变。
 
 ### G7. 决策模型的使用规则
 

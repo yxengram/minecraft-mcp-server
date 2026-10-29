@@ -3,10 +3,11 @@ import mineflayer from 'mineflayer';
 import pathfinderPkg from 'mineflayer-pathfinder';
 const { goals } = pathfinderPkg;
 import { Vec3 } from 'vec3';
-import { ToolFactory } from '../tool-factory.js';
+import { ToolFactory, type ToolContext } from '../tool-factory.js';
 import { coerceCoordinates } from './coordinate-utils.js';
 import { approachEntity, entityLabel, resolveTargetEntity } from './entity-utils.js';
 import { isAir, overlapsBot, PLACE_REACH, sleep } from './block-utils.js';
+import { gotoWithTimeout } from './movement-utils.js';
 import { bedWakeWarning, wokeUpInsideBlock } from './terrain-utils.js';
 
 const BLOCK_REACH = 4;
@@ -137,7 +138,7 @@ export function registerInteractionTools(factory: ToolFactory, getBot: () => min
       y: z.coerce.number().describe("Y coordinate"),
       z: z.coerce.number().describe("Z coordinate")
     },
-    async ({ x, y, z }) => {
+    async ({ x, y, z }, ctx: ToolContext) => {
       ({ x, y, z } = coerceCoordinates(x, y, z));
       const bot = getBot();
       const pos = new Vec3(x, y, z).floored();
@@ -149,13 +150,14 @@ export function registerInteractionTools(factory: ToolFactory, getBot: () => min
 
       const center = pos.offset(0.5, 0.5, 0.5);
       if (bot.entity.position.distanceTo(center) > BLOCK_REACH) {
-        await bot.pathfinder.goto(new goals.GoalNear(pos.x, pos.y, pos.z, 2));
+        await gotoWithTimeout(bot, new goals.GoalNear(pos.x, pos.y, pos.z, 2), undefined, ctx.signal);
       }
 
       await bot.lookAt(center, true);
       // activateBlock clicks the top face, so a fire or a lit portal shows up in the cell above.
       const above = [pos.offset(0, 1, 0)];
       const before = snapshot(bot, pos, above);
+      ctx.throwIfAborted();
       await bot.activateBlock(block);
       // A water bucket "activated" grass and reported success with nothing poured (E-017).
       await sleep(ACTIVATE_SETTLE_MS);
@@ -175,7 +177,7 @@ export function registerInteractionTools(factory: ToolFactory, getBot: () => min
       y: z.coerce.number().optional().describe("Y coordinate"),
       z: z.coerce.number().optional().describe("Z coordinate")
     },
-    async ({ itemName, x, y, z }) => {
+    async ({ itemName, x, y, z }, ctx: ToolContext) => {
       const bot = getBot();
       const given = [x, y, z].filter(value => value !== undefined).length;
       if (given !== 0 && given !== 3) return factory.createErrorResponse('Give all of x, y and z, or none of them');
@@ -198,7 +200,7 @@ export function registerInteractionTools(factory: ToolFactory, getBot: () => min
         }
         const eyes = () => bot.entity.position.offset(0, EYE_HEIGHT, 0);
         if (eyes().distanceTo(pos.offset(0.5, 0.5, 0.5)) > PLACE_REACH) {
-          await bot.pathfinder.goto(new goals.GoalNear(pos.x, pos.y, pos.z, 3));
+          await gotoWithTimeout(bot, new goals.GoalNear(pos.x, pos.y, pos.z, 3), undefined, ctx.signal);
         }
         if (overlapsBot(bot, pos)) return factory.createErrorResponse(`The bot stands in (${pos.x}, ${pos.y}, ${pos.z}); use the item from next to it`);
         // Checked again where the bot ended up: the walk may have brought it next to the cell.
@@ -212,15 +214,18 @@ export function registerInteractionTools(factory: ToolFactory, getBot: () => min
       }
 
       const before = snapshot(bot, pos);
+      ctx.throwIfAborted();
       bot.activateItem();
       let after = before;
       // The emptied bucket arrives before the block update (live test): with a target, wait for the cell itself.
       const settled = () => (pos ? after.cell !== before.cell : changed(before, after));
-      for (let waited = 0; waited < USE_ITEM_WAIT_MS && !settled(); waited += USE_ITEM_POLL_MS) {
+      // An abort ends the wait; the item is still let go of, and then the call ends (E-027).
+      for (let waited = 0; waited < USE_ITEM_WAIT_MS && !settled() && !ctx.signal.aborted; waited += USE_ITEM_POLL_MS) {
         await sleep(USE_ITEM_POLL_MS);
         after = snapshot(bot, pos);
       }
       bot.deactivateItem();
+      ctx.throwIfAborted();
 
       const at = pos ? ` at (${pos.x}, ${pos.y}, ${pos.z})` : '';
       if (!changed(before, after)) {
@@ -239,14 +244,15 @@ export function registerInteractionTools(factory: ToolFactory, getBot: () => min
     "activate-entity",
     "Right-click an entity: interact with a villager, feed or shear an animal, etc. Walks closer if needed",
     entityTarget,
-    async ({ entityId, type, maxDistance = DEFAULT_ENTITY_SEARCH }) => {
+    async ({ entityId, type, maxDistance = DEFAULT_ENTITY_SEARCH }, ctx: ToolContext) => {
       const bot = getBot();
       const resolved = resolveTargetEntity(bot, { entityId, type, maxDistance });
       if ('error' in resolved) {
         return factory.createErrorResponse(resolved.error);
       }
 
-      await approachEntity(bot, resolved.entity, ENTITY_REACH);
+      await approachEntity(bot, resolved.entity, ENTITY_REACH, ctx.signal);
+      ctx.throwIfAborted();
       await bot.activateEntity(resolved.entity);
       return factory.createResponse(`Interacted with ${entityLabel(resolved.entity)} (id ${resolved.entity.id})`);
     }
@@ -261,7 +267,7 @@ export function registerInteractionTools(factory: ToolFactory, getBot: () => min
       z: z.coerce.number().optional().describe("Z coordinate of a bed"),
       maxDistance: z.coerce.number().finite().positive().optional().describe("Search distance when no position is given (default: 32)")
     },
-    async ({ x, y, z, maxDistance = 32 }) => {
+    async ({ x, y, z, maxDistance = 32 }, ctx: ToolContext) => {
       const bot = getBot();
 
       if (bot.isSleeping) {
@@ -289,9 +295,10 @@ export function registerInteractionTools(factory: ToolFactory, getBot: () => min
       }
 
       if (bot.entity.position.distanceTo(bed.position) > 3) {
-        await bot.pathfinder.goto(new goals.GoalNear(bed.position.x, bed.position.y, bed.position.z, 2));
+        await gotoWithTimeout(bot, new goals.GoalNear(bed.position.x, bed.position.y, bed.position.z, 2), undefined, ctx.signal);
       }
 
+      ctx.throwIfAborted();
       await bot.sleep(bed);
       const warning = bedWakeWarning(bot, bed);
       return factory.createResponse(`Sleeping in ${bed.name} at (${bed.position.x}, ${bed.position.y}, ${bed.position.z})${warning ? `; ${warning}` : ''}`);
@@ -317,14 +324,15 @@ export function registerInteractionTools(factory: ToolFactory, getBot: () => min
     "mount-entity",
     "Ride an entity such as a horse, boat or minecart. Walks closer if needed",
     entityTarget,
-    async ({ entityId, type, maxDistance = DEFAULT_ENTITY_SEARCH }) => {
+    async ({ entityId, type, maxDistance = DEFAULT_ENTITY_SEARCH }, ctx: ToolContext) => {
       const bot = getBot();
       const resolved = resolveTargetEntity(bot, { entityId, type, maxDistance });
       if ('error' in resolved) {
         return factory.createErrorResponse(resolved.error);
       }
 
-      await approachEntity(bot, resolved.entity, ENTITY_REACH);
+      await approachEntity(bot, resolved.entity, ENTITY_REACH, ctx.signal);
+      ctx.throwIfAborted();
       bot.mount(resolved.entity);
       return factory.createResponse(`Mounting ${entityLabel(resolved.entity)} (id ${resolved.entity.id})`);
     }

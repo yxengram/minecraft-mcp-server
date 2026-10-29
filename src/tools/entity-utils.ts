@@ -3,6 +3,7 @@ import { formatStat } from '../format.js';
 import pathfinderPkg from 'mineflayer-pathfinder';
 const { goals } = pathfinderPkg;
 import { mobHostility } from '../autopilot/threats.js';
+import { gotoWithTimeout } from './movement-utils.js';
 
 export type BotEntity = Bot['entity'];
 
@@ -165,10 +166,11 @@ export function resolveTargetEntity(
   return { error: 'Provide either entityId or type' };
 }
 
-export async function approachEntity(bot: Bot, entity: BotEntity, reach: number): Promise<void> {
+/** `signal` is a tool call's: once it is aborted the walk ends with AbortError (E-027). */
+export async function approachEntity(bot: Bot, entity: BotEntity, reach: number, signal?: AbortSignal): Promise<void> {
   if (bot.entity.position.distanceTo(entity.position) <= reach) return;
   const { x, y, z } = entity.position;
-  await bot.pathfinder.goto(new goals.GoalNear(x, y, z, Math.min(2, reach)));
+  await gotoWithTimeout(bot, new goals.GoalNear(x, y, z, Math.min(2, reach)), undefined, signal);
 }
 
 /** The live entity object for a previously seen entity (players are also matched by name), or null if it is gone. */

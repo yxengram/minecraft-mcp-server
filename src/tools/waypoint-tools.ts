@@ -2,11 +2,11 @@ import { z } from "zod";
 import mineflayer from 'mineflayer';
 import pathfinderPkg from 'mineflayer-pathfinder';
 const { goals } = pathfinderPkg;
-import { ToolFactory } from '../tool-factory.js';
+import { ToolFactory, type ToolContext } from '../tool-factory.js';
 import { WaypointStore } from '../waypoint-store.js';
 import { coerceCoordinates } from './coordinate-utils.js';
 import { Vec3 } from 'vec3';
-import { gotoWithTimeout, arrivalProblem, portalReport, watchPathEdits } from './movement-utils.js';
+import { AbortError, gotoWithTimeout, arrivalProblem, portalReport, watchPathEdits } from './movement-utils.js';
 import { LEAVE_SHELTER_DESCRIPTION, leavingShelter, leftShelterNote, shelterRefusal, walledIn } from './position-tools.js';
 
 export function registerWaypointTools(factory: ToolFactory, getBot: () => mineflayer.Bot, store: WaypointStore): void {
@@ -97,7 +97,7 @@ export function registerWaypointTools(factory: ToolFactory, getBot: () => minefl
       timeoutMs: z.number().int().min(50).optional().describe("Timeout in milliseconds before cancelling (default: no timeout)"),
       leaveShelter: z.boolean().optional().describe(LEAVE_SHELTER_DESCRIPTION)
     },
-    async ({ name, range: givenRange, timeoutMs, leaveShelter = false }) => {
+    async ({ name, range: givenRange, timeoutMs, leaveShelter = false }, ctx: ToolContext) => {
       const bot = getBot();
       const waypoint = store.get(name);
       if (!waypoint) {
@@ -117,10 +117,10 @@ export function registerWaypointTools(factory: ToolFactory, getBot: () => minefl
       const left = () => (sheltered && !walledIn(bot) ? leftShelterNote(bot) : '');
       const edits = watchPathEdits(bot);
       try {
-        await gotoWithTimeout(bot, new goals.GoalNear(waypoint.x, waypoint.y, waypoint.z, range), timeoutMs);
+        await gotoWithTimeout(bot, new goals.GoalNear(waypoint.x, waypoint.y, waypoint.z, range), timeoutMs, ctx.signal);
       } catch (error) {
         const changed = edits() + left();
-        if (changed && error instanceof Error) error.message += changed;
+        if (changed && error instanceof Error && !(error instanceof AbortError)) error.message += changed;
         throw error;
       }
       const problem = arrivalProblem(bot, waypoint, range);

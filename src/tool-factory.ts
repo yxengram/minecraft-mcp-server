@@ -2,16 +2,22 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z, ZodError, ZodRawShape, ZodType } from "zod";
 import { BotConnection } from './bot-connection.js';
 import type { Autopilot } from './autopilot/autopilot.js';
-import { PRIORITY } from './autopilot/action-arbiter.js';
-import { stopPathfinder } from './tools/movement-utils.js';
+import { PRIORITY, type HolderInfo, type Lease } from './autopilot/action-arbiter.js';
+import type { EventStore } from './event-store.js';
+import { AbortError, stopPathfinder, throwIfAborted } from './tools/movement-utils.js';
 import type mineflayer from 'mineflayer';
 
-// After a death, how long a stopped command may take to give up before its reply is replaced (E-018).
+// After a death or another abort, how long a stopped command may take to give up before its reply is replaced and
+// its lease released (E-018, E-027).
 export const DEATH_SETTLE_MS = 2000;
 // How long to wait for the respawn, to say where the bot is now.
 export const RESPAWN_WAIT_MS = 5000;
 // Damage this recent is named as the likely cause of a death.
 const DEATH_CAUSE_WINDOW_MS = 10000;
+// A body command's time budget from the moment its call arrives, the connection check and the wait for the lease
+// included (E-027): common MCP clients give up on a request after 60 s and cancel it, so the command stops first and
+// its reply still arrives.
+export const CALL_LIMIT_MS = 50000;
 
 type McpContent =
   | { type: "text"; text: string }
@@ -33,6 +39,132 @@ export const BODY_TOOLS = new Set([
   'clear-region', 'fill-region', 'dig-tunnel'
 ]);
 
+/** Why a tool call was stopped (E-027; E-029 adds ended). */
+export type AbortReason = 'death' | 'cancelled' | 'budget' | 'stop-all';
+
+const ABORT_TEXT: Record<AbortReason, string> = {
+  death: 'the bot died',
+  cancelled: 'cancelled by the MCP client',
+  budget: 'the call ran out of time',
+  'stop-all': 'stopped by stop-all'
+};
+
+/**
+ * The reason a call's signal is aborted with. An AbortError, so the walking helpers and ctx.throwIfAborted throw it;
+ * its message is what a task the call started is cancelled with (collect-block, lead-animal).
+ */
+export class CallAborted extends AbortError {
+  constructor(readonly kind: AbortReason) {
+    super(ABORT_TEXT[kind]);
+  }
+}
+
+/** What an executor gets besides its arguments (E-027). */
+export interface ToolContext {
+  /** Aborted when the call is stopped: cancelled by the MCP client, out of time, the bot died, or stop-all. */
+  readonly signal: AbortSignal;
+  /** When the call's time budget ends (Date.now() milliseconds). */
+  readonly deadline: number;
+  remainingMs(): number;
+  /** Moves the deadline, and with it a body tool's watchdog, `ms` later. */
+  extendDeadline(ms: number): void;
+  /** Throws the abort reason (an AbortError) once the signal is aborted. */
+  throwIfAborted(): void;
+  /** Text for progress notifications; only E-039 sends them, so until then this does nothing. */
+  setProgress(text: string | (() => string)): void;
+}
+
+/** A tool call that has not replied yet (E-027); E-040's stop-all stops these. */
+export interface InFlightCall {
+  readonly name: string;
+  readonly started: number;
+  readonly controller: AbortController;
+  /** A body tool: it holds, or waits for, the action lease. */
+  readonly body: boolean;
+  /** Waiting for the action lease. */
+  readonly queued: boolean;
+  /** Stops the call: the body first when this call drives it, then the signal. Only the first reason counts. */
+  abort(reason: AbortReason): void;
+}
+
+/** The part of the SDK's RequestHandlerExtra the factory reads. Direct calls (unit tests) pass none. */
+interface CallExtra {
+  signal?: AbortSignal;
+}
+
+class ToolCall implements InFlightCall {
+  readonly started = Date.now();
+  readonly controller = new AbortController();
+  queued = false;
+  deadline: number;
+  abortedAt: number | null = null;
+  /** Stops the body when this call drives it; set while a body command runs. */
+  stopBody: () => void = () => {};
+  readonly ctx: ToolContext;
+  private watchdog: ReturnType<typeof setTimeout> | undefined;
+  private readonly onCancel = () => this.abort('cancelled');
+
+  constructor(readonly name: string, readonly body: boolean, private readonly extra: CallExtra | undefined) {
+    this.deadline = this.started + CALL_LIMIT_MS;
+    const call = this;
+    this.ctx = {
+      signal: this.controller.signal,
+      get deadline() { return call.deadline; },
+      remainingMs: () => Math.max(0, call.deadline - Date.now()),
+      extendDeadline: ms => {
+        call.deadline += ms;
+        call.arm();
+      },
+      throwIfAborted: () => throwIfAborted(call.controller.signal),
+      setProgress: () => {}
+    };
+    // A direct call without extra has no client to cancel it and no budget, as before (E-027).
+    const cancel = extra?.signal;
+    if (cancel?.aborted) this.abort('cancelled');
+    else cancel?.addEventListener('abort', this.onCancel, { once: true });
+    this.arm();
+  }
+
+  get signal(): AbortSignal {
+    return this.controller.signal;
+  }
+
+  /** Why the call was stopped, or null while it runs. */
+  get reason(): AbortReason | null {
+    const reason: unknown = this.controller.signal.reason;
+    return this.controller.signal.aborted && reason instanceof CallAborted ? reason.kind : null;
+  }
+
+  abort(reason: AbortReason): void {
+    if (this.controller.signal.aborted) return;
+    this.abortedAt = Date.now();
+    clearTimeout(this.watchdog);
+    // The body first, so a loop that wakes up on the abort finds the pathfinder already stopped.
+    this.stopBody();
+    this.controller.abort(new CallAborted(reason));
+  }
+
+  dispose(): void {
+    clearTimeout(this.watchdog);
+    this.extra?.signal?.removeEventListener('abort', this.onCancel);
+  }
+
+  // The watchdog is only on body tools; the others keep their own limits (wait-for-event at most 55 s).
+  private arm(): void {
+    clearTimeout(this.watchdog);
+    if (!this.body || !this.extra || this.controller.signal.aborted) return;
+    this.watchdog = setTimeout(() => this.abort('budget'), Math.max(0, this.deadline - Date.now()));
+  }
+}
+
+type Outcome = { ok: true; value: McpResponse } | { ok: false; error: unknown };
+
+interface DeathWatch {
+  died(): { at: string; cause: string } | null;
+  respawned: Promise<void>;
+  dispose(): void;
+}
+
 export interface ToolOptions {
   /** The tool drives the bot's body (moving, looking, attacking, using items) and must hold the action lease. */
   body?: boolean;
@@ -42,6 +174,8 @@ export interface ToolOptions {
 
 export class ToolFactory {
   private autopilotProvider: (() => Autopilot | null) | null = null;
+  private events: EventStore | null = null;
+  private readonly calls = new Set<ToolCall>();
 
   constructor(
     private server: McpServer,
@@ -52,34 +186,53 @@ export class ToolFactory {
     this.autopilotProvider = provider;
   }
 
+  /** Where `command` events go (E-027): a cancelled call's reply is dropped by the SDK, so it is written there too. */
+  setEvents(events: EventStore): void {
+    this.events = events;
+  }
+
+  /** The calls that have not replied yet, queued ones included (for E-040's stop-all). */
+  inFlight(): InFlightCall[] {
+    return [...this.calls];
+  }
+
   registerTool(
     name: string,
     description: string,
     schema: Record<string, unknown>,
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    executor: (args: any) => Promise<McpResponse>,
+    executor: (args: any, ctx: ToolContext) => Promise<McpResponse>,
     options: ToolOptions = {}
   ): void {
-    const handler = async (args: unknown): Promise<McpResponse> => {
-      const connectionCheck = await this.connection.checkConnectionAndReconnect();
-
-      if (!connectionCheck.connected) {
-        return {
-          content: [{ type: "text", text: connectionCheck.message! }],
-          isError: true
-        };
-      }
-
+    const body = options.body ?? BODY_TOOLS.has(name);
+    const handler = async (args: unknown, extra?: CallExtra): Promise<McpResponse> => {
+      // The budget starts now: the connection check and the wait for the lease count too (E-027).
+      const call = new ToolCall(name, body, extra);
+      this.calls.add(call);
       try {
-        const parsedArgs = this.shouldValidateSchema(schema)
-          ? this.parseArgs(schema as ZodRawShape, args)
-          : args;
-        if (options.body ?? BODY_TOOLS.has(name)) {
-          return await this.runWithBody(name, () => executor(parsedArgs));
+        const connectionCheck = await this.connection.checkConnectionAndReconnect();
+
+        if (!connectionCheck.connected) {
+          return {
+            content: [{ type: "text", text: connectionCheck.message! }],
+            isError: true
+          };
         }
-        return await executor(parsedArgs);
-      } catch (error) {
-        return this.createErrorResponse(error as Error);
+
+        try {
+          const parsedArgs = this.shouldValidateSchema(schema)
+            ? this.parseArgs(schema as ZodRawShape, args)
+            : args;
+          if (body) {
+            return await this.runWithBody(call, () => executor(parsedArgs, call.ctx));
+          }
+          return await executor(parsedArgs, call.ctx);
+        } catch (error) {
+          return this.createErrorResponse(error as Error);
+        }
+      } finally {
+        this.calls.delete(call);
+        call.dispose();
       }
     };
 
@@ -93,51 +246,135 @@ export class ToolFactory {
 
   // LLM commands run right away: they pause the current task and non-urgent instinct actions, and only wait (up to
   // 10 seconds) for urgent ones. The result tells the LLM what was interrupted. See BLUEPRINT G1.
-  private async runWithBody(name: string, run: () => Promise<McpResponse>): Promise<McpResponse> {
+  //
+  // One way to stop them (E-027, with E-018's death handling folded in): a death, a cancel from the MCP client, the end
+  // of the time budget or stop-all stop the body, abort ctx.signal, give the command DEATH_SETTLE_MS to give up, and
+  // then release the lease and discard the command's result.
+  private async runWithBody(call: ToolCall, run: () => Promise<McpResponse>): Promise<McpResponse> {
+    const name = call.name;
+    const bot = this.currentBot();
     const autopilot = this.autopilotProvider?.();
-    if (!autopilot || !autopilot.isReady()) {
-      return this.stopOnDeath(name, run);
-    }
-
-    let interruptedBy: string | null = null;
-    const acquired = await autopilot.arbiter.acquire({
-      holder: `manual ${name}`,
-      priority: PRIORITY.MANUAL,
-      onSuspend: by => { interruptedBy = by.holder; }
-    });
-    if (!acquired.ok) {
-      return this.createErrorResponse(`Busy: ${acquired.busy.holder} is controlling the bot (waited ${(acquired.waitedMs / 1000).toFixed(1)}s). Try again shortly`);
-    }
-
-    const report = autopilot.describeInterruption(
-      acquired.preempted,
-      acquired.waitedFor ? { holder: acquired.waitedFor.holder, ms: acquired.waitedMs } : undefined
-    );
-    let response: McpResponse;
+    const arbiter = autopilot?.isReady() ? autopilot.arbiter : null;
+    let lease: Lease | null = null;
+    // Only the holder stops the body (G4): a command an urgent instinct action suspended, or one still waiting in the
+    // queue, leaves it alone. Without the Autopilot there is no arbiter and the command is what drives the body.
+    call.stopBody = () => {
+      if (bot && (!arbiter || lease?.isActive())) stopBody(bot);
+    };
+    const death = this.watchDeath(bot, call);
     try {
-      response = await this.stopOnDeath(name, run);
-    } finally {
-      acquired.lease.release();
-    }
+      let report: string | null = null;
+      let interruptedBy: string | null = null;
+      // A call stopped before it asks for the lease (e.g. during a reconnect) never waited for anyone: it skips the
+      // queue, and runUntilAborted replies as for a command stopped before it started.
+      if (arbiter && !call.signal.aborted) {
+        call.queued = true;
+        const acquired = await arbiter.acquire({
+          holder: `manual ${name}`,
+          priority: PRIORITY.MANUAL,
+          onSuspend: by => { interruptedBy = by.holder; }
+        }, undefined, call.signal);
+        call.queued = false;
+        if (!acquired.ok && acquired.aborted) return await this.abortedReply(call, bot, death, null, acquired);
+        if (!acquired.ok) {
+          return this.createErrorResponse(`Busy: ${acquired.busy.holder} is controlling the bot (waited ${(acquired.waitedMs / 1000).toFixed(1)}s). Try again shortly`);
+        }
+        lease = acquired.lease;
+        report = autopilot!.describeInterruption(
+          acquired.preempted,
+          acquired.waitedFor ? { holder: acquired.waitedFor.holder, ms: acquired.waitedMs } : undefined
+        );
+      }
 
-    const notes = [report, interruptedBy ? `This command was interrupted by ${interruptedBy}.` : null].filter(Boolean);
-    if (notes.length === 0) return response;
-    return { ...response, content: [...response.content, { type: "text", text: notes.join('\n') }] };
+      const response = await this.runUntilAborted(call, run, () => lease?.release(), bot, death);
+      const notes = [report, interruptedBy ? `This command was interrupted by ${interruptedBy}.` : null].filter(Boolean);
+      if (notes.length === 0) return response;
+      return { ...response, content: [...response.content, { type: "text", text: notes.join('\n') }] };
+    } finally {
+      lease?.release();
+      death.dispose();
+      call.stopBody = () => {};
+    }
+  }
+
+  /** The command's own result, or once the call is aborted, the reply that says why it stopped. */
+  private async runUntilAborted(
+    call: ToolCall, run: () => Promise<McpResponse>, release: () => void, bot: mineflayer.Bot | null, death: DeathWatch
+  ): Promise<McpResponse> {
+    const state: { outcome: Outcome | null; beforeAbort: boolean } = { outcome: null, beforeAbort: false };
+    if (call.signal.aborted) {
+      // Stopped before the command started (before the lease was asked for, or since it was granted): the command never
+      // starts, and a body it holds stops.
+      call.stopBody();
+    } else {
+      const running = run();
+      const settled = running.then(
+        value => { state.outcome = { ok: true, value }; state.beforeAbort = !call.signal.aborted; },
+        error => { state.outcome = { ok: false, error }; state.beforeAbort = !call.signal.aborted; }
+      );
+      await Promise.race([settled, untilAborted(call.signal)]);
+      if (state.outcome && state.beforeAbort) {
+        if (state.outcome.ok) return state.outcome.value;
+        throw state.outcome.error;
+      }
+      if (!state.outcome) await settleWithin(settled, DEATH_SETTLE_MS);
+    }
+    // Nothing of this call moves the body any more: its loops stopped on the signal, or its result is discarded.
+    release();
+    return this.abortedReply(call, bot, death, state.outcome, null);
+  }
+
+  /** `queued`: the call was stopped while it waited for the lease, which `busy` held. */
+  private async abortedReply(
+    call: ToolCall, bot: mineflayer.Bot | null, death: DeathWatch, outcome: Outcome | null,
+    queued: { busy: HolderInfo; waitedMs: number } | null
+  ): Promise<McpResponse> {
+    const name = call.name;
+    const seconds = (((call.abortedAt ?? Date.now()) - call.started) / 1000).toFixed(1);
+    const at = cellText(bot?.entity?.position);
+    switch (call.reason) {
+      case 'death': {
+        await Promise.race([death.respawned, delay(RESPAWN_WAIT_MS)]);
+        const { at: diedAt, cause } = death.died() ?? { at: 'an unknown place', cause: '' };
+        return this.createErrorResponse(
+          `The bot died during ${name} at ${diedAt}${cause}; it respawned at ${cellText(bot?.entity?.position)} and the command was stopped`);
+      }
+      case 'budget': {
+        if (queued) {
+          return this.createErrorResponse(`Busy: ${queued.busy.holder} is controlling the bot (waited ${(queued.waitedMs / 1000).toFixed(1)}s). Try again shortly`);
+        }
+        // A command that gave up within DEATH_SETTLE_MS says how far it got, e.g. a region tool's counts.
+        const own = outcome?.ok ? responseText(outcome.value).replace(/^Failed: /, '') : '';
+        const budget = Math.round((call.deadline - call.started) / 1000);
+        return this.createErrorResponse(
+          `${name} did not finish within ${budget} s, so it was stopped at ${at}; call it again to continue, or use start-task for long jobs${own ? `\n${own}` : ''}`);
+      }
+      case 'stop-all': {
+        const text = `${name} was stopped by stop-all after ${seconds} s at ${at}`;
+        this.events?.addEvent('command', text);
+        return this.createErrorResponse(text);
+      }
+      case 'cancelled':
+      default: {
+        // The SDK drops the reply to a cancelled request, so the event is what the LLM can read later.
+        const text = queued
+          ? `${name} was cancelled by the MCP client while waiting for ${queued.busy.holder}`
+          : `${name} was cancelled by the MCP client after ${seconds} s; the bot stopped at ${at}`;
+        this.events?.addEvent('command', text);
+        return this.createErrorResponse(text);
+      }
+    }
   }
 
   /**
-   * Runs a body command, and stops it when the bot dies (E-018): in the live test a move-to-position walked the
-   * respawned bot back to where it had just burned to death and then reported success. On death the pathfinder and
-   * the controls stop at once, the command gets a moment to give up, and its reply says what happened instead.
+   * Stops a body command when the bot dies (E-018): in the live test a move-to-position walked the respawned bot back
+   * to where it had just burned to death and then reported success. The reply says what happened instead.
    */
-  private async stopOnDeath(name: string, run: () => Promise<McpResponse>): Promise<McpResponse> {
-    const bot = (this.connection as { getBot?: () => mineflayer.Bot | null }).getBot?.() ?? null;
-    if (!bot || typeof bot.once !== 'function') return run();
+  private watchDeath(bot: mineflayer.Bot | null, call: ToolCall): DeathWatch {
     let died: { at: string; cause: string } | null = null;
-    let signalDeath: () => void = () => {};
-    const death = new Promise<void>(resolve => { signalDeath = resolve; });
     let signalSpawn: () => void = () => {};
     const respawned = new Promise<void>(resolve => { signalSpawn = resolve; });
+    if (!bot || typeof bot.once !== 'function') return { died: () => null, respawned, dispose: () => {} };
     const onDeath = () => {
       // Listened for from the death on, so a respawn that comes quickly is not missed.
       bot.once('spawn', signalSpawn);
@@ -146,28 +383,21 @@ export class ToolFactory {
         at: cellText(bot.entity?.position),
         cause: damage && Date.now() - damage.time <= DEATH_CAUSE_WINDOW_MS ? ` (${damage.description})` : ''
       };
-      try {
-        stopPathfinder(bot);
-        bot.clearControlStates?.();
-      } catch {
-        // Stopping is best effort; the reply below still says the bot died.
-      }
-      signalDeath();
+      call.abort('death');
     };
     bot.once('death', onDeath);
-    try {
-      const running = run();
-      const first = await Promise.race([running, death.then(() => null)]);
-      if (!died) return first ?? await running;
-      await Promise.race([running.catch(() => undefined), delay(DEATH_SETTLE_MS)]);
-      await Promise.race([respawned, delay(RESPAWN_WAIT_MS)]);
-      bot.removeListener?.('spawn', signalSpawn);
-      const { at, cause } = died as { at: string; cause: string };
-      return this.createErrorResponse(
-        `The bot died during ${name} at ${at}${cause}; it respawned at ${cellText(bot.entity?.position)} and the command was stopped`);
-    } finally {
-      bot.removeListener?.('death', onDeath);
-    }
+    return {
+      died: () => died,
+      respawned,
+      dispose: () => {
+        bot.removeListener?.('death', onDeath);
+        bot.removeListener?.('spawn', signalSpawn);
+      }
+    };
+  }
+
+  private currentBot(): mineflayer.Bot | null {
+    return (this.connection as { getBot?: () => mineflayer.Bot | null }).getBot?.() ?? null;
   }
 
   createResponse(text: string): McpResponse {
@@ -226,6 +456,36 @@ export class ToolFactory {
 }
 
 const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+
+/** Waits for `promise`, but at most `ms`; the timer does not outlive the wait. */
+async function settleWithin(promise: Promise<unknown>, ms: number): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  await Promise.race([promise, new Promise(resolve => { timer = setTimeout(resolve, ms); })]);
+  clearTimeout(timer);
+}
+
+function untilAborted(signal: AbortSignal): Promise<void> {
+  return new Promise(resolve => {
+    if (signal.aborted) resolve();
+    else signal.addEventListener('abort', () => resolve(), { once: true });
+  });
+}
+
+/** Stops the pathfinder, the controls and digging; each part on its own, so one failing does not skip the rest. */
+function stopBody(bot: mineflayer.Bot): void {
+  const parts = [() => stopPathfinder(bot), () => bot.clearControlStates?.(), () => bot.stopDigging?.()];
+  for (const stop of parts) {
+    try {
+      stop();
+    } catch {
+      // Stopping is best effort; the reply still says the command was stopped.
+    }
+  }
+}
+
+function responseText(response: McpResponse): string {
+  return response.content.flatMap(part => (part.type === 'text' ? [part.text] : [])).join('\n');
+}
 
 function cellText(position: { x: number; y: number; z: number } | undefined): string {
   return position ? `(${Math.floor(position.x)}, ${Math.floor(position.y)}, ${Math.floor(position.z)})` : 'an unknown place';
