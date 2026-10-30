@@ -6,6 +6,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { COMMAND_NAME, PACKAGE_NAME, PACKAGE_VERSION } from '../src/package-info.js';
+import { TOOL_NAMES } from '../src/tool-annotations.js';
 
 interface PackageJson {
   name?: string;
@@ -129,3 +130,26 @@ test('E-024: no file in src/ names the upstream repository', (t) => {
   const naming = files.filter(name => fs.readFileSync(path.join(root, name), 'utf8').includes(UPSTREAM_REPOSITORY));
   t.deepEqual(naming, [], `these files still contain ${UPSTREAM_REPOSITORY}`);
 });
+
+// ---------------------------------------------------------------------------------------------------------------
+// E-044: F-055's TOOL_NAMES is the only source of the tool list, so the number of tools is written in no test: the
+// heading of the tool list in both READMEs must say TOOL_NAMES.length, and so must the "23 → N" line that E-040 keeps
+// with it. A tool added to the table without the READMEs, or the other way round, fails here.
+// ---------------------------------------------------------------------------------------------------------------
+
+const README_COUNTS = [
+  { file: 'README.md', heading: /^## Tools \((\d+)\)$/m, growth: /\(23 → (\d+) tools\)$/m },
+  { file: 'README.zh-CN.md', heading: /^## 工具（(\d+) 个）$/m, growth: /（23 → (\d+) 个工具）$/m }
+];
+
+for (const { file, heading, growth } of README_COUNTS) {
+  test(`E-044: the tool list heading and the "23 → N" line of ${file} say TOOL_NAMES.length`, (t) => {
+    const text = fs.readFileSync(new URL(`../${file}`, import.meta.url), 'utf8');
+    const listed = text.match(heading)?.[1];
+    t.truthy(listed, `${file} has no heading ${heading}`);
+    t.is(Number(listed), TOOL_NAMES.length, `the heading of the tool list in ${file}`);
+    const grown = text.match(growth)?.[1];
+    t.truthy(grown, `${file} has no line ${growth}`);
+    t.is(Number(grown), TOOL_NAMES.length, `the "23 → N" line in ${file}`);
+  });
+}

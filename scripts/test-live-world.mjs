@@ -14,6 +14,8 @@
 
 import { Vec3 } from 'vec3';
 import { createArena, parseLiveArgs, responseText, SetupFailed, sleep } from './lib/live-arena.mjs';
+// F-055 (E-044): the tool list of the build under test, the only source of the tools and their number.
+import { TOOL_NAMES } from '../dist/tool-annotations.js';
 
 const { port } = parseLiveArgs('This test');
 const BOT_NAME = 'MCPWorldTest';
@@ -82,6 +84,18 @@ let eventCursor = 0;
 
 try {
   const tools = await session.connect();
+  // Before the arena exists, so it costs nothing in the world; the coverage check at the end uses the same list.
+  await step('tools/list: exactly the TOOL_NAMES of dist/tool-annotations.js, each with a title and annotations (M19 E-044)', async () => {
+    const listed = new Set(tools.map(tool => tool.name));
+    const missing = TOOL_NAMES.filter(name => !listed.has(name));
+    const extra = [...listed].filter(name => !TOOL_NAMES.includes(name));
+    expect(missing.length === 0 && extra.length === 0 && listed.size === tools.length,
+      `tools/list differs from TOOL_NAMES: missing ${missing.join(', ') || 'none'}; not in TOOL_NAMES ${extra.join(', ') || 'none'}`);
+    const bare = tools
+      .filter(tool => !(typeof tool.title === 'string' && tool.title.trim()) || typeof tool.annotations !== 'object' || tool.annotations === null)
+      .map(tool => tool.name);
+    expect(bare.length === 0, `without a title or annotations: ${bare.join(', ')}`);
+  });
   await session.setup();
   ({ cx, y0, cz, helper } = session.arena);
 

@@ -6,6 +6,7 @@
 import test, { type ExecutionContext } from 'ava';
 import sinon from 'sinon';
 import { EventEmitter } from 'node:events';
+import fs from 'node:fs';
 import { Vec3 } from 'vec3';
 import minecraftData from 'minecraft-data';
 import { z } from 'zod';
@@ -37,7 +38,18 @@ import { registerEventTools } from '../src/tools/event-tools.js';
 import { registerGatheringTools } from '../src/tools/gathering-tools.js';
 import { registerInventoryTools } from '../src/tools/inventory-tools.js';
 import { registerFurnaceTools } from '../src/tools/furnace-tools.js';
-import { createFakeWorld } from './_helpers.js';
+import { registerChatTools } from '../src/tools/chat-tools.js';
+import { registerFlightTools } from '../src/tools/flight-tools.js';
+import { registerGameStateTools } from '../src/tools/gamestate-tools.js';
+import { registerCraftingTools } from '../src/tools/crafting-tools.js';
+import { registerContainerTools } from '../src/tools/container-tools.js';
+import { registerTradeTools } from '../src/tools/trade-tools.js';
+import { registerFollowTools } from '../src/tools/follow-tools.js';
+import { registerTaskTools } from '../src/tools/task-tools.js';
+import { registerVisionTools } from '../src/tools/vision-tools.js';
+import { MessageStore } from '../src/message-store.js';
+import { TOOL_NAMES, annotationsFor } from '../src/tool-annotations.js';
+import { createFactory, createFakeWorld } from './_helpers.js';
 
 const STOPPED = 'Path was stopped before it could be completed! Thus, the desired goal was not reached.';
 
@@ -2801,4 +2813,259 @@ test.serial('E-040, E-027 unchanged: a call the MCP client cancels stops only th
   await clock.tickAsync(100);
   t.true(other.settled);
   await cancelLeftOver(clock, s.tasks);
+});
+
+// ---------------------------------------------------------------------------------------------------------------
+// E-044: every tool has a title and annotations (Q31), and F-055 src/tool-annotations.ts is the only source of the tool
+// list. The classes below are written out from F-055's text, not taken from its table, so a row in the wrong class
+// fails here: read (readOnlyHint true, destructiveHint false, idempotentHint true), safe (readOnlyHint false,
+// destructiveHint false; cancel-task, stop-pathfinding and stop-all also idempotentHint true) and destructive
+// (readOnlyHint false, destructiveHint true). openWorldHint stays unset. The number of tools is written nowhere: it is
+// TOOL_NAMES.length.
+// ---------------------------------------------------------------------------------------------------------------
+
+const READ_TOOLS = [
+  'get-position', 'get-block-info', 'find-blocks', 'get-cursor-target', 'read-chat', 'list-recipes', 'get-recipe',
+  'can-craft', 'find-entity', 'list-entities', 'list-players', 'get-events', 'wait-for-event', 'detect-gamemode',
+  'get-observation', 'list-inventory', 'find-item', 'get-policy', 'list-decision-models', 'list-tasks',
+  'list-waypoints', 'ground-height', 'scan-area', 'render-map'
+];
+const SAFE_TOOLS = [
+  'look-at', 'jump', 'move-in-direction', 'equip-item', 'unequip-item', 'fly-to', 'wake', 'dismount', 'cancel-task',
+  'stop-pathfinding', 'stop-all'
+];
+const IDEMPOTENT_SAFE_TOOLS = ['cancel-task', 'stop-pathfinding', 'stop-all'];
+const DESTRUCTIVE_TOOLS = [
+  'activate-block', 'activate-entity', 'attack-entity', 'clear-region', 'collect-block', 'consume', 'container-deposit',
+  'container-withdraw', 'craft-item', 'delete-waypoint', 'dig-block', 'dig-tunnel', 'fill-region', 'flee-from',
+  'follow-entity', 'goto-waypoint', 'lead-animal', 'list-trades', 'mount-entity', 'move-to-position', 'place-block',
+  'read-container', 'resume-task', 'send-chat', 'set-policy', 'set-waypoint', 'sleep', 'smelt-item', 'start-task',
+  'toss-item', 'trade', 'use-item'
+];
+
+type ListedTool = Awaited<ReturnType<Client['listTools']>>['tools'][number];
+
+/**
+ * A real McpServer with every tool, registered as src/main.ts registers them, and a client connected to it. The bot,
+ * the Autopilot and the waypoint store are stand-ins: registering a tool calls none of them. server.tool and
+ * server.registerTool are spied on, to compare what tools/list shows with what the tools were registered with.
+ */
+async function serveAll(t: ExecutionContext) {
+  const bot = fakeBot();
+  const events = new EventStore();
+  const arbiter = new ActionArbiter({ stopBody: sinon.stub() });
+  const stand = { isReady: () => true, arbiter, describeInterruption: () => null, boundBot: () => bot, policy: new PolicyStore() };
+  const server = new McpServer({ name: 'm19-tool-experience-test', version: '0.0.0' });
+  const tool = sinon.spy(server, 'tool');
+  const registerTool = sinon.spy(server, 'registerTool');
+  const connection = { checkConnectionAndReconnect: async () => ({ connected: true }), getBot: () => bot };
+  const factory = new ToolFactory(server, connection as unknown as BotConnection);
+  factory.setEvents(events);
+  const getBot = () => bot as never;
+  const getAutopilot = () => stand as unknown as Autopilot;
+  factory.setAutopilot(getAutopilot);
+  const waypoints = {} as WaypointStore;
+
+  // Each group under the name src/main.ts calls it by, so the first E-044 test can hold this list to main.ts's.
+  const registrations: [string, () => void][] = [
+    ['registerPositionTools', () => registerPositionTools(factory, getBot, getAutopilot)],
+    ['registerInventoryTools', () => registerInventoryTools(factory, getBot)],
+    ['registerBlockTools', () => registerBlockTools(factory, getBot)],
+    ['registerEntityTools', () => registerEntityTools(factory, getBot, getAutopilot)],
+    ['registerChatTools', () => registerChatTools(factory, getBot, new MessageStore(), { allowCommands: false })],
+    ['registerFlightTools', () => registerFlightTools(factory, getBot)],
+    ['registerGameStateTools', () => registerGameStateTools(factory, getBot, getAutopilot)],
+    ['registerCraftingTools', () => registerCraftingTools(factory, getBot)],
+    ['registerFurnaceTools', () => registerFurnaceTools(factory, getBot)],
+    ['registerEventTools', () => registerEventTools(factory, events, getBot)],
+    ['registerContainerTools', () => registerContainerTools(factory, getBot)],
+    ['registerInteractionTools', () => registerInteractionTools(factory, getBot)],
+    ['registerTradeTools', () => registerTradeTools(factory, getBot)],
+    ['registerFollowTools', () => registerFollowTools(factory, getBot, getAutopilot)],
+    ['registerTaskTools', () => registerTaskTools(factory, getAutopilot)],
+    ['registerPolicyTools', () => registerPolicyTools(factory, getAutopilot, events)],
+    ['registerWaypointTools', () => registerWaypointTools(factory, getBot, waypoints)],
+    ['registerRegionTools', () => registerRegionTools(factory, getBot)],
+    ['registerGatheringTools', () => registerGatheringTools(factory, getAutopilot)],
+    ['registerVisionTools', () => registerVisionTools(factory, getBot)]
+  ];
+  for (const [, register] of registrations) register();
+  const groups = registrations.map(([name]) => name);
+
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  const client = new Client({ name: 'm19-tool-experience-client', version: '0.0.0' });
+  await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+  t.teardown(async () => {
+    await client.close();
+    await server.close();
+  });
+
+  const { tools } = await client.listTools();
+  const byName = new Map(tools.map(listed => [listed.name, listed]));
+  const get = (name: string): ListedTool => {
+    const listed = byName.get(name);
+    if (!listed) throw new Error(`${name} is not in tools/list`);
+    return listed;
+  };
+  // What each tool was registered with: server.tool(name, description, …) or the strict registerTool(name, config, …).
+  const registeredDescriptions = new Map<string, string>([
+    ...tool.getCalls().map(call => [call.args[0], call.args[1]] as [string, string]),
+    ...registerTool.getCalls().map(call => [call.args[0], call.args[1].description] as [string, string])
+  ]);
+  return { client, tools, get, registeredDescriptions, groups };
+}
+
+test.serial('E-044: every tool in tools/list has a title and annotations, without openWorldHint, and the registered names are TOOL_NAMES one to one', async (t) => {
+  const s = await serveAll(t);
+
+  // A group added to src/main.ts but not here would leave its tools out of tools/list below, unnoticed.
+  const main = fs.readFileSync(new URL('../src/main.ts', import.meta.url), 'utf8');
+  const mainGroups = [...new Set([...main.matchAll(/\b(register\w+Tools)\(/g)].map(match => match[1]))].sort();
+  t.deepEqual(mainGroups, [...s.groups].sort(), 'serveAll registers the same tool groups as src/main.ts');
+
+  const names = s.tools.map(listed => listed.name);
+  t.is(new Set(TOOL_NAMES).size, TOOL_NAMES.length, 'TOOL_NAMES has no duplicates');
+  t.is(new Set(names).size, names.length, 'tools/list has no duplicates');
+  t.deepEqual([...names].sort(), [...TOOL_NAMES].sort(), 'tools/list names exactly the tools in TOOL_NAMES');
+
+  for (const listed of s.tools) {
+    t.true(typeof listed.title === 'string' && listed.title.trim().length > 0, `${listed.name} has a title`);
+    t.is(typeof listed.annotations, 'object', `${listed.name} has annotations`);
+    t.is(listed.annotations?.openWorldHint, undefined, `${listed.name} leaves openWorldHint at its default`);
+    // Unchanged: the description is the one the tool was registered with.
+    t.is(listed.description, s.registeredDescriptions.get(listed.name), `${listed.name} keeps its description`);
+  }
+  // F-055's two examples of a title.
+  t.is(s.get('move-to-position').title, 'Move to position');
+  t.is(s.get('stop-all').title, 'Stop everything');
+});
+
+test.serial('E-044: the readOnlyHint tools are exactly F-055\'s read class, and each class has its annotations', async (t) => {
+  const s = await serveAll(t);
+
+  // F-055's three classes hold every tool, each once.
+  const classified = [...READ_TOOLS, ...SAFE_TOOLS, ...DESTRUCTIVE_TOOLS];
+  t.is(new Set(classified).size, classified.length, 'no tool is in two classes');
+  t.deepEqual([...TOOL_NAMES].sort(), [...classified].sort(), 'TOOL_NAMES is F-055\'s read, safe and destructive tools');
+
+  const readOnly = s.tools.filter(listed => listed.annotations?.readOnlyHint === true).map(listed => listed.name);
+  t.deepEqual(readOnly.sort(), [...READ_TOOLS].sort());
+
+  for (const name of READ_TOOLS) {
+    t.deepEqual(s.get(name).annotations, { readOnlyHint: true, destructiveHint: false, idempotentHint: true }, name);
+  }
+  for (const name of SAFE_TOOLS) {
+    const expected = IDEMPOTENT_SAFE_TOOLS.includes(name)
+      ? { readOnlyHint: false, destructiveHint: false, idempotentHint: true }
+      : { readOnlyHint: false, destructiveHint: false };
+    t.deepEqual(s.get(name).annotations, expected, name);
+  }
+  for (const name of DESTRUCTIVE_TOOLS) {
+    t.deepEqual(s.get(name).annotations, { readOnlyHint: false, destructiveHint: true }, name);
+  }
+});
+
+test.serial('E-044: body tools, collect-block, lead-animal, the task tools, follow, flee and set-policy are not readOnlyHint; the digging, attacking, using, tossing and chat tools are destructiveHint', async (t) => {
+  const s = await serveAll(t);
+
+  // Body tools: BODY_TOOLS, and list-trades and trade, which register with body: true.
+  const notRead = [
+    ...BODY_TOOLS, 'list-trades', 'trade', 'collect-block', 'lead-animal', 'start-task', 'resume-task', 'follow-entity',
+    'flee-from', 'set-policy'
+  ];
+  for (const name of notRead) {
+    t.is(s.get(name).annotations?.readOnlyHint, false, `${name} is not read-only`);
+  }
+  for (const name of ['dig-block', 'clear-region', 'dig-tunnel', 'attack-entity', 'use-item', 'toss-item', 'send-chat']) {
+    t.is(s.get(name).annotations?.destructiveHint, true, `${name} is destructive`);
+  }
+});
+
+test.serial('E-044 (Q31): list-trades and read-container walk with the pathfinder, so both are readOnlyHint false and destructiveHint true', async (t) => {
+  const s = await serveAll(t);
+
+  for (const name of ['list-trades', 'read-container']) {
+    t.is(s.get(name).annotations?.readOnlyHint, false, name);
+    t.is(s.get(name).annotations?.destructiveHint, true, name);
+  }
+});
+
+test.serial('E-044: the strict set-policy has its title and annotations, and still rejects an unknown field', async (t) => {
+  const s = await serveAll(t);
+
+  const setPolicy = s.get('set-policy');
+  t.true(typeof setPolicy.title === 'string' && setPolicy.title.length > 0);
+  t.deepEqual(setPolicy.annotations, { readOnlyHint: false, destructiveHint: true });
+
+  // Through the strict schema: had the SDK stripped `party`, the call would apply retreatHealth 8 and succeed.
+  let text: string;
+  let isError: boolean;
+  try {
+    const result = await s.client.callTool({ name: 'set-policy', arguments: { combat: { retreatHealth: 8 }, party: { commandsFrom: ['Steve'] } } });
+    text = ((result.content ?? []) as { text?: string }[]).map(part => part.text ?? '').join('\n');
+    isError = result.isError === true;
+  } catch (error) {
+    text = error instanceof Error ? error.message : String(error);
+    isError = true;
+  }
+  t.true(isError, text);
+  t.true(text.includes('party'), text);
+});
+
+test.serial('E-044: a tool not in the table (one a test registers) gets no title or annotations and works as before; annotationsFor gives undefined for it', async (t) => {
+  t.is(annotationsFor('e044-test-tool'), undefined);
+  // Names an object would find on its prototype.
+  t.is(annotationsFor('constructor'), undefined);
+  t.is(annotationsFor('toString'), undefined);
+  t.is(annotationsFor('__proto__'), undefined);
+
+  const s = await serve(t, fakeBot(), factory => {
+    factory.registerTool('e044-test-tool', 'A tool only this test registers', {}, async () => factory.createResponse('done'));
+  });
+  const { tools } = await s.client.listTools();
+  const listed = tools.find(candidate => candidate.name === 'e044-test-tool');
+  t.truthy(listed);
+  t.is(listed?.title, undefined);
+  t.is(listed?.annotations, undefined);
+  t.is(listed?.description, 'A tool only this test registers');
+  // A tool in the table on the same server has them.
+  t.is(tools.find(candidate => candidate.name === 'get-position')?.annotations?.readOnlyHint, true);
+  t.deepEqual(await s.call('e044-test-tool'), { text: 'done', isError: false, rejected: false });
+});
+
+test.serial('E-044 unchanged: server.tool still gets the handler as its 4th argument, update() gets the title and annotations, and a stand-in that returns nothing is skipped', async (t) => {
+  // tests/_helpers.ts's stand-in: server.tool returns undefined, and its tests read the handler from the 4th argument.
+  const { factory: helperFactory, getTool } = createFactory();
+  registerPositionTools(helperFactory, () => fakeBot() as never);
+  registerPolicyTools(helperFactory, () => ({}) as Autopilot, new EventStore());
+  t.is(typeof getTool('get-position')?.execute, 'function');
+  t.is(typeof getTool('set-policy')?.execute, 'function');
+
+  // A stand-in that returns what the SDK returns: a registered tool with update().
+  const update = sinon.stub();
+  const strictUpdate = sinon.stub();
+  const server = { tool: sinon.stub().returns({ update }), registerTool: sinon.stub().returns({ update: strictUpdate }) };
+  const factory = new ToolFactory(server as unknown as McpServer, { checkConnectionAndReconnect: async () => ({ connected: true }) } as unknown as BotConnection);
+  factory.registerTool('get-position', 'description', {}, async () => factory.createResponse('ok'));
+  factory.registerTool('e044-test-tool', 'description', {}, async () => factory.createResponse('ok'));
+
+  t.is(server.tool.callCount, 2);
+  for (const call of server.tool.getCalls()) {
+    t.is(call.args.length, 4, 'server.tool(name, description, schema, handler)');
+    t.is(typeof call.args[3], 'function');
+  }
+  t.is(update.callCount, 1, 'only the tool in the table is updated');
+  t.deepEqual(update.firstCall.args[0], {
+    title: annotationsFor('get-position')?.title, annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true }
+  });
+
+  // The strict path puts them in registerTool's config instead, next to the description and the schema.
+  registerPolicyTools(factory, () => ({}) as Autopilot, new EventStore());
+  const strict = server.registerTool.getCalls().find(call => call.args[0] === 'set-policy');
+  t.truthy(strict);
+  t.is(strict?.args[1].title, annotationsFor('set-policy')?.title);
+  t.deepEqual(strict?.args[1].annotations, { readOnlyHint: false, destructiveHint: true });
+  t.is(typeof strict?.args[1].description, 'string');
+  t.truthy(strict?.args[1].inputSchema);
+  t.true(strictUpdate.notCalled, 'the strict tool is not updated afterwards');
 });

@@ -19,7 +19,7 @@ This is a fork of **[yuniko-software/minecraft-mcp-server](https://github.com/yu
 |---|---|
 | The MCP server, the bot connection and the first **23 tools** (movement, inventory, blocks, crafting, a furnace, chat, flight, game mode) | Upstream `main` at `240c8ce` (version 2.0.4) |
 | Support for **Minecraft Java 26.1.2** | Upstream [pull request #274](https://github.com/yuniko-software/minecraft-mcp-server/pull/274) (`a9c9111`, by lifat), merged into this fork |
-| Everything else in this README: 43 more tools, perception, the Autopilot, the tests and the design documents | This fork ([yxengram/minecraft-mcp-server](https://github.com/yxengram/minecraft-mcp-server), branch `extra-tools`) |
+| Everything else in this README: 44 more tools, perception, the Autopilot, the tests and the design documents | This fork ([yxengram/minecraft-mcp-server](https://github.com/yxengram/minecraft-mcp-server), branch `extra-tools`) |
 
 The upstream project is a good, simple bridge: the LLM calls a tool, and the bot does one thing. This fork keeps that bridge and every upstream tool, with the same names and arguments. It adds what turned out to be missing when an LLM actually tries to survive in the game.
 
@@ -44,7 +44,7 @@ The upstream project is a good, simple bridge: the LLM calls a tool, and the bot
 - **Chat triage:** the decision model sorts chat. Only messages meant for the bot wake the LLM, as `chat_request` events. Nobody can command the bot by chat unless the LLM allows it.
 
 ### 3. Tested in the game, not only on paper
-- 1507 unit tests.
+- 1516 unit tests.
 - A live test that exercises all 67 tools against a real server.
 - A scenario test that compares the bot with and without the Autopilot: zombie waves, being chased by zombies with bare hands, creepers, hunger, fire, drowning, diving on purpose, a lava shore, chat.
 - A 10-day survival test on Normal difficulty. The bot survived all ten nights without dying and built a 7×7 house with a door, eight glass windows, a bed, a chest, a crafting table, a furnace and torches.
@@ -456,7 +456,7 @@ The policy lives in memory only, and goes back to these defaults whenever the bo
 ## Testing
 
 ```bash
-npm test             # 1507 unit tests
+npm test             # 1516 unit tests
 npm run lint
 npm run test:live -- <LAN_PORT>                                 # read-only check against a world
 npm run test:live:world -- <LAN_PORT> --allow-world-changes      # every tool, in a throwaway world with cheats on

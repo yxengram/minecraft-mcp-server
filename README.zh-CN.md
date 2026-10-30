@@ -19,7 +19,7 @@
 |---|---|
 | MCP 服务器、机器人连接和最初的 **23 个工具**（移动、背包、方块、合成、熔炉、聊天、飞行、游戏模式） | 上游 `main` 的 `240c8ce`（2.0.4 版） |
 | 对 **Minecraft Java 26.1.2** 的支持 | 上游 [pull request #274](https://github.com/yuniko-software/minecraft-mcp-server/pull/274)（`a9c9111`，作者 lifat），已合入本分支 |
-| 本文介绍的其余全部内容：新增的 43 个工具、感知、Autopilot、测试和设计文档 | 本分支（[yxengram/minecraft-mcp-server](https://github.com/yxengram/minecraft-mcp-server)，分支 `extra-tools`） |
+| 本文介绍的其余全部内容：新增的 44 个工具、感知、Autopilot、测试和设计文档 | 本分支（[yxengram/minecraft-mcp-server](https://github.com/yxengram/minecraft-mcp-server)，分支 `extra-tools`） |
 
 上游项目是一座简洁好用的桥：LLM 调用一个工具，机器人做一件事。本分支保留了这座桥和上游的全部工具，名称和参数都不变；补上的是 LLM 真正尝试在游戏里生存时发现缺少的东西。
 
@@ -44,7 +44,7 @@
 - **聊天分拣：**决策模型对聊天分类，只有发给机器人的消息才会以 `chat_request` 事件唤醒 LLM。除非 LLM 允许，任何人都不能通过聊天指挥机器人。
 
 ### 3. 在游戏里实测，而不只是纸面
-- 1507 个单元测试。
+- 1516 个单元测试。
 - 实机测试：在真实服务器上逐一运行全部 67 个工具。
 - 情景测试：比较有无 Autopilot 时机器人的表现，包括僵尸潮、空手被僵尸追赶、苦力怕、饥饿、着火、溺水、有意潜水、岩浆岸边和聊天。
 - 普通难度下的 10 天生存测试：机器人度过了全部十个夜晚，没有死亡，并建起一座 7×7 的房子，带门、八扇玻璃窗、床、箱子、工作台、熔炉和火把。
@@ -456,7 +456,7 @@ API key 只从环境变量 `OPENROUTER_API_KEY` 读取，不要把它写进仓�
 ## 测试
 
 ```bash
-npm test             # 1507 个单元测试
+npm test             # 1516 个单元测试
 npm run lint
 npm run test:live -- <局域网端口>                                 # 对世界做只读检查
 npm run test:live:world -- <局域网端口> --allow-world-changes      # 在开启作弊的一次性世界中运行每个工具

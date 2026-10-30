@@ -17,7 +17,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { createServer } from 'node:net';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const REPO = fileURLToPath(new URL('..', import.meta.url));
 const STDERR_TAIL = 40;
@@ -229,9 +229,7 @@ async function checkMcp(entry, args, pkg) {
         'every tool has a description and an input schema',
         incomplete.length > 0 ? incomplete.join(', ') : undefined
       );
-      // TODO(E-044): F-055 makes dist/tool-annotations.js the source of the tool list. Then import TOOL_NAMES from
-      // path.join(path.dirname(entry), 'tool-annotations.js') and require that the listed names equal it exactly and
-      // that every tool has a title and annotations. The number of tools stays unwritten here.
+      await checkToolList(entry, tools);
     } catch (error) {
       report(false, 'tools/list', error.message);
     }
@@ -250,6 +248,42 @@ async function checkMcp(entry, args, pkg) {
     );
     await client.close();
   }
+}
+
+// F-055 (E-044): tool-annotations.js beside the entry is the source of the tool list, so a packed or installed server
+// is held to its own. The listed names must be exactly its TOOL_NAMES, and every tool must have a title and
+// annotations. The number of tools stays unwritten here.
+async function checkToolList(entry, tools) {
+  // First, as it needs no TOOL_NAMES: a package without tool-annotations.js still says which tools lack them.
+  const bare = tools
+    .filter(tool => !(typeof tool.title === 'string' && tool.title.trim()) || typeof tool.annotations !== 'object' || tool.annotations === null)
+    .map(tool => tool.name);
+  report(bare.length === 0, 'every tool has a title and annotations', bare.length > 0 ? listSome(bare) : undefined);
+
+  const file = path.join(path.dirname(entry), 'tool-annotations.js');
+  let expected;
+  try {
+    // A file URL: import() takes no bare absolute path on Windows.
+    ({ TOOL_NAMES: expected } = await import(pathToFileURL(file).href));
+    if (!Array.isArray(expected) || expected.length === 0) throw new Error('TOOL_NAMES is not a list of names');
+  } catch (error) {
+    report(false, 'tool-annotations.js beside the entry', `${file}: ${error.message}`);
+    return;
+  }
+  const listed = new Set(tools.map(tool => tool.name));
+  const wanted = new Set(expected);
+  const missing = expected.filter(name => !listed.has(name));
+  const extra = [...listed].filter(name => !wanted.has(name));
+  const problems = [
+    missing.length > 0 ? `missing: ${listSome(missing)}` : '',
+    extra.length > 0 ? `not in TOOL_NAMES: ${listSome(extra)}` : '',
+    wanted.size !== expected.length ? 'TOOL_NAMES has duplicates' : ''
+  ].filter(Boolean);
+  report(
+    problems.length === 0,
+    'tools/list names exactly the TOOL_NAMES of tool-annotations.js',
+    problems.length > 0 ? problems.join('; ') : `${expected.length} tools`
+  );
 }
 
 // With nothing listening, a tool call must come back as the fixed connection error that E-028 and users rely on.

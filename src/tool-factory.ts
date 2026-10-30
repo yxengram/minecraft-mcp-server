@@ -6,6 +6,7 @@ import { PRIORITY, type HolderInfo, type Lease } from './autopilot/action-arbite
 import type { EventStore } from './event-store.js';
 import { AbortError, stopPathfinder, throwIfAborted } from './tools/movement-utils.js';
 import { log } from './logger.js';
+import { annotationsFor } from './tool-annotations.js';
 import type mineflayer from 'mineflayer';
 
 // After a death or another abort, how long a stopped command may take to give up before its reply is replaced and
@@ -393,11 +394,16 @@ export class ToolFactory {
       }
     };
 
+    // The title and annotations come from F-055's table (E-044); a tool not in it (one a test registers) gets neither.
+    const shown = annotationsFor(name);
     if (options.strict) {
       // server.tool() only takes a raw shape, which the SDK turns into a stripping object schema.
-      this.server.registerTool(name, { description, inputSchema: z.object(schema as ZodRawShape).strict() }, handler);
+      this.server.registerTool(name, { ...shown, description, inputSchema: z.object(schema as ZodRawShape).strict() }, handler);
     } else {
-      this.server.tool(name, description, schema, handler);
+      // Not the server.tool() overload with annotations: it takes the handler as the 5th argument, and the tests' stand-in
+      // reads it from the 4th. update() before connect() sends no list_changed; the stand-in returns nothing to update.
+      const registered = this.server.tool(name, description, schema, handler);
+      if (shown) registered?.update?.(shown);
     }
   }
 
