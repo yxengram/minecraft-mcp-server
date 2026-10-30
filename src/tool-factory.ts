@@ -16,8 +16,12 @@ export const RESPAWN_WAIT_MS = 5000;
 const DEATH_CAUSE_WINDOW_MS = 10000;
 // A body command's time budget from the moment its call arrives, the connection check and the wait for the lease
 // included (E-027): common MCP clients give up on a request after 60 s and cancel it, so the command stops first and
-// its reply still arrives.
+// its reply still arrives. The default; --call-limit-seconds sets another through the factory's options (E-038).
 export const CALL_LIMIT_MS = 50000;
+// What a long tool leaves of the budget for its reply (E-038): it stops waiting this long before the deadline.
+export const REPLY_MARGIN_MS = 5000;
+// The longest delay setTimeout takes; a longer one fires after 1 ms.
+const MAX_TIMER_MS = 2 ** 31 - 1;
 
 type McpContent =
   | { type: "text"; text: string }
@@ -75,6 +79,23 @@ export interface ToolContext {
   setProgress(text: string | (() => string)): void;
 }
 
+/**
+ * How long a long tool waits when the caller gives no time limit (E-038): what is left of the call's budget, less
+ * REPLY_MARGIN_MS for the reply. Taken when the wait starts, so a wait for the lease counts; usually about 45 s.
+ */
+export function defaultLimitMs(ctx: ToolContext): number {
+  return Math.max(0, ctx.remainingMs() - REPLY_MARGIN_MS);
+}
+
+/**
+ * For a time limit the caller gave (E-038): moves the deadline, and with it a body tool's watchdog, so that `ms` from
+ * now still leaves REPLY_MARGIN_MS for the reply. Only ever later; the caller answers for the MCP client's timeout.
+ */
+export function allowFor(ctx: ToolContext, ms: number): void {
+  const short = ms + REPLY_MARGIN_MS - ctx.remainingMs();
+  if (short > 0) ctx.extendDeadline(short);
+}
+
 /** A tool call that has not replied yet (E-027); E-040's stop-all stops these. */
 export interface InFlightCall {
   readonly name: string;
@@ -107,8 +128,8 @@ class ToolCall implements InFlightCall {
   private watchdog: ReturnType<typeof setTimeout> | undefined;
   private readonly onCancel = () => this.abort('cancelled');
 
-  constructor(readonly name: string, readonly body: boolean, private readonly extra: CallExtra | undefined) {
-    this.deadline = this.started + CALL_LIMIT_MS;
+  constructor(readonly name: string, readonly body: boolean, private readonly extra: CallExtra | undefined, limitMs: number) {
+    this.deadline = this.started + limitMs;
     const call = this;
     this.ctx = {
       signal: this.controller.signal,
@@ -121,7 +142,8 @@ class ToolCall implements InFlightCall {
       throwIfAborted: () => throwIfAborted(call.controller.signal),
       setProgress: () => {}
     };
-    // A direct call without extra has no client to cancel it and no budget, as before (E-027).
+    // A direct call without extra has no client to cancel it and no watchdog, as before (E-027). It still has a
+    // deadline, so the long tools' default limits (E-038) apply to it as well.
     const cancel = extra?.signal;
     if (cancel?.aborted) this.abort('cancelled');
     else cancel?.addEventListener('abort', this.onCancel, { once: true });
@@ -152,11 +174,16 @@ class ToolCall implements InFlightCall {
     this.extra?.signal?.removeEventListener('abort', this.onCancel);
   }
 
-  // The watchdog is only on body tools; the others keep their own limits (wait-for-event at most 55 s).
+  // The watchdog is only on body tools; the others keep their own limits (wait-for-event at most 55 s). A deadline an
+  // explicit timeoutMs moved (E-038) can be further away than setTimeout can wait, which would fire it at once: the
+  // timer waits at most MAX_TIMER_MS and is set again until the deadline has come.
   private arm(): void {
     clearTimeout(this.watchdog);
     if (!this.body || !this.extra || this.controller.signal.aborted) return;
-    this.watchdog = setTimeout(() => this.abort('budget'), Math.max(0, this.deadline - Date.now()));
+    this.watchdog = setTimeout(
+      () => (Date.now() < this.deadline ? this.arm() : this.abort('budget')),
+      Math.min(MAX_TIMER_MS, Math.max(0, this.deadline - Date.now()))
+    );
   }
 }
 
@@ -175,17 +202,27 @@ export interface ToolOptions {
   strict?: boolean;
 }
 
+export interface ToolFactoryOptions {
+  /** Each call's time budget (E-038's --call-limit-seconds); CALL_LIMIT_MS when not given. */
+  callLimitMs?: number;
+}
+
 export class ToolFactory {
   private autopilotProvider: (() => Autopilot | null) | null = null;
   private events: EventStore | null = null;
   private readonly calls = new Set<ToolCall>();
   // The body commands waiting on each bot's end signal (E-029): one subscription per bot, not one per call.
   private readonly endWatchers = new WeakMap<mineflayer.Bot, Set<ToolCall>>();
+  /** Each call's time budget, for the tools' descriptions and replies (E-038). */
+  readonly callLimitMs: number;
 
   constructor(
     private server: McpServer,
-    private connection: BotConnection
-  ) {}
+    private connection: BotConnection,
+    options: ToolFactoryOptions = {}
+  ) {
+    this.callLimitMs = options.callLimitMs ?? CALL_LIMIT_MS;
+  }
 
   setAutopilot(provider: () => Autopilot | null): void {
     this.autopilotProvider = provider;
@@ -234,7 +271,7 @@ export class ToolFactory {
     };
     const handler = async (args: unknown, extra?: CallExtra): Promise<McpResponse> => {
       // The budget starts now: the connection check and the wait for the lease count too (E-027).
-      const call = new ToolCall(name, body, extra);
+      const call = new ToolCall(name, body, extra, this.callLimitMs);
       this.calls.add(call);
       try {
         return this.withJoinNote(call, await respond(call, args));

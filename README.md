@@ -168,16 +168,18 @@ Restart the client completely. The bot joins the world once the client starts th
 | `--decision-model` | `perplexity/pplx-decider-v1.2-20261016` | The OpenRouter decision model |
 | `--allow-commands` | off | Let `send-chat` run server commands (`/give`, `/fill`, `/tp` and so on); chat and `/msg`, `/tell`, `/w`, `/me`, `/teammsg`, `/tm` always work |
 | `--greeting` | not set: the bot says nothing when it joins | A line the bot says in chat each time it joins the world (not when it respawns): one line of plain chat, at most 256 characters, not starting with `/` |
+| `--call-limit-seconds` | `50` | How long a command that drives the bot, `collect-block` or `lead-animal` may take before it replies, from 20 to 3600 seconds; see [Time limits](#time-limits). Raise it only for an MCP client that waits longer than 60 seconds for a reply |
 | `--help`, `-h` | — | Print the options and exit |
 | `--version` | — | Print the version and exit |
 
 The API key is read only from the `OPENROUTER_API_KEY` environment variable. Do not put it in any file inside the repository.
 
-The server checks the options when it starts. An unknown option, a `--port` that is not a whole number from 1 to 65535, an empty `--host`, a `--username` that is empty, longer than 16 characters or contains spaces or control characters, or a `--greeting` that is empty, longer than 256 characters, contains a line break or control character or starts with `/` makes it write one line to stderr and exit with 1 before it connects. The MCP client then shows the server as failed, and the line is in the client's log for the server (see [Where to look](#where-to-look)). A name that passes but is not 3 to 16 letters, digits or underscores (for example `Bot-1`, `ab` or a name in Chinese) only gets a warning in that log, because some servers refuse such names.
+The server checks the options when it starts. An unknown option, a `--port` that is not a whole number from 1 to 65535, an empty `--host`, a `--username` that is empty, longer than 16 characters or contains spaces or control characters, a `--greeting` that is empty, longer than 256 characters, contains a line break or control character or starts with `/`, or a `--call-limit-seconds` that is not a whole number from 20 to 3600 makes it write one line to stderr and exit with 1 before it connects. The MCP client then shows the server as failed, and the line is in the client's log for the server (see [Where to look](#where-to-look)). A name that passes but is not 3 to 16 letters, digits or underscores (for example `Bot-1`, `ab` or a name in Chinese) only gets a warning in that log, because some servers refuse such names.
 
 ### 4. Play
 Ask the LLM to do things in Minecraft. A few habits make it much better at the game:
 - Use `start-task` for long jobs, then `wait-for-event` (for example on `task_done`, `task_failed`, `instinct`, `chat_request`) instead of polling.
+- When `collect-block` or `lead-animal` replies `Still …`, its task is still going: wait for it with `wait-for-event` as the reply says (see [Time limits](#time-limits)).
 - Use `get-observation` for a quick look, and `scan-area` or `render-map` to understand the terrain.
 - Before doing something risky on purpose, set the intent, for example `set-policy { "instinct": { "intent": "exploring an underwater cave on purpose" } }`.
 
@@ -250,6 +252,16 @@ An `OFFLINE` comes first: the line shows it even when the instinct is also turne
 ## Tools (66)
 
 A command that moves or uses the bot's body stops when the bot dies, and its reply says where and why the bot died and where it respawned. The pathfinder keeps away from lava shores when it can and never bridges lava.
+
+### Time limits
+Commands that move or use the bot's body, and `collect-block` and `lead-animal`, reply within the call limit, 50 seconds unless `--call-limit-seconds` sets another, because common MCP clients give up on a request after 60 seconds (`wait-for-event` keeps its own cap of 55 seconds). A command that moves or uses the bot's body is stopped when the limit runs out, and the reply says where the bot stopped. The long tools stay within it by themselves:
+- `collect-block` and `lead-animal` wait at most about 45 seconds for their task. A task that is still going then keeps running in the background, and the reply is a success that says so, for example `Still collecting after 45 s: task t5 gather keeps running in the background (mined 3 of 10 oak_log). Wait for it with wait-for-event types ['task_done', 'task_failed', 'task_cancelled'] (list-tasks shows whether it has already ended); stop it with cancel-task t5`. `lead-animal` says `Still leading after`, and a paused task `is paused (<reason>)`. Their `timeoutMs` limits only the task (120 and 300 seconds by default).
+- `move-to-position` and `goto-waypoint` stop after about 35 seconds, which leaves time for the wait in a Nether portal: `Move timed out after 35000ms at (x, y, z), D blocks from the target; call move-to-position again to continue`.
+- `clear-region`, `fill-region` and `dig-tunnel` stop after about 45 seconds (they used to allow 120) and say how far they got: `Stopped early with N block(s) not processed; run again to continue`.
+- `smelt-item` waits at most about 45 seconds for the output; a batch that is not done keeps smelting in the furnace, and the reply says so.
+- `move-in-direction` cuts a `duration` longer than about 45 seconds and says so in the reply.
+
+A `timeoutMs` given to the moves, the region tools or `smelt-item` is kept and lengthens the call's limit, so the MCP client must then wait that long for the reply. A larger `--call-limit-seconds` lengthens all these defaults with it; use it only with a client whose request timeout is longer still.
 
 ### Movement
 - `get-position`: the bot's position
@@ -359,7 +371,7 @@ Limits:
 - `hunt` never attacks players or tamed animals.
 - A new task replaces the current one, unless `replace` is `false`.
 - Any command that moves the bot pauses the current task, and its reply says so. Use `resume-task` or `cancel-task` afterwards.
-- The instinct pauses the task while it acts and gives it back afterwards, unless it leaves the decision to you or its action left the bot walled in (after digging in): then the task stays held, and the bot stays in its shelter, until `resume-task` or `cancel-task`. A `lead-animal` or `collect-block` call whose task is held keeps waiting until its time limit.
+- The instinct pauses the task while it acts and gives it back afterwards, unless it leaves the decision to you or its action left the bot walled in (after digging in): then the task stays held, and the bot stays in its shelter, until `resume-task` or `cancel-task`. A `lead-animal` or `collect-block` call whose task is held replies after about 45 seconds that the task `is paused` and why, unless its `timeoutMs` plus 5 seconds comes first: then the task is cancelled (`time limit reached`).
 - Events: `task_started`, `task_progress`, `task_paused`, `task_resumed`, `task_done`, `task_failed`, `task_cancelled`.
 
 ### Instinct

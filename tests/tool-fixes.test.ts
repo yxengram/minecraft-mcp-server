@@ -209,6 +209,30 @@ test('place-block that cannot place says why in the failure', async (t) => {
   t.is(result.content[0].text, 'Failed: Could not place a block at (3, 64, 0): no suitable reference block found (last error: No block has been placed : the block is still air)');
 });
 
+// E-038 adds where the bot stopped to the move tools' timeouts only; the block tools' approach keeps its 20 s and text.
+test.serial('place-block whose walk to the reference times out says so as before, after 20 s', async (t) => {
+  const clock = sinon.useFakeTimers({ now: 1e6 });
+  t.teardown(() => clock.restore());
+  const world = createFakeWorld({ '3,63,0': 'grass_block' }, new Vec3(0, 65, 0));
+  world.bot.canSeeBlock = () => false;
+  // A walk that never arrives; like the real pathfinder's, it rejects once the pathfinder is stopped.
+  const pending: ((error: Error) => void)[] = [];
+  world.bot.pathfinder.goto.callsFake(() => new Promise((_, reject) => pending.push(reject)));
+  world.bot.pathfinder.stop.callsFake(() => { for (const reject of pending.splice(0)) reject(new Error('Path was stopped')); });
+  let result: { content: { text: string }[]; isError?: boolean } | null = null;
+  void placeTool(world).execute({ x: 3, y: 64, z: 0 }).then(value => { result = value as typeof result; });
+
+  await clock.tickAsync(19900);
+  t.is(result, null, 'still walking before 20 s');
+  await clock.tickAsync(200);
+  const reply = result as unknown as { content: { text: string }[]; isError?: boolean };
+  t.true(reply.isError);
+  t.is(reply.content[0].text, 'Failed: Could not place a block at (3, 64, 0): no suitable reference block found (last error: could not get to a spot to place from: Move timed out after 20000ms)');
+  t.false(reply.content[0].text.includes('blocks from the target'));
+  t.false(reply.content[0].text.includes('again to continue'));
+  t.true(world.bot.pathfinder.stop.calledOnce, 'the approach stopped the pathfinder');
+});
+
 // ---- smelt-item takes the whole batch ---------------------------------------------------------------------------------
 
 const item = (name: string, count: number, type: number) => ({ name, count, type, metadata: 0 }) as unknown as Item;
@@ -268,7 +292,8 @@ test.serial('smelt-item that runs out of time reports what it took and what is s
   const run = smeltTool([item('sand', 4, 1), item('acacia_planks', 10, 3)], furnace).execute({ x: 0, y: 64, z: 0, inputItem: 'sand', inputCount: 4, fuelItem: 'acacia_planks', fuelCount: 3, timeoutMs: 25000 });
   await clock.tickAsync(30000);
   const result = await run;
-  t.is(result.content[0].text, 'Smelted 2 glass; 2 sand still in the furnace (stopped after 25000ms)');
+  // E-038: with input left, the reply adds that the furnace keeps smelting it.
+  t.is(result.content[0].text, 'Smelted 2 glass; 2 sand still in the furnace (stopped after 25000ms); it keeps smelting in the furnace');
 });
 
 test.serial('smelt-item picks the exact item name first: "sand" is sand, not red_sand', async (t) => {

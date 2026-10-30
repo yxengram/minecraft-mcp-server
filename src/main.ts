@@ -89,7 +89,8 @@ async function main() {
     version: PACKAGE_VERSION
   });
 
-  const factory = new ToolFactory(server, connection);
+  // --call-limit-seconds sets each call's budget, for clients that wait longer than 60 s for a reply (E-038).
+  const factory = new ToolFactory(server, connection, { callLimitMs: config.callLimitSeconds * 1000 });
   factory.setEvents(eventStore);
   const getBot = () => connection.getBot()!;
   const getAutopilot = () => autopilot;

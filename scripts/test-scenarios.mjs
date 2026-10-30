@@ -300,6 +300,8 @@ const SCENARIOS = {
       for (const [name, x, z] of [['across', cx + 6, cz], ['back to the west shore', cx - 3, cz]]) {
         let reply;
         try {
+          // The explicit timeoutMs moves the server's deadline (E-038) to 60 s plus 10 s in a portal plus 5 s for the
+          // reply, which the 90 s client timeout covers.
           reply = await call('move-to-position', { x, y: y0, z, range: 0, timeoutMs: 60000 }, { timeout: 90000 });
         } catch (error) {
           reply = `Failed: ${error.message}`;

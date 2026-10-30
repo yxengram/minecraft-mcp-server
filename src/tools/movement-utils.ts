@@ -390,9 +390,21 @@ export function throwIfAborted(signal: AbortSignal | undefined): void {
 }
 
 /**
+ * What gotoWithTimeout throws when its time limit runs out (E-038), with the text it always had. The move tools add
+ * where the bot stopped; the block tools' approaches report it as it is.
+ */
+export class MoveTimeout extends Error {
+  constructor(readonly timeoutMs: number) {
+    super(`Move timed out after ${timeoutMs}ms`);
+    this.name = 'MoveTimeout';
+  }
+}
+
+/**
  * pathfinder.goto with an optional time limit and an optional abort signal (E-027). On abort it throws AbortError at
  * once, also when goto would never settle, and leaves stopping the pathfinder to the tool factory, which holds the
- * lease (G4); a pathfinder error that the factory's stop caused is reported as the abort too.
+ * lease (G4); a pathfinder error that the factory's stop caused is reported as the abort too. When the time limit runs
+ * out it stops the pathfinder and throws MoveTimeout.
  */
 export async function gotoWithTimeout(bot: mineflayer.Bot, goal: Goal, timeoutMs?: number, signal?: AbortSignal): Promise<void> {
   throwIfAborted(signal);
@@ -410,7 +422,7 @@ export async function gotoWithTimeout(bot: mineflayer.Bot, goal: Goal, timeoutMs
     stops.push(new Promise<never>((_, reject) => {
       timeoutId = setTimeout(() => {
         timedOut = true;
-        reject(new Error(`Move timed out after ${timeoutMs}ms`));
+        reject(new MoveTimeout(timeoutMs));
       }, timeoutMs);
     }));
   }

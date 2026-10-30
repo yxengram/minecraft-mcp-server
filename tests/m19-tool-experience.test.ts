@@ -10,7 +10,12 @@ import minecraftData from 'minecraft-data';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
-import { CALL_LIMIT_MS, DEATH_SETTLE_MS, RESPAWN_WAIT_MS, ToolFactory, type ToolContext } from '../src/tool-factory.js';
+import {
+  CALL_LIMIT_MS, DEATH_SETTLE_MS, REPLY_MARGIN_MS, RESPAWN_WAIT_MS, ToolFactory, type ToolContext, type ToolFactoryOptions
+} from '../src/tool-factory.js';
+import { PORTAL_WAIT_MS } from '../src/tools/movement-utils.js';
+import { registerWaypointTools } from '../src/tools/waypoint-tools.js';
+import type { WaypointStore } from '../src/waypoint-store.js';
 import { ActionArbiter, PRIORITY } from '../src/autopilot/action-arbiter.js';
 import { TaskManager } from '../src/autopilot/task-manager.js';
 import { BEHAVIORS } from '../src/autopilot/autopilot.js';
@@ -102,7 +107,10 @@ type Reply = { text: string; isError: boolean; rejected: boolean };
  * manager for collect-block. The arbiter's own preemption stop is a separate stub, so the bot's stubs count only
  * what the tool factory and the tools did.
  */
-async function serve(t: ExecutionContext, bot: unknown, extra: (factory: ToolFactory, stand: Record<string, unknown>) => void = () => {}) {
+async function serve(
+  t: ExecutionContext, bot: unknown, extra: (factory: ToolFactory, stand: Record<string, unknown>) => void = () => {},
+  factoryOptions: ToolFactoryOptions = {}
+) {
   const events = new EventStore();
   const arbiter = new ActionArbiter({ stopBody: sinon.stub() });
   const stand: Record<string, unknown> = { isReady: () => true, arbiter, describeInterruption: () => null, boundBot: () => bot };
@@ -117,7 +125,7 @@ async function serve(t: ExecutionContext, bot: unknown, extra: (factory: ToolFac
     checkConnectionAndReconnect: async () => ({ connected: true }),
     getBot: () => bot
   };
-  const factory = new ToolFactory(server, connection as unknown as BotConnection);
+  const factory = new ToolFactory(server, connection as unknown as BotConnection, factoryOptions);
   factory.setEvents(events);
   factory.setAutopilot(() => stand as unknown as Autopilot);
   const getBot = () => bot as never;
@@ -152,7 +160,7 @@ async function serve(t: ExecutionContext, bot: unknown, extra: (factory: ToolFac
     }
   };
   const commandEvents = () => events.query({ types: ['command'], limit: 100 }).events.map(event => event.message);
-  return { factory, arbiter, events, call, commandEvents, stand, connection };
+  return { factory, arbiter, events, call, commandEvents, stand, connection, client };
 }
 
 /** Tracks whether a call has replied yet. */
@@ -410,11 +418,13 @@ test.serial('E-027 (2): after the abort attack-entity hits no more', async (t) =
 
 test.serial('E-027 (3): a body command past the 50 s budget returns an error, is stopped, and its lease is released', async (t) => {
   const clock = useClock(t);
-  const bot = fakeBot();
+  // E-038 gave move-to-position a default limit of its own (about 35 s), so the walk that never ends is
+  // activate-block's, whose walk to the block has no limit but the budget.
+  const bot = fakeBot({ '40,64,0': 'lever' });
   const s = await serve(t, bot);
   t.is(CALL_LIMIT_MS, 50000);
 
-  const pending = track(s.call('move-to-position', { x: 40, y: 64, z: 0 }));
+  const pending = track(s.call('activate-block', { x: 40, y: 64, z: 0 }));
   await clock.tickAsync(CALL_LIMIT_MS - 100);
   t.false(pending.settled, 'still walking just before the budget');
   t.false(bot.pathfinder.stop.called);
@@ -424,7 +434,7 @@ test.serial('E-027 (3): a body command past the 50 s budget returns an error, is
   const reply = pending.reply!;
   t.true(reply.isError);
   t.false(reply.rejected, 'a real reply, not a client-side timeout');
-  t.is(reply.text, 'Failed: move-to-position did not finish within 50 s, so it was stopped at (0, 64, 0); call it again to continue, or use start-task for long jobs');
+  t.is(reply.text, 'Failed: activate-block did not finish within 50 s, so it was stopped at (0, 64, 0); call it again to continue, or use start-task for long jobs');
   t.true(bot.pathfinder.stop.called);
   t.true(bot.clearControlStates.called);
   t.is(s.arbiter.holder(), null);
@@ -592,8 +602,10 @@ test.serial('E-027 (5): collect-block has no watchdog, and once cancelled its ga
   t.deepEqual(s.factory.inFlight().map(c => ({ name: c.name, body: c.body })), [{ name: 'collect-block', body: false }],
     'collect-block is in the in-flight table (for E-040)');
 
-  await clock.tickAsync(CALL_LIMIT_MS + 5000);
-  t.false(call.settled, 'collect-block is not stopped by a watchdog');
+  // Since E-038 the call replies "Still collecting …" at about 45 s (see the E-038 cases below), so the cancel comes
+  // before that.
+  await clock.tickAsync(CALL_LIMIT_MS - 15000);
+  t.false(call.settled, 'still waiting, before the default limit (about 45 s)');
   t.is(tasks!.currentTask()?.status, 'running');
 
   controller.abort();
@@ -1025,4 +1037,682 @@ test.serial('E-031: still successes, so the rule does not grow: find-item that f
   t.false(bot.unequip.called);
   t.false(bot.wake.called);
   t.false(bot.dismount.called);
+});
+
+// ---------------------------------------------------------------------------------------------------------------
+// E-038: long tools get a default time limit within the call budget, the default limit being what is left of the
+// budget less REPLY_MARGIN_MS (about 45 s), and hand long work to the background task (Q27). collect-block and
+// lead-animal reply "Still …" and leave their task running; the moves stop after about 35 s; the region tools after
+// about 45 s; smelt-item's wait and move-in-direction's duration are capped. An explicit timeoutMs is kept and moves
+// the watchdog. --call-limit-seconds sets the budget through the factory's options (its parsing is in config.test.ts).
+// ---------------------------------------------------------------------------------------------------------------
+
+const STILL_WAIT = "Wait for it with wait-for-event types ['task_done', 'task_failed', 'task_cancelled'] (list-tasks shows whether it has already ended)";
+const still = (verb: string, id: string, behavior: string, state: string) =>
+  `Still ${verb} after 45 s: task ${id} ${behavior} ${state}. ${STILL_WAIT}; stop it with cancel-task ${id}`;
+
+test.serial('E-038: the default limit is the 50 s budget less a 5 s reply margin, and the moves leave 10 s more for a portal', (t) => {
+  t.is(CALL_LIMIT_MS, 50000);
+  t.is(REPLY_MARGIN_MS, 5000);
+  t.is(PORTAL_WAIT_MS, 10000);
+});
+
+/**
+ * collect-block on a real TaskManager: oak logs at `logs` (x,y,z keys). The bot digs those `visible` lets it see from
+ * where it stands; its walk to any other never ends (a stop makes it reject, as the real pathfinder's does).
+ */
+async function gatherServe(t: ExecutionContext, logs: string[], visible: (x: number) => boolean) {
+  const world = createFakeWorld(Object.fromEntries(logs.map(cell => [cell, 'oak_log'])));
+  const logId = minecraftData('1.20.4').blocksByName.oak_log.id;
+  world.bot.findBlocks.callsFake(({ matching, count }: { matching: number; count: number }) => (matching === logId
+    ? [...world.blocks.entries()].filter(([, name]) => name === 'oak_log').map(([cell]) => world.keyToVec(cell))
+      .sort((a, b) => a.distanceTo(world.bot.entity.position) - b.distanceTo(world.bot.entity.position)).slice(0, count)
+    : []));
+  Object.assign(world.bot, { canSeeBlock: (block: { position: Vec3 }) => visible(block.position.x) });
+  const pending: ((error: Error) => void)[] = [];
+  world.bot.pathfinder.goto = sinon.stub().callsFake(() => new Promise((_, reject) => pending.push(reject)));
+  world.bot.pathfinder.stop = sinon.stub().callsFake(() => { for (const reject of pending.splice(0)) reject(new Error(STOPPED)); });
+  const taskEvents = new EventStore();
+  let tasks: TaskManager | null = null;
+  const s = await serve(t, world.bot, (factory, stand) => {
+    tasks = new TaskManager({ getBot: () => world.bot as never, getArbiter: () => stand.arbiter as ActionArbiter, events: taskEvents, behaviors: BEHAVIORS });
+    stand.tasks = tasks;
+    registerGatheringTools(factory, () => stand as unknown as Autopilot);
+  });
+  return { ...s, world, tasks: tasks! as TaskManager, taskEvents };
+}
+
+/** Cancels a task a test left running, and lets the cancel finish on the fake clock. */
+async function cancelLeftOver(clock: sinon.SinonFakeTimers, tasks: TaskManager) {
+  const cancelling = tasks.cancelAll('test over');
+  await clock.tickAsync(3000);
+  await cancelling;
+}
+
+test.serial('E-038 (1): collect-block whose task is still going at the default limit replies "Still collecting" with its progress, and the task keeps running', async (t) => {
+  const clock = useClock(t);
+  // The first log is dug where the bot stands; the walk to the second never ends.
+  const s = await gatherServe(t, ['1,64,0', '6,64,0'], x => x === 1);
+
+  const pending = track(s.call('collect-block', { blockType: 'oak_log', count: 2 }));
+  await clock.tickAsync(44900);
+  t.false(pending.settled, 'still waiting just before the default limit');
+  const task = s.tasks.currentTask()!;
+  t.is(task.status, 'running');
+  t.is(task.progress, 'mined 1 of 2 oak_log');
+
+  await clock.tickAsync(200);
+  t.true(pending.settled, 'replied at the default limit, not at the task\'s own 120 s');
+  const reply = pending.reply!;
+  t.false(reply.rejected);
+  t.false(reply.isError, reply.text);
+  t.is(reply.text, still('collecting', task.id, 'gather', 'keeps running in the background (mined 1 of 2 oak_log)'));
+  t.true(reply.text.startsWith('Still collecting after'));
+  t.false(reply.text.includes('did not finish within'), 'no watchdog: collect-block replies by itself');
+  for (const part of [task.id, 'task_done', 'task_failed', 'task_cancelled', 'list-tasks', `cancel-task ${task.id}`]) {
+    t.true(reply.text.includes(part), part);
+  }
+  t.is(s.tasks.currentTask()?.id, task.id, 'the task is still the current one');
+  t.is(s.tasks.currentTask()?.status, 'running');
+  t.deepEqual(s.tasks.list().history, [], 'nothing was cancelled');
+  t.deepEqual(s.taskEvents.query({ types: ['task_cancelled'] }).events, []);
+  t.false(s.world.bot.pathfinder.stop.called, 'the task\'s walk was not stopped');
+  t.is(s.factory.inFlight().length, 0, 'the call is over');
+
+  // The task goes on after the reply.
+  await clock.tickAsync(30000);
+  t.is(s.tasks.currentTask()?.status, 'running');
+  await cancelLeftOver(clock, s.tasks);
+});
+
+test.serial('E-038 (1): collect-block keeps the line about the task it replaced in the "Still collecting" reply', async (t) => {
+  const clock = useClock(t);
+  const s = await gatherServe(t, ['1,64,0', '6,64,0'], x => x === 1);
+  // A follow task that is still going when collect-block starts.
+  Object.assign(s.world.bot, { entities: { 2: { id: 2, name: 'cow', type: 'animal', position: new Vec3(3.5, 64, 0.5), height: 1.4, isValid: true } } });
+  t.true((await s.tasks.start('follow', { entityId: 2 })).ok);
+  await clock.tickAsync(500);
+  t.is(s.tasks.currentTask()?.behavior, 'follow');
+
+  const pending = track(s.call('collect-block', { blockType: 'oak_log', count: 2 }));
+  await clock.tickAsync(45100);
+  t.true(pending.settled);
+  const reply = pending.reply!;
+  t.false(reply.isError, reply.text);
+  const task = s.tasks.currentTask()!;
+  t.is(task.behavior, 'gather');
+  t.is(task.status, 'running');
+  const [first, ...rest] = reply.text.split('\n');
+  t.is(first, still('collecting', task.id, 'gather', 'keeps running in the background (mined 1 of 2 oak_log)'));
+  t.regex(rest.join('\n'), /^Replaced task t\d+ follow \(.*\): it was cancelled\.$/);
+  t.deepEqual(s.tasks.list().history.map(entry => `${entry.behavior} ${entry.status}`), ['follow cancelled'], 'only the replaced task ended');
+  await cancelLeftOver(clock, s.tasks);
+});
+
+test.serial('E-038 (1): a task held at the default limit is reported as paused, with the reason (before, the call waited until the time limit)', async (t) => {
+  const clock = useClock(t);
+  const s = await gatherServe(t, ['6,64,0'], () => false);
+
+  const pending = track(s.call('collect-block', { blockType: 'oak_log' }));
+  await clock.tickAsync(1000);
+  t.true(s.tasks.hold('held by the instinct after dig_in: the bot is walled in').ok);
+  await clock.tickAsync(44100);
+
+  t.true(pending.settled);
+  const reply = pending.reply!;
+  t.false(reply.isError, reply.text);
+  const task = s.tasks.currentTask()!;
+  t.is(task.status, 'paused');
+  t.is(reply.text, still('collecting', task.id, 'gather',
+    'is paused (held by the instinct after dig_in: the bot is walled in (waiting for resume-task or cancel-task))'));
+  t.deepEqual(s.tasks.list().history, [], 'still held, not cancelled');
+  await cancelLeftOver(clock, s.tasks);
+});
+
+test.serial('E-038 (1): a task queued behind the instinct at the default limit is paused with the holder named, and runs to the end afterwards', async (t) => {
+  const clock = useClock(t);
+  const s = await gatherServe(t, ['1,64,0'], () => true);
+  const urgent = await s.arbiter.acquire({ holder: 'instinct leave_lava', priority: PRIORITY.URGENT_INSTINCT });
+  t.true(urgent.ok);
+  if (!urgent.ok) return;
+
+  // The default timeoutMs (120 s) plus 5 s comes after the default limit: the task is not cancelled.
+  const pending = track(s.call('collect-block', { blockType: 'oak_log' }));
+  await clock.tickAsync(45100);
+  t.true(pending.settled);
+  const task = s.tasks.currentTask()!;
+  t.false(pending.reply!.isError, pending.reply!.text);
+  t.is(pending.reply!.text, still('collecting', task.id, 'gather', 'is paused (waiting for instinct leave_lava)'));
+  t.true(urgent.lease.isActive(), 'the holder keeps the body');
+
+  // Once the instinct lets go the task runs and ends, which is what wait-for-event then reports.
+  urgent.lease.release();
+  await clock.tickAsync(5000);
+  const record = s.tasks.list().history.find(entry => entry.id === task.id);
+  t.is(record?.status, 'done');
+  t.true(record?.result?.startsWith('Mined 1 of 1 oak_log'), record?.result);
+  t.is(s.taskEvents.query({ types: ['task_done'] }).events.length, 1);
+});
+
+test.serial('E-038 (1): with timeoutMs 1000 and the task queued the whole time, collect-block still cancels it after about 6 s (time limit reached)', async (t) => {
+  const clock = useClock(t);
+  const s = await gatherServe(t, ['1,64,0'], () => true);
+  const urgent = await s.arbiter.acquire({ holder: 'instinct leave_lava', priority: PRIORITY.URGENT_INSTINCT });
+  t.true(urgent.ok);
+  if (!urgent.ok) return;
+
+  const pending = track(s.call('collect-block', { blockType: 'oak_log', timeoutMs: 1000 }));
+  await clock.tickAsync(5900);
+  t.false(pending.settled, 'still waiting before timeoutMs + 5 s');
+  const task = s.tasks.currentTask()!;
+  t.is(task.status, 'paused');
+
+  await clock.tickAsync(400);
+  t.true(pending.settled);
+  const reply = pending.reply!;
+  t.true(reply.isError);
+  t.true(reply.text.includes(`task ${task.id} was cancelled (time limit reached)`), reply.text);
+  t.false(reply.text.includes('Still'), reply.text);
+  const record = s.tasks.list().history.find(entry => entry.id === task.id);
+  t.is(record?.status, 'cancelled');
+  t.is(record?.result, 'time limit reached');
+  t.true(urgent.lease.isActive(), 'cancelling the queued task does not touch the holder\'s body');
+  t.false(s.world.bot.pathfinder.stop.called);
+  urgent.lease.release();
+});
+
+/**
+ * lead-animal on a real TaskManager: a cow next to the bot and wheat to lure it with, 20 blocks from the target. Each
+ * stride takes 10 s and the cow follows 2.5 blocks behind, so the lead makes progress (no "stopped following") and is
+ * still going at 45 s. `onStride` runs at the end of each stride, before the cow catches up.
+ */
+async function leadServe(t: ExecutionContext, onStride: (bot: ReturnType<typeof fakeBot>) => void = () => {}) {
+  const bot = fakeBot();
+  const cow = { id: 2, name: 'cow', type: 'animal', position: new Vec3(2.5, 64, 0.5), height: 1.4, isValid: true };
+  bot.entities = { 2: cow };
+  bot.inventory.items = () => [{ name: 'wheat', count: 5, type: 900 }];
+  bot.pathfinder.goto = sinon.stub().callsFake((goal: { x: number; y: number; z: number; rangeSq: number }) =>
+    new Promise<void>(resolve => setTimeout(() => {
+      const target = new Vec3(goal.x + 0.5, goal.y, goal.z + 0.5);
+      const range = Math.sqrt(goal.rangeSq);
+      const here = bot.entity.position;
+      const distance = here.distanceTo(target);
+      if (distance > range) bot.entity.position = target.plus(here.minus(target).scaled(range / distance));
+      onStride(bot);
+      const away = cow.position.minus(bot.entity.position);
+      cow.position = bot.entity.position.plus(away.scaled(2.5 / (away.norm() || 1)));
+      resolve();
+    }, 10000)));
+  let tasks: TaskManager | null = null;
+  const s = await serve(t, bot, (factory, stand) => {
+    tasks = new TaskManager({ getBot: () => bot as never, getArbiter: () => stand.arbiter as ActionArbiter, events: new EventStore(), behaviors: BEHAVIORS });
+    stand.tasks = tasks;
+    registerGatheringTools(factory, () => stand as unknown as Autopilot);
+  });
+  return { ...s, bot, manager: tasks! as TaskManager };
+}
+
+test.serial('E-038 (1): lead-animal whose task is still going replies "Still leading" with its progress, keeps the line about the task it replaced, and the task keeps running', async (t) => {
+  const clock = useClock(t);
+  const { manager, ...s } = await leadServe(t);
+  const follow = await manager.start('follow', { entityId: 2 });
+  t.true(follow.ok);
+  await clock.tickAsync(500);
+
+  const pending = track(s.call('lead-animal', { entityId: 2, x: 20, y: 64, z: 0 }));
+  await clock.tickAsync(44900);
+  t.false(pending.settled, 'still waiting just before the default limit');
+  await clock.tickAsync(200);
+  t.true(pending.settled);
+  const reply = pending.reply!;
+  t.false(reply.isError, reply.text);
+  const task = manager.currentTask()!;
+  t.is(task.behavior, 'lead');
+  t.is(task.status, 'running');
+  const detail = task.progress ?? task.step;
+  t.truthy(detail, 'the lead task reports what it is doing');
+  const [first, ...rest] = reply.text.split('\n');
+  t.is(first, still('leading', task.id, 'lead', `keeps running in the background (${detail})`));
+  t.regex(rest.join('\n'), /^Replaced task t\d+ follow \(.*\): it was cancelled\.$/);
+  t.deepEqual(manager.list().history.map(entry => `${entry.behavior} ${entry.status}`), ['follow cancelled'], 'only the replaced task ended');
+  t.is(s.factory.inFlight().length, 0);
+
+  // The lead goes on after the reply and ends by itself, which is what wait-for-event then reports.
+  await clock.tickAsync(30000);
+  const record = manager.list().history.find(entry => entry.id === task.id);
+  t.is(record?.status, 'done', record?.result);
+  t.regex(record?.result ?? '', /^Led cow \(id 2\) to \(20, 64, 0\) by lure \(wheat\)/);
+  await cancelLeftOver(clock, manager);
+});
+
+test.serial('E-038 (1), E-049: the "Still leading" reply lists the blocks the pathfinder placed so far, on its first line', async (t) => {
+  const clock = useClock(t);
+  let strides = 0;
+  // Scaffolding on the first stride, as the pathfinder did inside the pen in the M18 field test.
+  const { manager, bot, ...s } = await leadServe(t, lead => {
+    if (strides++ === 0) lead.emit('blockPlaced', null, { name: 'cobblestone', position: new Vec3(5, 64, 0) });
+  });
+
+  const pending = track(s.call('lead-animal', { entityId: 2, x: 20, y: 64, z: 0 }));
+  await clock.tickAsync(45100);
+  t.true(pending.settled);
+  const reply = pending.reply!;
+  t.false(reply.isError, reply.text);
+  const task = manager.currentTask()!;
+  t.is(task.status, 'running');
+  const detail = task.progress ?? task.step;
+  t.is(reply.text, `${still('leading', task.id, 'lead', `keeps running in the background (${detail})`)}; on the way the pathfinder placed 1 block(s): cobblestone at (5, 64, 0)`);
+  t.is(bot.listenerCount('blockPlaced'), 0, 'the watch stopped with the call');
+  await cancelLeftOver(clock, manager);
+});
+
+const farWaypoint = { x: 40, y: 64, z: 0, createdAt: 0 };
+const waypointStand = { get: () => farWaypoint, normalizeName: (name: string) => name.trim().toLowerCase() } as unknown as WaypointStore;
+const MOVES = [['move-to-position', { x: 40, y: 64, z: 0 }], ['goto-waypoint', { name: 'far' }]] as const;
+
+for (const [tool, args] of MOVES) {
+  test.serial(`E-038 (2): ${tool} without timeoutMs stops after about 35 s, says where and how far from the target, and stops the pathfinder`, async (t) => {
+    const clock = useClock(t);
+    const bot = fakeBot();
+    // A stand-in store, so nothing is written to disk.
+    const s = await serve(t, bot, factory => registerWaypointTools(factory, () => bot as never, waypointStand));
+
+    const pending = track(s.call(tool, args));
+    await clock.tickAsync(34900);
+    t.false(pending.settled, 'still walking just before 35 s');
+    t.false(bot.pathfinder.stop.called);
+
+    await clock.tickAsync(200);
+    t.true(pending.settled);
+    const reply = pending.reply!;
+    t.false(reply.rejected);
+    t.true(reply.isError);
+    t.is(reply.text, `Failed: Move timed out after 35000ms at (0, 64, 0), 40.0 blocks from the target; call ${tool} again to continue`);
+    t.true(bot.pathfinder.stop.calledOnce, 'the move stopped the pathfinder');
+    t.true(bot.pathfinder.setGoal.calledWith(null));
+    t.is(s.arbiter.holder(), null, 'the lease is released');
+    t.deepEqual(s.commandEvents(), []);
+  });
+
+  test.serial(`E-038 (2): ${tool} with timeoutMs 60000 is stopped neither at 35 s nor by the watchdog at 50 s, and times out at 60 s`, async (t) => {
+    const clock = useClock(t);
+    const bot = fakeBot();
+    const s = await serve(t, bot, factory => registerWaypointTools(factory, () => bot as never, waypointStand));
+
+    const pending = track(s.call(tool, { ...args, timeoutMs: 60000 }));
+    await clock.tickAsync(35100);
+    t.false(pending.settled, 'not at 35 s');
+    await clock.tickAsync(15000);
+    t.false(pending.settled, 'not at 50 s either: the watchdog was moved');
+    t.false(bot.pathfinder.stop.called);
+    t.is(s.arbiter.holder()?.holder, `manual ${tool}`);
+
+    await clock.tickAsync(10000);
+    t.true(pending.settled);
+    t.is(pending.reply!.text, `Failed: Move timed out after 60000ms at (0, 64, 0), 40.0 blocks from the target; call ${tool} again to continue`);
+    t.true(bot.pathfinder.stop.calledOnce);
+    t.is(s.arbiter.holder(), null);
+  });
+}
+
+test.serial('E-038 (2): a move that arrives within the default limit replies as before', async (t) => {
+  const clock = useClock(t);
+  const bot = fakeBot();
+  bot.pathfinder.goto = sinon.stub().callsFake(() => new Promise<void>(resolve => setTimeout(() => {
+    bot.entity.position = new Vec3(3, 64, 0);
+    resolve();
+  }, 20000)));
+  const s = await serve(t, bot);
+
+  const pending = track(s.call('move-to-position', { x: 3, y: 64, z: 0 }));
+  await clock.tickAsync(20100);
+  t.true(pending.settled);
+  t.false(pending.reply!.isError, pending.reply!.text);
+  t.is(pending.reply!.text, 'Successfully moved to position near (3, 64, 0)');
+  t.false(bot.pathfinder.stop.called);
+});
+
+test.serial('E-038 (2): the default limit is taken when the wait starts, so the wait for the lease counts: after 9.9 s queued a move stops about 35 s after the call', async (t) => {
+  const clock = useClock(t);
+  const bot = fakeBot();
+  const s = await serve(t, bot);
+  const urgent = await s.arbiter.acquire({ holder: 'instinct leave_lava', priority: PRIORITY.URGENT_INSTINCT });
+  t.true(urgent.ok);
+  if (!urgent.ok) return;
+
+  const pending = track(s.call('move-to-position', { x: 40, y: 64, z: 0 }));
+  await clock.tickAsync(9900);
+  urgent.lease.release();
+  await clock.tickAsync(0);
+  t.true(bot.pathfinder.goto.calledOnce, 'the move got the lease');
+
+  await clock.tickAsync(25000);
+  t.false(pending.settled, 'still walking 34.9 s after the call');
+  await clock.tickAsync(200);
+  t.true(pending.settled);
+  // 50 s less the 9.9 s in the queue, the reply margin and the portal wait.
+  t.is(pending.reply!.text, 'Failed: Move timed out after 25100ms at (0, 64, 0), 40.0 blocks from the target; call move-to-position again to continue');
+  t.is(s.arbiter.holder(), null);
+});
+
+test.serial('E-038 (4): a region tool that waited 9.9 s for the lease stops early on what is left of the budget, before the watchdog', async (t) => {
+  const clock = useClock(t);
+  const bot = slowDigger(SLAB);
+  const s = await serve(t, bot);
+  const urgent = await s.arbiter.acquire({ holder: 'instinct leave_lava', priority: PRIORITY.URGENT_INSTINCT });
+  t.true(urgent.ok);
+  if (!urgent.ok) return;
+
+  const pending = track(s.call('clear-region', CLEAR_SLAB));
+  await clock.tickAsync(9900);
+  urgent.lease.release();
+  await clock.tickAsync(0);
+  // The limit ends 45 s after the call; the cell started at 41.9 s ends at 45.9 s.
+  await clock.tickAsync(35900);
+  t.false(pending.settled);
+  await clock.tickAsync(200);
+  t.true(pending.settled);
+  t.false(pending.reply!.isError, pending.reply!.text);
+  t.is(pending.reply!.text, 'Cleared region of 24 blocks: dug 9, already empty 0. Stopped early with 15 block(s) not processed; run again to continue');
+  t.is(s.arbiter.holder(), null);
+});
+
+test.serial('E-038 (2): an explicit timeoutMs moves the watchdog by the portal wait as well: a move that reaches a portal at 58 s of 60 still waits its 10 s there', async (t) => {
+  const clock = useClock(t);
+  const bot = fakeBot({ '3,64,0': 'nether_portal' });
+  bot.pathfinder.goto = sinon.stub().callsFake(() => new Promise<void>(resolve => setTimeout(() => {
+    bot.entity.position = new Vec3(3.5, 64, 0.5);
+    resolve();
+  }, 58000)));
+  const s = await serve(t, bot);
+
+  const pending = track(s.call('move-to-position', { x: 3, y: 64, z: 0, timeoutMs: 60000 }));
+  await clock.tickAsync(66000);
+  t.false(pending.settled, 'past timeoutMs plus the reply margin, and still waiting in the portal');
+  t.is(s.arbiter.holder()?.holder, 'manual move-to-position');
+
+  await clock.tickAsync(2100);
+  t.true(pending.settled);
+  const reply = pending.reply!;
+  t.false(reply.isError, reply.text);
+  t.true(reply.text.startsWith('Successfully moved to position near (3, 64, 0); stood in the portal for 10 s'), reply.text);
+  t.false(reply.text.includes('did not finish within'), reply.text);
+});
+
+/** Stone at `cells` that the bot can dig from where it stands; each dig takes 4 s. */
+function slowDigger(cells: string[]) {
+  const bot = fakeBot(Object.fromEntries(cells.map(cell => [cell, 'stone'])));
+  const dig = bot.dig;
+  bot.dig = sinon.stub().callsFake(async (block: { position: Vec3 }) => {
+    await new Promise(resolve => setTimeout(resolve, 4000));
+    await dig(block);
+  });
+  return bot;
+}
+
+// 24 cells: x 2 to 7, y 64 to 67.
+const SLAB = Array.from({ length: 24 }, (_, i) => `${2 + (i % 6)},${64 + Math.floor(i / 6)},0`);
+const CLEAR_SLAB = { x1: 2, y1: 64, z1: 0, x2: 7, y2: 67, z2: 0 };
+
+test.serial('E-038 (4): clear-region without timeoutMs stops early after about 45 s (was 120 s) with its usual counts, before the watchdog', async (t) => {
+  const clock = useClock(t);
+  const bot = slowDigger(SLAB);
+  const s = await serve(t, bot);
+
+  const pending = track(s.call('clear-region', CLEAR_SLAB));
+  await clock.tickAsync(44900);
+  t.false(pending.settled, 'the limit is checked before each cell, and it has not passed yet');
+  // The cell started at 44 s ends at 48 s; then the limit has passed.
+  await clock.tickAsync(3200);
+  t.true(pending.settled);
+  const reply = pending.reply!;
+  t.false(reply.isError, reply.text);
+  t.is(reply.text, 'Cleared region of 24 blocks: dug 12, already empty 0. Stopped early with 12 block(s) not processed; run again to continue');
+  t.is(bot.dig.callCount, 12);
+  t.is(s.arbiter.holder(), null);
+});
+
+test.serial('E-038 (4): dig-tunnel without timeoutMs stops early after about 45 s as well', async (t) => {
+  const clock = useClock(t);
+  // Next to the bot at (0, 64, 0): x 1 to 12, two high.
+  const bot = slowDigger(Array.from({ length: 24 }, (_, i) => `${1 + (i >> 1)},${64 + (i % 2)},0`));
+  const s = await serve(t, bot);
+
+  const pending = track(s.call('dig-tunnel', { direction: 'east', length: 12 }));
+  await clock.tickAsync(48100);
+  t.true(pending.settled);
+  t.false(pending.reply!.isError, pending.reply!.text);
+  t.is(pending.reply!.text, 'Dug east tunnel 12x1x2: dug 12, already empty 0. Stopped early with 12 block(s) not processed; run again to continue');
+});
+
+test.serial('E-038 (4): clear-region with an explicit timeoutMs 70000 runs past 50 s, the watchdog moved, and stops on its own limit', async (t) => {
+  const clock = useClock(t);
+  const bot = slowDigger(SLAB);
+  const s = await serve(t, bot);
+
+  const pending = track(s.call('clear-region', { ...CLEAR_SLAB, timeoutMs: 70000 }));
+  await clock.tickAsync(50100);
+  t.false(pending.settled, 'not stopped at 50 s');
+  t.is(s.arbiter.holder()?.holder, 'manual clear-region');
+
+  // The cell started at 68 s ends at 72 s.
+  await clock.tickAsync(22000);
+  t.true(pending.settled);
+  t.false(pending.reply!.isError, pending.reply!.text);
+  t.is(pending.reply!.text, 'Cleared region of 24 blocks: dug 18, already empty 0. Stopped early with 6 block(s) not processed; run again to continue');
+});
+
+test.serial('E-038 (4): an explicit timeoutMs too long for a timer still moves the watchdog, instead of firing it at once', async (t) => {
+  const clock = useClock(t);
+  const bot = slowDigger(SLAB);
+  const s = await serve(t, bot);
+
+  // setTimeout cannot wait longer than 2^31 - 1 ms and fires such a timer after 1 ms.
+  const pending = track(s.call('clear-region', { ...CLEAR_SLAB, timeoutMs: 3000000000 }));
+  await clock.tickAsync(50100);
+  t.false(pending.settled, 'stopped neither at once nor at 50 s');
+  t.is(s.arbiter.holder()?.holder, 'manual clear-region');
+
+  // 24 cells of 4 s each.
+  await clock.tickAsync(46000);
+  t.true(pending.settled);
+  t.false(pending.reply!.isError, pending.reply!.text);
+  t.is(pending.reply!.text, 'Cleared region of 24 blocks: dug 24, already empty 0');
+  t.is(s.arbiter.holder(), null);
+});
+
+/**
+ * A row of 24 empty cells, x 2 to 25 at y 64, each on stone, and dirt in the hand. Every walk arrives at once, and
+ * placing a block takes 4 s.
+ */
+function slowPlacer() {
+  const bot = fakeBot(Object.fromEntries(Array.from({ length: 24 }, (_, i) => [`${2 + i},63,0`, 'stone'])));
+  bot.inventory.items = () => [{ name: 'dirt', count: 64, type: 1 }];
+  bot.heldItem = { name: 'dirt' };
+  bot.pathfinder.goto = sinon.stub().resolves();
+  bot.placeBlock = sinon.stub().callsFake(() => new Promise<void>(resolve => setTimeout(resolve, 4000)));
+  return bot;
+}
+
+const FILL_ROW = { x1: 2, y1: 64, z1: 0, x2: 25, y2: 64, z2: 0, blockName: 'dirt' };
+
+test.serial('E-038 (4): fill-region without timeoutMs stops early after about 45 s with its usual counts, before the watchdog', async (t) => {
+  const clock = useClock(t);
+  const bot = slowPlacer();
+  const s = await serve(t, bot);
+
+  const pending = track(s.call('fill-region', FILL_ROW));
+  await clock.tickAsync(44900);
+  t.false(pending.settled, 'the limit is checked before each space, and it has not passed yet');
+  // The space started at 44 s is filled at 48 s; then the limit has passed.
+  await clock.tickAsync(3200);
+  t.true(pending.settled);
+  const reply = pending.reply!;
+  t.false(reply.isError, reply.text);
+  t.is(reply.text, 'Filled region of 24 blocks with dirt: placed 12, already occupied 0. Stopped early with 12 space(s) not processed; run again to continue');
+  t.is(bot.placeBlock.callCount, 12);
+  t.is(s.arbiter.holder(), null);
+});
+
+test.serial('E-038 (4): fill-region with an explicit timeoutMs 70000 runs past 50 s, the watchdog moved, and stops on its own limit', async (t) => {
+  const clock = useClock(t);
+  const bot = slowPlacer();
+  const s = await serve(t, bot);
+
+  const pending = track(s.call('fill-region', { ...FILL_ROW, timeoutMs: 70000 }));
+  await clock.tickAsync(50100);
+  t.false(pending.settled, 'not stopped at 50 s');
+  t.is(s.arbiter.holder()?.holder, 'manual fill-region');
+
+  // The space started at 68 s is filled at 72 s.
+  await clock.tickAsync(22000);
+  t.true(pending.settled);
+  t.false(pending.reply!.isError, pending.reply!.text);
+  t.is(pending.reply!.text, 'Filled region of 24 blocks with dirt: placed 18, already occupied 0. Stopped early with 6 space(s) not processed; run again to continue');
+  t.is(s.arbiter.holder(), null);
+});
+
+/** A furnace that turns one input into one output every 10 s, as the game does, and says so with 'update'. */
+function smeltingFurnace() {
+  let input = 0;
+  let output = 0;
+  let timer: ReturnType<typeof setInterval> | undefined;
+  const updates = new EventEmitter();
+  return Object.assign(updates, {
+    inventoryStart: 3,
+    inventoryEnd: 39,
+    slots: Array(39).fill(null),
+    inputItem: () => (input ? { name: 'raw_iron', count: input, type: 1 } : null),
+    fuelItem: () => null,
+    outputItem: () => (output ? { name: 'iron_ingot', count: output, type: 2 } : null),
+    putFuel: sinon.stub().resolves(),
+    putInput: sinon.stub().callsFake(async (_type: number, _metadata: unknown, count: number) => {
+      input += count;
+      timer = setInterval(() => {
+        if (input === 0) return;
+        input--;
+        output++;
+        updates.emit('update');
+      }, 10000);
+    }),
+    takeOutput: sinon.stub().callsFake(async () => {
+      const taken = { name: 'iron_ingot', count: output, type: 2 };
+      output = 0;
+      return taken;
+    }),
+    close: sinon.stub().callsFake(() => clearInterval(timer))
+  });
+}
+
+function smeltingBot() {
+  const bot = fakeBot({ '5,64,0': 'furnace' });
+  bot.inventory.items = () => [{ name: 'raw_iron', count: 8, type: 1 }, COAL];
+  return Object.assign(bot, { openFurnace: sinon.stub().resolves(smeltingFurnace()) });
+}
+
+const SMELT_EIGHT = { ...SMELT, inputCount: 8 };
+
+test.serial('E-038 (5): smelt-item waits at most the default limit (not 10 s per item plus 10 s), and says the furnace keeps smelting what is left', async (t) => {
+  const clock = useClock(t);
+  const s = await serve(t, smeltingBot());
+
+  // 8 items would mean 90 s.
+  const pending = track(s.call('smelt-item', SMELT_EIGHT));
+  await clock.tickAsync(44900);
+  t.false(pending.settled);
+  await clock.tickAsync(200);
+  t.true(pending.settled);
+  t.false(pending.reply!.isError, pending.reply!.text);
+  t.is(pending.reply!.text, 'Smelted 4 iron_ingot; 4 raw_iron still in the furnace (stopped after 45000ms); it keeps smelting in the furnace');
+  t.true(pending.reply!.text.includes('keeps smelting'));
+});
+
+test.serial('E-038 (5): smelt-item with an explicit timeoutMs 65000 waits that long, the watchdog moved', async (t) => {
+  const clock = useClock(t);
+  const s = await serve(t, smeltingBot());
+
+  const pending = track(s.call('smelt-item', { ...SMELT_EIGHT, timeoutMs: 65000 }));
+  await clock.tickAsync(50100);
+  t.false(pending.settled, 'not stopped at 50 s');
+  await clock.tickAsync(15000);
+  t.true(pending.settled);
+  t.false(pending.reply!.isError, pending.reply!.text);
+  t.is(pending.reply!.text, 'Smelted 6 iron_ingot; 2 raw_iron still in the furnace (stopped after 65000ms); it keeps smelting in the furnace');
+});
+
+test.serial('E-038 (3): move-in-direction with duration 60000 is cut to the default limit and the reply says so; a short one is as before', async (t) => {
+  const clock = useClock(t);
+  const bot = fakeBot();
+  const s = await serve(t, bot);
+
+  const pending = track(s.call('move-in-direction', { direction: 'forward', duration: 60000 }));
+  await clock.tickAsync(44900);
+  t.false(pending.settled);
+  t.false(bot.setControlState.calledWith('forward', false));
+  await clock.tickAsync(200);
+  t.true(pending.settled);
+  t.false(pending.reply!.isError, pending.reply!.text);
+  t.is(pending.reply!.text, 'Moved forward for 45000ms (capped from 60000 ms: a reply must arrive within 50 s)');
+  t.true(bot.setControlState.calledWith('forward', false), 'the key is let go');
+
+  const short = track(s.call('move-in-direction', { direction: 'back', duration: 400 }));
+  await clock.tickAsync(500);
+  t.is(short.reply?.text, 'Moved back for 400ms');
+});
+
+test.serial('E-038 (6): with a 120 s call limit (--call-limit-seconds 120) the cap, the watchdog and the replies use 120 s', async (t) => {
+  const clock = useClock(t);
+  const bot = fakeBot({ '40,64,0': 'lever' });
+  const s = await serve(t, bot, () => {}, { callLimitMs: 120000 });
+  t.is(s.factory.callLimitMs, 120000);
+
+  const capped = track(s.call('move-in-direction', { direction: 'forward', duration: 200000 }));
+  await clock.tickAsync(115100);
+  t.true(capped.settled);
+  t.is(capped.reply!.text, 'Moved forward for 115000ms (capped from 200000 ms: a reply must arrive within 120 s)');
+
+  // A body command whose walk never ends runs past 50 s and is stopped at 120 s.
+  const walking = track(s.call('activate-block', { x: 40, y: 64, z: 0 }));
+  await clock.tickAsync(60000);
+  t.false(walking.settled, 'not stopped at 50 s');
+  await clock.tickAsync(60100);
+  t.true(walking.settled);
+  t.is(walking.reply!.text, 'Failed: activate-block did not finish within 120 s, so it was stopped at (0, 64, 0); call it again to continue, or use start-task for long jobs');
+
+  // A move's default is the limit less the reply margin and the portal wait.
+  const moving = track(s.call('move-to-position', { x: 40, y: 64, z: 0 }));
+  await clock.tickAsync(105100);
+  t.true(moving.settled);
+  t.true(moving.reply!.text.startsWith('Failed: Move timed out after 105000ms at (0, 64, 0)'), moving.reply!.text);
+});
+
+test.serial('E-038 (7): the tool descriptions give the new defaults, from the call limit', async (t) => {
+  for (const [limit, seconds, rest, move] of [[undefined, 50, 45000, 35000], [120000, 120, 115000, 105000]] as const) {
+    const bot = fakeBot();
+    const s = await serve(t, bot, (factory, stand) => {
+      registerWaypointTools(factory, () => bot as never, waypointStand);
+      registerGatheringTools(factory, () => stand as unknown as Autopilot);
+    }, { callLimitMs: limit });
+    const { tools } = await s.client.listTools();
+    const tool = (name: string) => tools.find(entry => entry.name === name)!;
+    const parameter = (name: string, key: string) =>
+      ((tool(name).inputSchema.properties ?? {}) as Record<string, { description?: string }>)[key]?.description ?? '';
+    const within = `so that the reply arrives within ${seconds} s`;
+
+    for (const name of ['move-to-position', 'goto-waypoint']) {
+      t.true(parameter(name, 'timeoutMs').includes(`default: about ${move}, ${within}`), `${name}: ${parameter(name, 'timeoutMs')}`);
+    }
+    for (const name of ['clear-region', 'fill-region', 'dig-tunnel']) {
+      t.true(parameter(name, 'timeoutMs').includes(`default: about ${rest}, ${within}`), `${name}: ${parameter(name, 'timeoutMs')}`);
+      t.false(parameter(name, 'timeoutMs').includes('120000'), name);
+    }
+    t.true(parameter('smelt-item', 'timeoutMs').includes(`at most about ${rest}, ${within}`), parameter('smelt-item', 'timeoutMs'));
+    t.true(parameter('move-in-direction', 'duration').includes(`at most about ${rest}, ${within}`), parameter('move-in-direction', 'duration'));
+    for (const name of ['collect-block', 'lead-animal']) {
+      t.true(tool(name).description?.includes(`at most about ${rest / 1000} s`), `${name}: ${tool(name).description}`);
+      t.true(parameter(name, 'timeoutMs').includes(`the reply comes within about ${rest / 1000} s`), `${name}: ${parameter(name, 'timeoutMs')}`);
+    }
+    // The pinned main descriptions stay as they were.
+    t.is(tool('smelt-item').description, 'Smelt items using a furnace-like block');
+  }
 });

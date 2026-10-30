@@ -6,8 +6,10 @@ import { ToolFactory, type ToolContext } from '../tool-factory.js';
 import { WaypointStore } from '../waypoint-store.js';
 import { coerceCoordinates } from './coordinate-utils.js';
 import { Vec3 } from 'vec3';
-import { AbortError, gotoWithTimeout, arrivalProblem, portalReport, watchPathEdits } from './movement-utils.js';
-import { LEAVE_SHELTER_DESCRIPTION, leavingShelter, leftShelterNote, shelterRefusal, walledIn } from './position-tools.js';
+import { AbortError, MoveTimeout, gotoWithTimeout, arrivalProblem, portalReport, watchPathEdits } from './movement-utils.js';
+import {
+  LEAVE_SHELTER_DESCRIPTION, leavingShelter, leftShelterNote, moveLimitMs, moveTimeoutDefault, moveTimeoutNote, shelterRefusal, walledIn
+} from './position-tools.js';
 
 export function registerWaypointTools(factory: ToolFactory, getBot: () => mineflayer.Bot, store: WaypointStore): void {
   factory.registerTool(
@@ -94,7 +96,7 @@ export function registerWaypointTools(factory: ToolFactory, getBot: () => minefl
     {
       name: z.string().trim().min(1).describe("Waypoint name"),
       range: z.coerce.number().finite().min(0).optional().describe("How close to get, 0 for the exact block (default: 2, or 0 when the waypoint is in a Nether portal)"),
-      timeoutMs: z.number().int().min(50).optional().describe("Timeout in milliseconds before cancelling (default: no timeout)"),
+      timeoutMs: z.number().int().min(50).optional().describe(`Timeout in milliseconds before cancelling (${moveTimeoutDefault(factory.callLimitMs)})`),
       leaveShelter: z.boolean().optional().describe(LEAVE_SHELTER_DESCRIPTION)
     },
     async ({ name, range: givenRange, timeoutMs, leaveShelter = false }, ctx: ToolContext) => {
@@ -117,8 +119,9 @@ export function registerWaypointTools(factory: ToolFactory, getBot: () => minefl
       const left = () => (sheltered && !walledIn(bot) ? leftShelterNote(bot) : '');
       const edits = watchPathEdits(bot);
       try {
-        await gotoWithTimeout(bot, new goals.GoalNear(waypoint.x, waypoint.y, waypoint.z, range), timeoutMs, ctx.signal);
+        await gotoWithTimeout(bot, new goals.GoalNear(waypoint.x, waypoint.y, waypoint.z, range), moveLimitMs(ctx, timeoutMs), ctx.signal);
       } catch (error) {
+        if (error instanceof MoveTimeout) error.message += moveTimeoutNote(bot, waypoint, 'goto-waypoint');
         const changed = edits() + left();
         if (changed && error instanceof Error && !(error instanceof AbortError)) error.message += changed;
         throw error;

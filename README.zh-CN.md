@@ -168,16 +168,18 @@ npm run build
 | `--decision-model` | `perplexity/pplx-decider-v1.2-20261016` | OpenRouter 上的决策模型 |
 | `--allow-commands` | 关闭 | 允许 `send-chat` 执行服务器命令（`/give`、`/fill`、`/tp` 等）；聊天和 `/msg`、`/tell`、`/w`、`/me`、`/teammsg`、`/tm` 始终可用 |
 | `--greeting` | 不设：机器人进入世界时什么都不说 | 机器人每次进入世界时在聊天里说的一句话（复活时不说）：一行普通聊天，最多 256 个字符，不以 `/` 开头 |
+| `--call-limit-seconds` | `50` | 驱动 bot 的命令以及 `collect-block`、`lead-animal` 最多用多久必须回复，20～3600 秒；见[时限](#时限)。只在 MCP 客户端等待回复超过 60 秒时才调大 |
 | `--help`、`-h` | — | 显示选项后退出 |
 | `--version` | — | 显示版本号后退出 |
 
 API key 只从环境变量 `OPENROUTER_API_KEY` 读取，不要把它写进仓库里的任何文件。
 
-服务器启动时检查选项。未知的选项、不是 1～65535 之间整数的 `--port`、空的 `--host`，为空、超过 16 个字符、含空格或控制字符的 `--username`，或者为空、超过 256 个字符、含换行或控制字符、以 `/` 开头的 `--greeting`，都会让服务器在 stderr 写一行错误，并在连接之前以 1 退出。这时 MCP 客户端显示这个服务器启动失败，这一行在客户端为它保存的日志里（见[去哪里看](#去哪里看)）。通过了检查、但不是 3～16 个字母、数字或下划线的名字（例如 `Bot-1`、`ab` 或中文名字）只在这份日志里得到一条警告，因为有些服务器会拒绝这样的名字。
+服务器启动时检查选项。未知的选项、不是 1～65535 之间整数的 `--port`、空的 `--host`，为空、超过 16 个字符、含空格或控制字符的 `--username`，为空、超过 256 个字符、含换行或控制字符、以 `/` 开头的 `--greeting`，或者不是 20～3600 之间整数的 `--call-limit-seconds`，都会让服务器在 stderr 写一行错误，并在连接之前以 1 退出。这时 MCP 客户端显示这个服务器启动失败，这一行在客户端为它保存的日志里（见[去哪里看](#去哪里看)）。通过了检查、但不是 3～16 个字母、数字或下划线的名字（例如 `Bot-1`、`ab` 或中文名字）只在这份日志里得到一条警告，因为有些服务器会拒绝这样的名字。
 
 ### 4. 开始玩
 让 LLM 在 Minecraft 里做事。几个习惯能让它玩得好得多：
 - 长时间的工作用 `start-task`，然后用 `wait-for-event` 等待（例如 `task_done`、`task_failed`、`instinct`、`chat_request`），不要轮询。
+- `collect-block` 或 `lead-animal` 回复 `Still …` 时，它的任务还在进行：按回复所说用 `wait-for-event` 等它（见[时限](#时限)）。
 - 快速查看用 `get-observation`，了解地形用 `scan-area` 或 `render-map`。
 - 有意做危险的事之前先设置意图，例如 `set-policy { "instinct": { "intent": "exploring an underwater cave on purpose" } }`。
 
@@ -250,6 +252,16 @@ API key 只从环境变量 `OPENROUTER_API_KEY` 读取，不要把它写进仓�
 ## 工具（66 个）
 
 移动或使用 bot 身体的命令在 bot 死亡时会停止，回复说明 bot 死在哪里、因为什么、在哪里复活。寻路器能绕开岩浆岸边时就绕开，也不再往岩浆上搭方块走过去。
+
+### 时限
+移动或使用 bot 身体的命令，以及 `collect-block`、`lead-animal`，都在调用时限内回复，默认 50 秒（用 `--call-limit-seconds` 改），因为常见的 MCP 客户端 60 秒后就放弃请求（`wait-for-event` 仍最多等 55 秒）。移动或使用 bot 身体的命令到时会被停下，回复说明 bot 停在哪里。耗时长的工具自己控制在时限之内：
+- `collect-block` 和 `lead-animal` 最多等自己的任务约 45 秒。到时任务还没结束，就在后台继续，回复是成功的，并说明这一点，例如 `Still collecting after 45 s: task t5 gather keeps running in the background (mined 3 of 10 oak_log). Wait for it with wait-for-event types ['task_done', 'task_failed', 'task_cancelled'] (list-tasks shows whether it has already ended); stop it with cancel-task t5`。`lead-animal` 写 `Still leading after`；任务被暂停时写 `is paused (<原因>)`。它们的 `timeoutMs` 只限制任务本身（默认 120 秒和 300 秒）。
+- `move-to-position` 和 `goto-waypoint` 约 35 秒后停下，给在下界传送门里的等待留出时间：`Move timed out after 35000ms at (x, y, z), D blocks from the target; call move-to-position again to continue`。
+- `clear-region`、`fill-region` 和 `dig-tunnel` 约 45 秒后停下（以前是 120 秒），并说明做到了哪里：`Stopped early with N block(s) not processed; run again to continue`。
+- `smelt-item` 最多等产物约 45 秒；没烧完的会在熔炉里继续烧，回复里会说明。
+- `move-in-direction` 的 `duration` 超过约 45 秒时会被截短，回复里会说明。
+
+给移动工具、区域工具或 `smelt-item` 的 `timeoutMs` 照常生效，并延长这次调用的时限，这时 MCP 客户端必须等这么久才能收到回复。调大 `--call-limit-seconds`，这些默认值也随之变长；只在客户端的请求超时更长时才这样做。
 
 ### 移动
 - `get-position`：机器人的位置
@@ -359,7 +371,7 @@ API key 只从环境变量 `OPENROUTER_API_KEY` 读取，不要把它写进仓�
 - `hunt` 从不攻击玩家或驯服的动物。
 - 新任务会替换当前任务，除非 `replace` 为 `false`。
 - 任何让机器人移动的命令都会暂停当前任务，回复里会说明。之后用 `resume-task` 或 `cancel-task`。
-- 本能行动时暂停任务，行动结束后把身体交还给任务；如果它把决定交给你，或者它的动作让机器人被围住（躲进地下之后），任务就保持挂起、机器人留在躲避处，直到 `resume-task` 或 `cancel-task`。任务被挂起时，`lead-animal`、`collect-block` 的调用会一直等到自己的时限。
+- 本能行动时暂停任务，行动结束后把身体交还给任务；如果它把决定交给你，或者它的动作让机器人被围住（躲进地下之后），任务就保持挂起、机器人留在躲避处，直到 `resume-task` 或 `cancel-task`。任务被挂起时，`lead-animal`、`collect-block` 的调用约 45 秒后回复任务 `is paused` 及其原因；如果 `timeoutMs` 加 5 秒先到，任务以 `time limit reached` 取消。
 - 事件：`task_started`、`task_progress`、`task_paused`、`task_resumed`、`task_done`、`task_failed`、`task_cancelled`。
 
 ### 本能

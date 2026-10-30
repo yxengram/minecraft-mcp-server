@@ -1,14 +1,29 @@
 import { z } from "zod";
 import mineflayer from 'mineflayer';
 import { Vec3 } from 'vec3';
-import { ToolFactory, type ToolContext } from '../tool-factory.js';
+import { REPLY_MARGIN_MS, ToolFactory, allowFor, defaultLimitMs, type ToolContext } from '../tool-factory.js';
 import { coerceCoordinates } from './coordinate-utils.js';
 import { digBlockAt, isAir, isLiquid, overlapsBot, placeBlockAt } from './block-utils.js';
 import { throwIfAborted } from './movement-utils.js';
 
 const MAX_REGION_VOLUME = 512;
-const DEFAULT_TIMEOUT_MS = 120000;
 const MAX_CONSECUTIVE_FAILURES = 5;
+
+/**
+ * The region tools' time limit (E-038): without timeoutMs, what is left of the call's budget for the reply (about
+ * 45 s; it was 120 s, which the 50 s budget cut short since E-027). A timeoutMs the caller gave is kept, and the call's
+ * deadline moves to make room for it. Like timeoutMs, it is checked before each cell.
+ */
+function regionLimitMs(ctx: ToolContext, timeoutMs: number | undefined): number {
+  if (timeoutMs === undefined) return defaultLimitMs(ctx);
+  allowFor(ctx, timeoutMs);
+  return timeoutMs;
+}
+
+function timeoutDescription(callLimitMs: number): string {
+  return `Stop after this many milliseconds and report progress (default: about ${callLimitMs - REPLY_MARGIN_MS}, ` +
+    `so that the reply arrives within ${Math.round(callLimitMs / 1000)} s; a longer limit needs an MCP client that waits that long)`;
+}
 
 const DIRECTIONS = {
   north: new Vec3(0, 0, -1),
@@ -17,15 +32,15 @@ const DIRECTIONS = {
   west: new Vec3(-1, 0, 0)
 } as const;
 
-const regionShape = {
+const regionShape = (callLimitMs: number) => ({
   x1: z.coerce.number().describe("X of the first corner"),
   y1: z.coerce.number().describe("Y of the first corner"),
   z1: z.coerce.number().describe("Z of the first corner"),
   x2: z.coerce.number().describe("X of the opposite corner"),
   y2: z.coerce.number().describe("Y of the opposite corner"),
   z2: z.coerce.number().describe("Z of the opposite corner"),
-  timeoutMs: z.number().int().min(1000).optional().describe(`Stop after this many milliseconds and report progress (default: ${DEFAULT_TIMEOUT_MS})`)
-};
+  timeoutMs: z.number().int().min(1000).optional().describe(timeoutDescription(callLimitMs))
+});
 
 interface Corners { x1: number; y1: number; z1: number; x2: number; y2: number; z2: number }
 
@@ -114,10 +129,10 @@ export function registerRegionTools(factory: ToolFactory, getBot: () => mineflay
   factory.registerTool(
     "clear-region",
     `Dig out every block in a box between two corners (max ${MAX_REGION_VOLUME} blocks). Digs top to bottom, picks the best tool, and skips blocks next to lava. Dropped items are not collected`,
-    regionShape,
-    async ({ timeoutMs = DEFAULT_TIMEOUT_MS, ...corners }, ctx: ToolContext) => {
+    regionShape(factory.callLimitMs),
+    async ({ timeoutMs, ...corners }, ctx: ToolContext) => {
       const positions = regionPositions(corners as Corners);
-      const stats = await clearPositions(getBot(), positions, timeoutMs, 'top-down', ctx.signal);
+      const stats = await clearPositions(getBot(), positions, regionLimitMs(ctx, timeoutMs), 'top-down', ctx.signal);
       return factory.createResponse(describeClearStats(stats, `Cleared region of ${positions.length} blocks`));
     }
   );
@@ -126,15 +141,15 @@ export function registerRegionTools(factory: ToolFactory, getBot: () => mineflay
     "fill-region",
     `Fill the empty spaces in a box between two corners with a block from the inventory (max ${MAX_REGION_VOLUME} blocks). Builds bottom to top; occupied spaces and the bot's own position are skipped`,
     {
-      ...regionShape,
+      ...regionShape(factory.callLimitMs),
       blockName: z.string().trim().min(1).describe("Name of the block item to place, e.g. 'cobblestone'")
     },
-    async ({ blockName, timeoutMs = DEFAULT_TIMEOUT_MS, ...corners }, ctx: ToolContext) => {
+    async ({ blockName, timeoutMs, ...corners }, ctx: ToolContext) => {
       const bot = getBot();
       const positions = sortByDistance(bot, regionPositions(corners as Corners), 'bottom-up');
       const wanted = blockName.toLowerCase();
       const stats = { placed: 0, occupied: 0, onBot: 0, failed: 0, remaining: 0, outOfItems: false };
-      const deadline = Date.now() + timeoutMs;
+      const deadline = Date.now() + regionLimitMs(ctx, timeoutMs);
 
       for (let i = 0; i < positions.length; i++) {
         const pos = positions[i];
@@ -198,9 +213,9 @@ export function registerRegionTools(factory: ToolFactory, getBot: () => mineflay
       length: z.coerce.number().int().min(1).max(MAX_REGION_VOLUME).describe("How many blocks long"),
       width: z.coerce.number().int().min(1).max(9).optional().describe("Tunnel width (default: 1)"),
       height: z.coerce.number().int().min(1).max(9).optional().describe("Tunnel height (default: 2)"),
-      timeoutMs: z.number().int().min(1000).optional().describe(`Stop after this many milliseconds and report progress (default: ${DEFAULT_TIMEOUT_MS})`)
+      timeoutMs: z.number().int().min(1000).optional().describe(timeoutDescription(factory.callLimitMs))
     },
-    async ({ direction, length, width = 1, height = 2, timeoutMs = DEFAULT_TIMEOUT_MS }: {
+    async ({ direction, length, width = 1, height = 2, timeoutMs }: {
       direction: keyof typeof DIRECTIONS; length: number; width?: number; height?: number; timeoutMs?: number;
     }, ctx: ToolContext) => {
       const volume = length * width * height;
@@ -223,7 +238,7 @@ export function registerRegionTools(factory: ToolFactory, getBot: () => mineflay
         }
       }
 
-      const stats = await clearPositions(bot, positions, timeoutMs, 'none', ctx.signal);
+      const stats = await clearPositions(bot, positions, regionLimitMs(ctx, timeoutMs), 'none', ctx.signal);
       return factory.createResponse(describeClearStats(stats, `Dug ${direction} tunnel ${length}x${width}x${height}`));
     }
   );

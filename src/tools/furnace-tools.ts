@@ -2,7 +2,7 @@ import { z } from "zod";
 import mineflayer from 'mineflayer';
 import type { Item } from 'prismarine-item';
 import { Vec3 } from 'vec3';
-import { ToolFactory, type ToolContext } from '../tool-factory.js';
+import { REPLY_MARGIN_MS, ToolFactory, allowFor, defaultLimitMs, type ToolContext } from '../tool-factory.js';
 import { coerceCoordinates } from './coordinate-utils.js';
 
 const FURNACE_BLOCKS = new Set(['furnace', 'blast_furnace', 'smoker']);
@@ -47,7 +47,11 @@ export function registerFurnaceTools(factory: ToolFactory, getBot: () => minefla
       fuelItem: z.string().trim().min(1).describe("Name of fuel item"),
       fuelCount: z.number().int().positive().optional().describe("Amount of fuel to use (default: 1)"),
       takeOutput: z.boolean().optional().describe("Whether to take output when ready (default: true)"),
-      timeoutMs: z.number().int().positive().optional().describe("How long to wait for the whole batch in ms (default: 10 s per item plus 10 s)")
+      timeoutMs: z.number().int().positive().optional().describe(
+        `How long to wait for the whole batch in ms (default: 10 s per item plus 10 s, at most about ${factory.callLimitMs - REPLY_MARGIN_MS}, ` +
+        `so that the reply arrives within ${Math.round(factory.callLimitMs / 1000)} s; the furnace keeps smelting what is left; ` +
+        'a longer wait needs an MCP client that waits that long)'
+      )
     },
     async ({
       x,
@@ -144,8 +148,10 @@ export function registerFurnaceTools(factory: ToolFactory, getBot: () => minefla
         }
 
         // Take the output as it comes until the batch is done (E-013); taking only the first item left the rest in the
-        // furnace, where it also blocked the next batch.
-        const waitMs = timeoutMs ?? resolvedInputCount * 10000 + 10000;
+        // furnace, where it also blocked the next batch. The default wait ends in time for the reply (E-038); a timeoutMs
+        // the caller gave is kept, and the call's deadline moves to make room for it.
+        if (timeoutMs !== undefined) allowFor(ctx, timeoutMs);
+        const waitMs = timeoutMs ?? Math.min(resolvedInputCount * 10000 + 10000, defaultLimitMs(ctx));
         const deadline = Date.now() + waitMs;
         let taken = 0;
         let outputName = '';
@@ -167,7 +173,8 @@ export function registerFurnaceTools(factory: ToolFactory, getBot: () => minefla
           return factory.createErrorResponse(`No output after ${waitMs}ms; the input and fuel are in the furnace at (${x}, ${y}, ${z})${tookFuel}`);
         }
         const left = furnace.inputItem()?.count ?? 0;
-        return factory.createResponse(`Smelted ${taken} ${outputName}${left ? `; ${left} ${input.name} still in the furnace (stopped after ${waitMs}ms)` : ''}${tookFuel}`);
+        const rest = left ? `; ${left} ${input.name} still in the furnace (stopped after ${waitMs}ms); it keeps smelting in the furnace` : '';
+        return factory.createResponse(`Smelted ${taken} ${outputName}${rest}${tookFuel}`);
       } finally {
         cleanup();
       }

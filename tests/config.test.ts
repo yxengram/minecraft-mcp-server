@@ -324,3 +324,49 @@ test('E-034: --greeting goes together with the other options', (t) => {
   t.false(config.allowCommands);
   t.is(parseConfig(['--allow-commands', '--greeting', 'hi']).greeting, 'hi');
 });
+
+// ---------------------------------------------------------------------------------------------------------------
+// E-038: --call-limit-seconds, a whole number from 20 to 3600, 50 by default (Q27). It is checked as E-023 checks
+// --port: a bad value throws a ConfigError, which src/main.ts writes as one stderr line before it exits with 1.
+// ---------------------------------------------------------------------------------------------------------------
+
+const CALL_LIMIT_ERROR = 'Invalid --call-limit-seconds: expected a whole number from 20 to 3600';
+
+test('E-038: callLimitSeconds is 50 by default', (t) => {
+  t.is(parseConfig([]).callLimitSeconds, 50);
+  t.is(parseConfig(['--host', '127.0.0.1', '--port', '63320', '--username', 'MCPWorldTest', '--allow-commands']).callLimitSeconds, 50);
+});
+
+test('E-038: --call-limit-seconds 20, 120 and 3600 are accepted', (t) => {
+  t.is(parseConfig(['--call-limit-seconds', '20']).callLimitSeconds, 20);
+  t.is(parseConfig(['--call-limit-seconds', '120']).callLimitSeconds, 120);
+  t.is(parseConfig(['--call-limit-seconds', '3600']).callLimitSeconds, 3600);
+});
+
+for (const value of ['19', '3601', '0', '-5', '1.5', 'abc', '']) {
+  test(`E-038: --call-limit-seconds ${JSON.stringify(value)} throws a ConfigError`, (t) => {
+    t.is(configError(t, ['--call-limit-seconds', value])?.message, CALL_LIMIT_ERROR);
+  });
+}
+
+// --no-call-limit-seconds sets false and a repeated option is an array; neither is a whole number.
+test('E-038: --no-call-limit-seconds and a repeated --call-limit-seconds throw the same error', (t) => {
+  t.is(configError(t, ['--no-call-limit-seconds'])?.message, CALL_LIMIT_ERROR);
+  t.is(configError(t, ['--call-limit-seconds', '60', '--call-limit-seconds', '90'])?.message, CALL_LIMIT_ERROR);
+});
+
+test('E-038: a bad --call-limit-seconds is a ConfigError that prints nothing, does not exit and does not repeat the value', (t) => {
+  const sandbox = sinon.createSandbox();
+  const exit = sandbox.stub(process, 'exit');
+  const consoleError = sandbox.stub(console, 'error');
+  const stderrWrite = sandbox.stub(process.stderr, 'write');
+  try {
+    const message = configError(t, ['--call-limit-seconds', '98765'])?.message ?? '';
+    t.false(message.includes('98765'), message);
+    t.false(exit.called, 'process.exit was called');
+    t.false(consoleError.called, 'console.error was called');
+    t.false(stderrWrite.called, 'process.stderr.write was called');
+  } finally {
+    sandbox.restore();
+  }
+});

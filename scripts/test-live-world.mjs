@@ -57,6 +57,18 @@ async function waitForTaskEnd(id, description, timeoutMs = 60000) {
   return line;
 }
 
+/**
+ * collect-block's or lead-animal's result: the reply itself, or, when the reply is "Still <verb> after N s: task tN …"
+ * (E-038: the task was still going when the reply was due), the task_done line of the task that went on.
+ */
+async function finishedTask(reply, verb, timeoutMs) {
+  const still = reply.match(new RegExp(`^Still ${verb} after \\d+ s: task (t\\d+) `));
+  if (!still) return reply;
+  // On the step's line, before its "ok".
+  process.stdout.write(`(${reply.split(':')[0]}; waiting for ${still[1]}) `);
+  return waitForTaskEnd(still[1], `task ${still[1]} to finish after "Still ${verb}"`, timeoutMs);
+}
+
 let cx, y0, cz;
 let helper;
 let eventCursor = 0;
@@ -408,7 +420,9 @@ try {
   await step('collect-block', async () => {
     await cmd(`/fill ${cx - 5} ${y0} ${cz - 5} ${cx - 5} ${y0 + 2} ${cz - 5} oak_log`);
     await sleep(500);
-    expectIncludes(await call('collect-block', { blockType: 'oak_log', count: 3, timeoutMs: 60000 }), 'Mined 3 of 3 oak_log', 'collect-block');
+    // A gather still going when the reply is due (about 45 s) says "Still collecting …" and runs on as a task (E-038).
+    expectIncludes(await finishedTask(await call('collect-block', { blockType: 'oak_log', count: 3, timeoutMs: 60000 }), 'collecting', 90000),
+      'Mined 3 of 3 oak_log', 'collect-block');
     await waitForCount('oak_log', count => count >= 3, 'logs to be picked up');
   });
 
@@ -577,12 +591,13 @@ try {
       return at && Math.hypot(Number(at[1]) - x, Number(at[3]) - z) <= 3;
     };
     try {
-      expectIncludes(await call('lead-animal', { type: 'cow', x: cx + 6, y: y0, z: cz + 6, method: 'lure', timeoutMs: 120000 }, { timeout: 150000 }),
+      // The reply comes within about 45 s; a lead still going then says "Still leading …" and runs on (E-038).
+      expectIncludes(await finishedTask(await call('lead-animal', { type: 'cow', x: cx + 6, y: y0, z: cz + 6, method: 'lure', timeoutMs: 120000 }), 'leading', 150000),
         'by lure (wheat)', 'lead-animal by lure');
       expect(await cowNear(cx + 6, cz + 6), 'the cow is not by the lure target');
       await cmd('/give @s lead 1');
       await waitForCount('lead', count => count >= 1, 'a lead');
-      expectIncludes(await call('lead-animal', { type: 'cow', x: cx - 6, y: y0, z: cz - 6, method: 'leash', timeoutMs: 120000 }, { timeout: 150000 }),
+      expectIncludes(await finishedTask(await call('lead-animal', { type: 'cow', x: cx - 6, y: y0, z: cz - 6, method: 'leash', timeoutMs: 120000 }), 'leading', 150000),
         'on a lead', 'lead-animal on a lead');
       expect(await cowNear(cx - 6, cz - 6), 'the cow is not by the lead target');
       await waitForCount('lead', count => count >= 1, 'the lead back in the inventory');
@@ -896,6 +911,8 @@ try {
 
   const failed = results.filter(result => !result.ok);
   console.log(`\nExercised ${covered.size} of ${tools.length} tools`);
+  // E-038: every call is timed; one without an explicit long time limit fails its step after 55 s.
+  console.log(`Slowest calls: ${session.slowestCalls()}`);
   if (notCovered.length > 0) console.log(`Not exercised: ${notCovered.join(', ')}`);
   console.log(failed.length === 0
     ? 'Live world test passed'

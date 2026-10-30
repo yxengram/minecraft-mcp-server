@@ -22,6 +22,12 @@ export interface ServerConfig {
    * through only one line of plain chat of at most 256 characters, so bot.chat sends it as one message, never a command.
    */
   greeting?: string;
+  /**
+   * How long a command that drives the bot, collect-block or lead-animal may take before it replies, in seconds
+   * (BLUEPRINT E-038): the body commands' budget, and what the long tools leave for the reply. 50 suits MCP clients
+   * that give up on a request after 60 s. wait-for-event keeps its own cap of 55 s.
+   */
+  callLimitSeconds: number;
 }
 
 /** An unknown argument or an invalid value (BLUEPRINT E-023). parseConfig throws it instead of printing or exiting. */
@@ -50,11 +56,18 @@ const MAX_GREETING_LENGTH = 256;
 const LINE_BREAK_OR_CONTROL = /[\p{Cc}\u2028\u2029]/u;
 const GREETING_ERROR = `Invalid --greeting: expected one line of plain chat (not a command), at most ${MAX_GREETING_LENGTH} characters`;
 
+// --call-limit-seconds (E-038, Q27): the default suits clients that give up on a request after 60 s.
+const MIN_CALL_LIMIT_SECONDS = 20;
+const MAX_CALL_LIMIT_SECONDS = 3600;
+const DEFAULT_CALL_LIMIT_SECONDS = 50;
+
 function quoted(value: unknown): string {
   return `"${String(value).replace(UNPRINTABLE, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`)}"`;
 }
 
-function checkArguments(argv: { _: (string | number)[]; host: unknown; port: number; username: unknown; greeting?: unknown }): true {
+function checkArguments(argv: {
+  _: (string | number)[]; host: unknown; port: number; username: unknown; greeting?: unknown; 'call-limit-seconds': unknown;
+}): true {
   // .strict() lets positional arguments after "--" through; they are rejected with yargs's wording, without the values.
   if (argv._.length > 0) {
     throw new Error(`Unknown argument${argv._.length > 1 ? 's' : ''}: ${argv._.map(() => BARE_VALUE).join(', ')}`);
@@ -86,6 +99,12 @@ function checkArguments(argv: { _: (string | number)[]; host: unknown; port: num
       LINE_BREAK_OR_CONTROL.test(greeting) || greeting.startsWith('/'))
   ) {
     throw new Error(GREETING_ERROR);
+  }
+  // A repeated option is an array and --no-call-limit-seconds is false; neither is a whole number. The error does not
+  // repeat the value.
+  const limit = argv['call-limit-seconds'];
+  if (typeof limit !== 'number' || !Number.isInteger(limit) || limit < MIN_CALL_LIMIT_SECONDS || limit > MAX_CALL_LIMIT_SECONDS) {
+    throw new Error(`Invalid --call-limit-seconds: expected a whole number from ${MIN_CALL_LIMIT_SECONDS} to ${MAX_CALL_LIMIT_SECONDS}`);
   }
   return true;
 }
@@ -129,6 +148,11 @@ export function parseConfig(argv: string[] = hideBin(process.argv)): ServerConfi
     .option('greeting', {
       type: 'string',
       description: 'Say this in chat each time the bot joins the world (without it: say nothing); one line of plain chat, at most 256 characters, not starting with /'
+    })
+    .option('call-limit-seconds', {
+      type: 'number',
+      description: `How long a command that drives the bot, collect-block or lead-animal may take before it replies, in seconds (${MIN_CALL_LIMIT_SECONDS} to ${MAX_CALL_LIMIT_SECONDS}); raise it only for an MCP client that waits longer than 60 s for a reply`,
+      default: DEFAULT_CALL_LIMIT_SECONDS
     })
     .strict()
     .check(checkArguments)

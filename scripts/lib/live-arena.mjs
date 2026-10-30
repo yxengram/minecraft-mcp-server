@@ -19,6 +19,24 @@ export const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
 export class SetupFailed extends Error {}
 
+// E-038: the SDK client's default request timeout, which call() uses, and the time within which every reply must
+// come unless the call gave an explicit long time limit (the server's 50 s budget, with room to spare).
+export const CALL_TIMEOUT_MS = 60000;
+const REPLY_DUE_MS = 55000;
+// The tools whose explicit timeoutMs moves the call's deadline (E-038), with the time they may add after it (a move
+// waits up to 10 s in a Nether portal); the server keeps REPLY_MARGIN_MS on top for the reply. Not collect-block or
+// lead-animal: their timeoutMs only limits the task, and the reply still comes within the budget.
+const EXTENDING_TOOLS = { 'move-to-position': 10000, 'goto-waypoint': 10000, 'clear-region': 0, 'fill-region': 0, 'dig-tunnel': 0, 'smelt-item': 0 };
+const REPLY_MARGIN_MS = 5000;
+
+/** How long a call may take when its explicit timeoutMs lets it reply after REPLY_DUE_MS; null when it may not. */
+function longLimitMs(name, toolArgs) {
+  const extra = EXTENDING_TOOLS[name];
+  if (extra === undefined || typeof toolArgs.timeoutMs !== 'number') return null;
+  const allowed = toolArgs.timeoutMs + extra + REPLY_MARGIN_MS;
+  return allowed > REPLY_DUE_MS ? allowed : null;
+}
+
 /** The LAN port from the command line; refuses to run without --allow-world-changes. */
 export function parseLiveArgs(what) {
   const args = process.argv.slice(2);
@@ -48,6 +66,8 @@ export function responseText(result) {
  * (E-033).
  * The server's stderr is read from the start and every line is kept (`stderrLines()`), so the scripts can check what
  * it logged (E-036); a pipe nobody reads fills up and stalls a long run. The lines are not printed.
+ * Every call() is timed (`durations`, `slowestCalls()`), and one that replies after 55 s without an explicit long
+ * time limit fails (E-038).
  */
 export function createArena({ port, botName, helperName, clientName, serverArgs = [], serverEnv = {} }) {
   const waypointDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-live-world-'));
@@ -79,11 +99,32 @@ export function createArena({ port, botName, helperName, clientName, serverArgs 
 
   const covered = new Set();
   const results = [];
+  // How long each call() took, in order (E-038).
+  const durations = [];
   const arena = { cx: 0, y0: ARENA_Y, cz: 0, ready: false, helper: null };
 
-  async function call(name, toolArgs = {}, { expectError = false, timeout = 120000 } = {}) {
+  /**
+   * Calls a tool and checks isError. A reply must come within REPLY_DUE_MS (E-038): a slower one fails the step,
+   * unless the call gives a tool whose explicit timeoutMs moves the deadline; such a call must pass a client `timeout`
+   * that covers it.
+   */
+  async function call(name, toolArgs = {}, { expectError = false, timeout = CALL_TIMEOUT_MS } = {}) {
     covered.add(name);
-    const result = await client.callTool({ name, arguments: toolArgs }, undefined, { timeout });
+    const longLimit = longLimitMs(name, toolArgs);
+    if (longLimit !== null && timeout < longLimit) {
+      throw new Error(`${name} with timeoutMs ${toolArgs.timeoutMs} may reply after ${longLimit / 1000} s: pass a client timeout of at least ${longLimit} ms`);
+    }
+    const started = Date.now();
+    let result;
+    try {
+      result = await client.callTool({ name, arguments: toolArgs }, undefined, { timeout });
+    } finally {
+      durations.push({ name, ms: Date.now() - started });
+    }
+    const ms = Date.now() - started;
+    if (longLimit === null && ms > REPLY_DUE_MS) {
+      throw new Error(`${name}(${JSON.stringify(toolArgs)}) replied after ${(ms / 1000).toFixed(1)} s; without an explicit long time limit a reply must come within ${REPLY_DUE_MS / 1000} s`);
+    }
     const text = responseText(result);
     if (Boolean(result.isError) !== expectError) {
       throw new Error(`${name}(${JSON.stringify(toolArgs)}) ${expectError ? 'should have failed' : 'failed'}: ${text}`);
@@ -289,9 +330,15 @@ export function createArena({ port, botName, helperName, clientName, serverArgs 
     fs.rmSync(waypointDir, { recursive: true, force: true });
   }
 
+  /** The `count` slowest calls so far, e.g. "collect-block 44.8 s, dig-tunnel 21.3 s". */
+  function slowestCalls(count = 5) {
+    return [...durations].sort((a, b) => b.ms - a.ms).slice(0, count)
+      .map(({ name, ms }) => `${name} ${(ms / 1000).toFixed(1)} s`).join(', ');
+  }
+
   return {
-    arena, client, covered, results,
+    arena, client, covered, results, durations,
     call, expect, expectIncludes, waitFor, cmd, position, inventoryCount, waitForCount, block, placeAndVerify,
-    distanceTo, printDiagnostics, step, connect, setup, cleanup, close, stderrLines
+    distanceTo, printDiagnostics, step, connect, setup, cleanup, close, stderrLines, slowestCalls
   };
 }
