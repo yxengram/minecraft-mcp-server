@@ -71,7 +71,28 @@ jobs:
       if: matrix.os == 'ubuntu-latest' && matrix.node == '22.x'
       run: node scripts/test-smoke.mjs --pack-report "$RUNNER_TEMP/pack.json"
 
-    # An empty project without a lockfile, as a user's npx would see it; npm installs the dependencies from the registry.
+    # npm-shrinkwrap.json in the package pins minecraft-protocol and prismarine-* to the versions CI tested (E-025).
+    # npm follows a dependency's shrinkwrap only when the registry's metadata says it has one (_hasShrinkwrap), and a
+    # local tarball never does, so the pinned tree is installed the way the registry would: npm ci inside the unpacked
+    # package, from its own npm-shrinkwrap.json (checked 2026-10-31).
+    - name: Install the package from its shrinkwrap
+      if: matrix.os == 'ubuntu-latest' && matrix.node == '22.x'
+      run: |
+        mkdir "$RUNNER_TEMP/pinned"
+        tar -xzf "$PACKAGE_TGZ" -C "$RUNNER_TEMP/pinned"
+        cd "$RUNNER_TEMP/pinned/package"
+        npm ci --omit=dev --ignore-scripts --no-audit --no-fund
+
+    - name: Compare the installed versions with the lockfile
+      if: matrix.os == 'ubuntu-latest' && matrix.node == '22.x'
+      run: node scripts/test-smoke.mjs --compare-lock "$RUNNER_TEMP/pinned/package" "$RUNNER_TEMP/pinned/package/npm-shrinkwrap.json"
+
+    - name: Smoke test the package installed from its shrinkwrap
+      if: matrix.os == 'ubuntu-latest' && matrix.node == '22.x'
+      run: npm run test:smoke -- "$RUNNER_TEMP/pinned/package/dist/main.js"
+
+    # An empty project without a lockfile, installing the local tarball: npm resolves the dependencies itself here (it
+    # leaves the shrinkwrap out, see above), so this checks that the newest versions the ranges allow still start.
     - name: Install the package
       if: matrix.os == 'ubuntu-latest' && matrix.node == '22.x'
       run: |
@@ -79,11 +100,6 @@ jobs:
         cd "$RUNNER_TEMP/install"
         npm init -y
         npm install --no-audit --no-fund "$PACKAGE_TGZ"
-
-    # npm-shrinkwrap.json in the package pins minecraft-protocol and prismarine-* to the versions CI tested (E-025).
-    - name: Compare the installed versions with the lockfile
-      if: matrix.os == 'ubuntu-latest' && matrix.node == '22.x'
-      run: node scripts/test-smoke.mjs --compare-lock "$RUNNER_TEMP/install"
 
     - name: Smoke test the installed package
       if: matrix.os == 'ubuntu-latest' && matrix.node == '22.x'

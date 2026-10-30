@@ -1705,3 +1705,10 @@
 - **对世界的影响**：实机测试照常；构建只写 build/ 与临时目录，从 npm 下载了依赖。
 - **文件状态**：F-057、F-058 由 placeholder 改为 verified（部分）；F-050 加上 manifest 的检查。
 - **留给所有者**：（1）在 macOS 与 Windows 的 Claude Desktop 上各双击安装一次（契约的实机检查：不填 key 时 get-policy 显示 OFFLINE，填 key 后 online、日志里没有 key，get-position 与 scan-area 正常，记录自带的 Node 版本；README 是否写系统钥匙串也要那时核对）；（2）看一遍 manifest 中由实现拟定的文字（description、long_description 的开头、四个设置的标题与说明）；（3）CI 的 mcpb 三步排在 compare-lock 之后，那一步改好之前不会运行。
+
+### 2026-10-31 M19：CI 的依赖版本核对改为在解开的包里 npm ci 之后做；prepare 保留（所有者决定）
+
+- **问题**（第 24 步发现）：CI 的 “Compare the installed versions with the lockfile” 在空项目里 `npm install <tgz>` 之后比较，但 npm 只在依赖的元数据带 `_hasShrinkwrap` 时才按它的 npm-shrinkwrap.json 安装，registry 会设这个字段（netlify-cli@17.0.0 为 true），从本地 tarball 安装时不设，所以这样装出来的是 npm 自己解析的更新版本（9 个 prismarine 包不同），这一步验证不了 registry 用户拿到的依赖树，下一次推送一定失败。
+- **所有者的决定**（2026-10-31，问答时选“解开包后 npm ci 再比较（推荐）”）：旧方案：空项目安装后比较版本。新方案：把 tarball 解开，在其中 `npm ci --omit=dev --ignore-scripts`，按包里的 npm-shrinkwrap.json 比较（`--compare-lock <解开的包> <解开的包>/npm-shrinkwrap.json`），并对 `<解开的包>/dist/main.js` 跑冒烟测试；空项目里装 tarball 的冒烟测试保留（它检查范围允许的最新版本也能启动），不再比较版本。原因：npm ci 按包自己的 shrinkwrap 装，正是 registry 用户拿到的那棵树。影响：`.github/workflows/build.yml` 多一个安装步骤，比较与冒烟测试改到它之后；`scripts/test-smoke.mjs` 不用改（--compare-lock 本来就接受安装目录与锁文件）；BLUEPRINT 的 F-051、E-025、E-026 与 F-059 的 verify 一并改写。
+- **另一个决定**（2026-10-31，问答时选“保留 prepare（推荐）”）：package.json 的 prepare 不改为 prepack。npm 11.20 全局安装时会警告 “install-scripts … (prepare: npm run build)” 并说明没有运行，包照常可用；保留它是为了 CONTRIBUTING 里的 github: 安装方式仍会自动构建。
+- **检查**：本地按新步骤实测（在工作区的临时副本里 build、npm shrinkwrap、npm pack，解开 tarball，`npm ci --omit=dev --ignore-scripts` 装 195 个包）：`--compare-lock` 18 项全部 PASS（prismarine-registry 为 1.11.0，等于 shrinkwrap），对解开的包跑冒烟测试 17 项全部 PASS。CI 还没跑（要推送）。`git diff --check` 无输出；只改 CI 与文档，没有跑单元测试以外的检查。
