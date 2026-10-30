@@ -2,6 +2,9 @@ import { z } from "zod";
 import mineflayer from 'mineflayer';
 import { ToolFactory } from '../tool-factory.js';
 import { MessageKind, MessageStore } from '../message-store.js';
+import type { EventStore } from '../event-store.js';
+import type { ChatSpeaker } from '../bot-connection.js';
+import { chatLine, quoteUntrusted, UNTRUSTED_PLAYER_TEXT } from '../format.js';
 
 const KIND_LABELS: Record<Exclude<MessageKind, 'chat'>, string> = {
   system: 'system',
@@ -9,6 +12,33 @@ const KIND_LABELS: Record<Exclude<MessageKind, 'chat'>, string> = {
   title: 'title',
   subtitle: 'subtitle'
 };
+
+/**
+ * BotConnection's onChatMessage and onSystemMessage as src/main.ts wires them (E-035). Public chat goes to the store
+ * and a chat event, a whisper only to a whisper event (whispers never were in read-chat), and only a speaker in the
+ * player list goes on to `triage` (Autopilot.handleChat). Event bodies are quoted; the store keeps the raw text, which
+ * read-chat quotes and its repeat check compares.
+ */
+export function chatCallbacks(
+  messageStore: MessageStore,
+  events: Pick<EventStore, 'addEvent'>,
+  triage: (speaker: string, text: string, whisper: boolean) => void
+) {
+  return {
+    onChatMessage(speaker: ChatSpeaker, text: string): void {
+      if (speaker.whisper) {
+        events.addEvent('whisper', chatLine(speaker, text));
+      } else {
+        messageStore.addMessage(speaker.name, text, 'chat', speaker.listed);
+        events.addEvent('chat', chatLine(speaker, text));
+      }
+      if (speaker.listed) triage(speaker.name, text, speaker.whisper);
+    },
+    onSystemMessage(kind: Exclude<MessageKind, 'chat'>, text: string): void {
+      if (messageStore.addMessage('', text, kind)) events.addEvent(kind, quoteUntrusted(text));
+    }
+  };
+}
 
 export interface ChatToolOptions {
   /** --allow-commands (BLUEPRINT E-033): send-chat may run server commands. Off when left out. */
@@ -97,7 +127,7 @@ export function registerChatTools(
 
   factory.registerTool(
     "read-chat",
-    "Get recent chat messages from players, plus system messages (command feedback, death messages, server notices), action bar text and titles",
+    `Get recent chat messages from players, plus system messages (command feedback, death messages, server notices), action bar text and titles. ${UNTRUSTED_PLAYER_TEXT}`,
     {
       count: z.number().optional().describe("Number of recent messages to retrieve (default: 10, max: 100)"),
       includeSystem: z.boolean().optional().describe("Include system messages, action bar text and titles (default: true)")
@@ -116,7 +146,9 @@ export function registerChatTools(
         : `Found ${messages.length} message(s) (${chatCount} chat, ${messages.length - chatCount} system/action bar/title):\n\n`;
       messages.forEach((msg, index) => {
         const timestamp = new Date(msg.timestamp).toISOString();
-        const body = msg.kind === 'chat' ? `${msg.username}: ${msg.content}` : `[${KIND_LABELS[msg.kind]}] ${msg.content}`;
+        const body = msg.kind === 'chat'
+          ? chatLine({ name: msg.username, listed: msg.listed }, msg.content)
+          : `[${KIND_LABELS[msg.kind]}] ${quoteUntrusted(msg.content)}`;
         output += `${index + 1}. ${timestamp} - ${body}\n`;
       });
 

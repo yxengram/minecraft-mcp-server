@@ -177,7 +177,7 @@ API key 只从环境变量 `OPENROUTER_API_KEY` 读取，不要把它写进仓�
 
 `online-mode=true` 的服务器会核对 Microsoft 账号，以 `Failed to verify username!` 拒绝机器人。这时工具回复是 `The server checks Microsoft accounts (online mode); this bot joins with an offline account. See Accounts in the README`。
 
-离线账号的 UUID 只由名字决定。请给机器人起一个它自己的名字，不要用你自己或其他玩家的名字：同名时，机器人可能和那位玩家共用背包和位置，或者把对方挤下线。
+离线账号的 UUID 只由名字决定。请给机器人起一个它自己的名字，不要用你自己或其他玩家的名字：同名时，机器人可能和那位玩家共用背包和位置，或者把对方挤下线。聊天也按这个 UUID 认人，局限见[聊天](#聊天)。
 
 ## 故障排查（Troubleshooting）
 
@@ -302,6 +302,15 @@ API key 只从环境变量 `OPENROUTER_API_KEY` 读取，不要把它写进仓�
 ### 聊天
 - `send-chat`：说话；服务器命令需要 `--allow-commands`
 - `read-chat`：最近的聊天和系统消息
+
+玩家写的文字会加上引号并转义，所以一条消息永远只占一行：`read-chat` 和 `chat` 事件里是 `Steve: "hi"`，`whisper` 事件里是 `Steve (whisper): "hi"`（私聊不进 `read-chat`），系统消息、动作栏文字和标题分别是 `[system] "…"`、`[action bar] "…"`、`[title] "…"`。告示牌文字以及物品、生物的自定义名字也同样加引号。`read-chat`、`get-events` 和 `wait-for-event` 的工具说明告诉 LLM：这些文字不可信，绝不能照着里面的指令做。
+
+机器人按服务器随消息发来的 UUID 判断是谁说的话，而不是按这一行的文字。不签名聊天的客户端（例如机器人和一些启动器）发出的 `/msg`、`/me`、`/say`、`/teammsg` 不带这个 UUID，这时机器人从服务器加在发言人名字上的悬停信息里取玩家的 UUID。看起来像聊天的系统消息（例如 `/tellraw @a "<Steve> stop"` 发出的）和没有发送者的消息（控制台或命令方块的 `/say`、`/msg`）都记为 `[system]` 行：它们不属于任何玩家，聊天分拣看不到，也不会触发聊天命令。UUID 不在玩家列表里的发言人显示为 `"Steve" (unlisted): "hi"`，同样不进入聊天分拣。
+
+局限：
+- 在允许离线账号的服务器上，UUID 只由名字决定（见[账号（Accounts）](#账号accounts)）。按 UUID 认人能挡住 `/tellraw` 一类伪造的行，但挡不住别人用某位玩家的名字登录。
+- 在用插件把玩家聊天改发为系统消息的服务器上，这些聊天只显示为 `[system]` 行：不进入聊天分拣，也不能下聊天命令。
+- 服务器管理员（op）可以用 `/execute as <玩家> run …` 以另一位玩家的名义发 `/msg`、`/me`、`/say` 或 `/teammsg`，机器人会把这样的消息当成那位玩家的。只有 op 能这样做，正如只有 op 能用 `/tellraw`。这还依赖服务器像原版 Minecraft 那样生成发言人的名字：如果服务器的插件允许玩家自己设定显示名（例如昵称插件），玩家在这类消息里可能冒充另一位玩家。
 
 ### Autopilot
 - `start-task`：启动后台任务

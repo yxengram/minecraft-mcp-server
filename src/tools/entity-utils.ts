@@ -1,5 +1,5 @@
 import type { Bot } from 'mineflayer';
-import { formatStat } from '../format.js';
+import { formatStat, quoteUntrusted } from '../format.js';
 import pathfinderPkg from 'mineflayer-pathfinder';
 const { goals } = pathfinderPkg;
 import { mobHostility } from '../autopilot/threats.js';
@@ -56,7 +56,8 @@ export function entityDetails(bot: Bot, entity: BotEntity): string[] {
   const details: string[] = [];
   try {
     const name = customName(entity);
-    if (name && entity.type !== 'player') details.push(`named "${name}"`);
+    // A custom name is player text (a name tag), quoted and escaped like chat (E-035).
+    if (name && entity.type !== 'player') details.push(`named ${quoteUntrusted(name)}`);
 
     if (metadataValue(bot, entity, 'baby') === true) details.push('baby');
 

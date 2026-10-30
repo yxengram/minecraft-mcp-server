@@ -1,12 +1,12 @@
 import { z } from "zod";
 import mineflayer from 'mineflayer';
 import { ToolFactory } from '../tool-factory.js';
-import { formatStat } from '../format.js';
+import { formatStat, quoteUntrusted } from '../format.js';
 import { countItems, itemDetails, resolveItemsByName } from './item-utils.js';
 
 function detailSuffix(bot: mineflayer.Bot, item: Parameters<typeof itemDetails>[1]): string {
   const { customName, details } = itemDetails(bot, item);
-  const parts = [...(customName ? [`"${customName}"`] : []), ...details];
+  const parts = [...(customName ? [quoteUntrusted(customName)] : []), ...details];
   return parts.length > 0 ? `: ${parts.join(', ')}` : '';
 }
 

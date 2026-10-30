@@ -203,10 +203,11 @@ test('read-chat includes labeled system messages, action bar and titles by defau
 
   const all = (await executor({})).content[0].text;
   t.true(all.includes('Found 4 message(s) (1 chat, 3 system/action bar/title)'));
-  t.true(all.includes('Steve: hi'));
-  t.true(all.includes('[system] Steve was slain by Zombie'));
-  t.true(all.includes('[action bar] You may not rest now'));
-  t.true(all.includes('[title] Welcome'));
+  // E-035: player text and the text of system lines are quoted.
+  t.true(all.includes('Steve: "hi"'));
+  t.true(all.includes('[system] "Steve was slain by Zombie"'));
+  t.true(all.includes('[action bar] "You may not rest now"'));
+  t.true(all.includes('[title] "Welcome"'));
 
   const chatOnly = (await executor({ includeSystem: false })).content[0].text;
   t.true(chatOnly.includes('Found 1 chat message(s)'));

@@ -3,7 +3,7 @@ import pathfinderPkg from 'mineflayer-pathfinder';
 const { pathfinder, Movements } = pathfinderPkg;
 import minecraftData from 'minecraft-data';
 import { formatStat } from './format.js';
-import { componentToText } from './text-component.js';
+import { componentToText, simplifyNbt } from './text-component.js';
 import { explainFailure, kickInfo, type FailureKind } from './connection-errors.js';
 import type { MessageKind } from './message-store.js';
 import { serverRegistryName, trackServerRegistries } from './server-registries.js';
@@ -81,19 +81,105 @@ interface BotConfig {
   greeting?: string;
 }
 
+/** Who said a chat line or whispered, told by the sender's UUID rather than by the text of the line (E-035). */
+export interface ChatSpeaker {
+  /** The name bot.players has for the UUID; for an unlisted speaker, the text of the name the server sent with it. */
+  name: string;
+  uuid: string;
+  whisper: boolean;
+  /** The UUID is in bot.players. Only a listed speaker goes to chat triage and chat commands. */
+  listed: boolean;
+}
+
 interface ConnectionCallbacks {
   onLog: (level: string, message: string) => void;
-  onChatMessage: (username: string, message: string) => void;
+  /** A player's chat line or whisper (E-035; whispers were onWhisper in E-005). The bot's own messages never come here. */
+  onChatMessage: (speaker: ChatSpeaker, text: string) => void;
   onEvent?: (type: string, message: string) => void;
   onSystemMessage?: (kind: Exclude<MessageKind, 'chat'>, text: string) => void;
   /** The bot spawned for the first time after (re)connecting. */
   onBotReady?: (bot: mineflayer.Bot) => void;
   /** The bot left the game. */
   onBotEnd?: (reason: string) => void;
-  /** A player whispered to the bot (BLUEPRINT E-005). */
-  onWhisper?: (username: string, message: string) => void;
   /** The bot took damage; attackerId is the entity that caused it, if any (BLUEPRINT E-005). */
   onDamage?: (info: { attackerId?: number; type: string; time: number }) => void;
+}
+
+/** What minecraft-protocol's playerChat event carries (src/client/chat.js); profileless chat has no sender. */
+type PlayerChatData = {
+  sender?: string;
+  senderName?: unknown;
+  plainMessage?: string;
+  formattedMessage?: unknown;
+  type?: number | { chatType?: number };
+};
+
+/**
+ * A playerChat's chat type without "minecraft:" (E-035), from the entry mineflayer formats the line with:
+ * bot.registry.chatFormattingById[type.chatType ?? type]. 26.1 sends the type as a holder id that counts from 1, and
+ * minecraft-protocol already takes the 1 off, so the index is the registry entry's own, as chatFormattingById and
+ * trackServerRegistries both key it. Undefined when neither knows the type, which counts as public chat.
+ */
+function chatTypeName(bot: mineflayer.Bot, type: PlayerChatData['type']): string | undefined {
+  const index = typeof type === 'object' && type !== null ? type.chatType : type;
+  if (typeof index !== 'number') return undefined;
+  const formatting = (bot.registry as { chatFormattingById?: Record<number, { name?: string } | undefined> } | undefined)
+    ?.chatFormattingById?.[index];
+  return (formatting?.name ?? serverRegistryName(bot, 'chat_type', index))?.replace(/^minecraft:/, '');
+}
+
+/** A playerChat's sender if it names a player: older versions send the console's chat with the all-zero UUID. */
+function playerSender(sender: unknown): string | undefined {
+  return typeof sender === 'string' && /[1-9a-f]/i.test(sender) ? sender : undefined;
+}
+
+/** A UUID in one spelling, for comparing: lower case without dashes. */
+function sameUuid(a: string | undefined, b: string | undefined): boolean {
+  return a !== undefined && b !== undefined && a.replace(/-/g, '').toLowerCase() === b.replace(/-/g, '').toLowerCase();
+}
+
+/**
+ * The player UUID in the hover of a profileless playerChat's senderName (E-035). 26.1.2 sends /msg, /me, /say and
+ * /teammsg from clients that do not sign chat (bots, offline launchers) as profileless chat with no sender, but the
+ * server builds senderName from the command source's display name and puts on its root a hover_event show_entity with
+ * the source's UUID, as four integers. Only on the root: the team prefix and suffix are in extra, and so is what an op
+ * writes into them. Undefined without such a hover or for an entity that is not a player.
+ */
+function hoverPlayerUuid(senderName: unknown): string | undefined {
+  let root: unknown;
+  if (typeof senderName === 'string') {
+    try {
+      root = JSON.parse(senderName);
+    } catch {
+      return undefined;
+    }
+  } else {
+    // Network NBT, not yet turned into JSON.
+    root = simplifyNbt(senderName);
+  }
+  const hover = typeof root === 'object' && root !== null ? (root as { hover_event?: unknown }).hover_event : undefined;
+  if (typeof hover !== 'object' || hover === null) return undefined;
+  const { action, id, uuid } = hover as { action?: unknown; id?: unknown; uuid?: unknown };
+  if (action !== 'show_entity' || (id !== 'minecraft:player' && id !== 'player')) return undefined;
+  if (typeof uuid === 'string') return /^[0-9a-f]{8}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{12}$/i.test(uuid) ? uuid : undefined;
+  const isInt32 = (part: unknown) => Number.isInteger(part) && (part as number) >= -(2 ** 31) && (part as number) < 2 ** 31;
+  if (!Array.isArray(uuid) || uuid.length !== 4 || !uuid.every(isInt32)) return undefined;
+  const hex = uuid.map(part => ((part as number) >>> 0).toString(16).padStart(8, '0')).join('');
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
+/**
+ * The text of a playerChat without plainMessage (profileless chat), decoded once: minecraft-protocol hands it on as
+ * JSON, and an unstyled message is a JSON string literal, which may itself look like JSON ("/msg Bot {"text":"x"}").
+ */
+function contentText(content: unknown): string {
+  if (typeof content !== 'string') return componentToText(content);
+  try {
+    const parsed: unknown = JSON.parse(content);
+    return typeof parsed === 'string' ? parsed : componentToText(parsed);
+  } catch {
+    return content;
+  }
 }
 
 const SOUND_RADIUS = 32;
@@ -221,6 +307,9 @@ export class BotConnection {
       port: this.config.port,
       username: this.config.username,
       plugins: { pathfinder },
+      // The default patterns match the text of every line, system messages too, so a /tellraw "<Thomas> stop" passed
+      // for Thomas's chat. Players are told by the sender's UUID instead (E-035).
+      defaultChatPatterns: false,
     };
 
     this.clearConnectTimer();
@@ -378,15 +467,33 @@ export class BotConnection {
       this.callbacks.onLog('info', `Bot connected successfully. Username: ${this.config.username}, Server: ${this.config.host}:${this.config.port}`);
     });
 
-    bot.on('chat', (username, message) => {
-      if (username === bot.username) return;
-      this.callbacks.onChatMessage(username, message);
-    });
-
-    bot.on('whisper', (username, message) => {
-      if (username === bot.username) return;
-      this.callbacks.onEvent?.('whisper', `${username}: ${message}`);
-      this.callbacks.onWhisper?.(username, message);
+    // A player's chat or whisper, by the sender's UUID (E-035): the playerChat's sender, or for profileless chat the
+    // player in its senderName's hover. Ahead of mineflayer's own listener, so that tookChat (this handler recorded or
+    // ignored the line) is set before mineflayer hands the same line to the 'message' handler below.
+    let tookChat = false;
+    bot._client.prependListener('playerChat', (data: PlayerChatData) => {
+      tookChat = false;
+      if (this.bot !== bot) return;
+      const sender = playerSender(data.sender);
+      const uuid = sender ?? hoverPlayerUuid(data.senderName);
+      const player = uuid === undefined ? undefined : Object.values(bot.players ?? {}).find(entry => sameUuid(entry.uuid, uuid));
+      const type = chatTypeName(bot, data.type);
+      const outgoing = type?.endsWith('_outgoing') === true;
+      // The bot's own lines: the UUID of the login, or its entry in the player list once that has arrived.
+      const own = uuid !== undefined && (sameUuid(uuid, bot._client.uuid) || sameUuid(uuid, bot.player?.uuid) || player?.username === bot.username);
+      // Chat without a sender that no listed player sent (the console, a command block) stays mineflayer's system line.
+      if (sender === undefined && player === undefined && !outgoing && !own) return;
+      tookChat = true;
+      if (outgoing || own || uuid === undefined) return;
+      // Not in the player list: the display name the server sent, which may be anything, also another player's name.
+      const name = player?.username ?? componentToText(data.senderName);
+      const text = typeof data.plainMessage === 'string' ? data.plainMessage : contentText(data.formattedMessage);
+      try {
+        this.callbacks.onChatMessage({ name, uuid, whisper: type === 'msg_command_incoming', listed: player !== undefined }, text);
+      } catch (err) {
+        // Thrown here, it would reach minecraft-protocol's packet stream.
+        this.callbacks.onLog('error', `Could not handle a chat message: ${this.formatError(err)}`);
+      }
     });
 
     bot.on('spawn', () => {
@@ -502,8 +609,14 @@ export class BotConnection {
       if (trimmed) this.callbacks.onSystemMessage?.(kind, trimmed);
     };
 
-    bot.on('message', (message, position) => {
-      if (position === 'chat') return;
+    // mineflayer passes playerChat's sender as a third argument, which its typings leave out. Chat with a player's
+    // sender, and chat the playerChat handler took (recorded or ignored), are that handler's; other chat, the console's
+    // or a command block's, is a system line, as mineflayer formatted it (E-035).
+    bot.on('message', (message, position, sender?: unknown) => {
+      if (position === 'chat' && (playerSender(sender) !== undefined || tookChat)) {
+        tookChat = false;
+        return;
+      }
       forwardSystemMessage(position === 'game_info' ? 'action_bar' : 'system', message.toString());
     });
 

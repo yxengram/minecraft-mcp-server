@@ -5,6 +5,8 @@ interface StoredMessage {
   username: string;
   content: string;
   kind: MessageKind;
+  /** For chat: the speaker's UUID was in the player list (E-035); read-chat quotes and marks the name otherwise. */
+  listed: boolean;
 }
 
 const MAX_STORED_MESSAGES = 100;
@@ -16,7 +18,7 @@ export class MessageStore {
   private maxMessages = MAX_STORED_MESSAGES;
 
   /** Returns false when the message was dropped as a repeat of the previous one of the same kind. */
-  addMessage(username: string, content: string, kind: MessageKind = 'chat'): boolean {
+  addMessage(username: string, content: string, kind: MessageKind = 'chat', listed = true): boolean {
     const now = Date.now();
     if (kind !== 'chat') {
       const previous = [...this.messages].reverse().find(message => message.kind === kind);
@@ -25,7 +27,7 @@ export class MessageStore {
       }
     }
 
-    this.messages.push({ timestamp: now, username, content, kind });
+    this.messages.push({ timestamp: now, username, content, kind, listed });
 
     if (this.messages.length > this.maxMessages) {
       this.messages.shift();

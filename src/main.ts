@@ -14,7 +14,7 @@ import { registerPositionTools } from './tools/position-tools.js';
 import { registerInventoryTools } from './tools/inventory-tools.js';
 import { registerBlockTools } from './tools/block-tools.js';
 import { registerEntityTools } from './tools/entity-tools.js';
-import { registerChatTools } from './tools/chat-tools.js';
+import { chatCallbacks, registerChatTools } from './tools/chat-tools.js';
 import { registerFlightTools } from './tools/flight-tools.js';
 import { registerGameStateTools } from './tools/gamestate-tools.js';
 import { registerCraftingTools } from './tools/crafting-tools.js';
@@ -63,25 +63,18 @@ async function main() {
   const waypointStore = new WaypointStore(config.waypointFile ?? defaultWaypointFile(), config.host);
   const autopilot = new Autopilot({ events: eventStore, waypoints: waypointStore, decisionModel: config.decisionModel, log });
 
+  // Public chat to read-chat and chat events, whispers to whisper events; only listed speakers reach the triage (E-035).
+  const chat = chatCallbacks(messageStore, eventStore, (speaker, text, whisper) => autopilot.handleChat(speaker, text, whisper));
   const connection = new BotConnection(
     config,
     {
       onLog: log,
-      onChatMessage: (username, message) => {
-        messageStore.addMessage(username, message);
-        eventStore.addEvent('chat', `${username}: ${message}`);
-        autopilot.handleChat(username, message, false);
-      },
+      onChatMessage: chat.onChatMessage,
       onEvent: (type, message) => eventStore.addEvent(type, message),
-      onSystemMessage: (kind, text) => {
-        if (messageStore.addMessage('', text, kind)) {
-          eventStore.addEvent(kind, text);
-        }
-      },
+      onSystemMessage: chat.onSystemMessage,
       onBotReady: bot => autopilot.bind(bot),
       onBotEnd: () => autopilot.unbind('disconnected'),
-      onDamage: info => autopilot.noteDamage(info),
-      onWhisper: (username, message) => autopilot.handleChat(username, message, true)
+      onDamage: info => autopilot.noteDamage(info)
     }
   );
 

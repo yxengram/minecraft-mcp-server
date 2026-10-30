@@ -2,7 +2,7 @@ import { z } from "zod";
 import type mineflayer from 'mineflayer';
 import { ToolFactory } from '../tool-factory.js';
 import { EventStore, GameEvent } from '../event-store.js';
-import { formatStat } from '../format.js';
+import { formatStat, UNTRUSTED_PLAYER_TEXT } from '../format.js';
 import { describeEntity, findNearbyEntities } from './entity-utils.js';
 
 const WAIT_POLL_MS = 250;
@@ -19,7 +19,7 @@ function formatEvents(events: GameEvent[]): string {
 export function registerEventTools(factory: ToolFactory, eventStore: EventStore, getBot?: () => mineflayer.Bot): void {
   factory.registerTool(
     "get-events",
-    "Get recent game events (chat, death, damage taken, item pickups, players joining/leaving, kicks, disconnects). Pass the returned 'nextSince' as 'since' to read only new events",
+    `Get recent game events (chat, death, damage taken, item pickups, players joining/leaving, kicks, disconnects). Pass the returned 'nextSince' as 'since' to read only new events. ${UNTRUSTED_PLAYER_TEXT}`,
     {
       since: z.coerce.number().int().min(0).optional().describe("Only return events with an id greater than this (default: 0, returns the latest events)"),
       types: z.array(z.string()).optional().describe("Only return these event types, e.g. ['death', 'damaged']"),
@@ -45,7 +45,7 @@ export function registerEventTools(factory: ToolFactory, eventStore: EventStore,
 
   factory.registerTool(
     "wait-for-event",
-    `Wait until something happens instead of polling: a new game event (optionally only certain types), a hostile mob coming close, or health dropping low. Returns as soon as one condition is met, or after the timeout (max ${MAX_WAIT_MS / 1000}s)`,
+    `Wait until something happens instead of polling: a new game event (optionally only certain types), a hostile mob coming close, or health dropping low. Returns as soon as one condition is met, or after the timeout (max ${MAX_WAIT_MS / 1000}s). ${UNTRUSTED_PLAYER_TEXT}`,
     {
       types: z.array(z.string()).optional().describe("Event types to wait for, e.g. ['chat', 'damaged', 'sound', 'death'] (default: any event)"),
       hostileWithin: z.coerce.number().finite().positive().optional().describe("Also return when a hostile mob is within this many blocks"),

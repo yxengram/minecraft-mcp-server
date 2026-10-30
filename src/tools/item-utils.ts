@@ -2,6 +2,7 @@ import type mineflayer from 'mineflayer';
 import minecraftData from 'minecraft-data';
 import { componentToText } from '../text-component.js';
 import { serverRegistryName } from '../server-registries.js';
+import { quoteUntrusted } from '../format.js';
 
 export function resolveItemsByName<T extends { name: string }>(
   items: T[],
@@ -50,7 +51,7 @@ function componentEnchantments(bot: mineflayer.Bot, components: ItemComponent[])
       .map(({ id, level }) => `${enchantmentName(bot, id)} ${ROMAN_LEVELS[level - 1] ?? level}`));
 }
 
-/** Details shown on an item's tooltip: custom name, durability and enchantments. */
+/** Details shown on an item's tooltip: custom name (raw; callers quote it, E-035), durability and enchantments. */
 export function itemDetails(bot: mineflayer.Bot, item: DetailedItem): { customName?: string; details: string[] } {
   const details: string[] = [];
   let customName: string | undefined;
@@ -78,7 +79,7 @@ export function itemDetails(bot: mineflayer.Bot, item: DetailedItem): { customNa
 export function describeItem(bot: mineflayer.Bot, item: DetailedItem, { withCount = true } = {}): string {
   const { customName, details } = itemDetails(bot, item);
   let text = withCount ? `${item.name} x${item.count}` : item.name;
-  if (customName) text += ` "${customName}"`;
+  if (customName) text += ` ${quoteUntrusted(customName)}`;
   if (details.length > 0) text += ` (${details.join(', ')})`;
   return text;
 }

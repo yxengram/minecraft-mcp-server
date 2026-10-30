@@ -1,5 +1,6 @@
 import type mineflayer from 'mineflayer';
 import { serverRegistryName } from '../server-registries.js';
+import { quoteUntrusted } from '../format.js';
 
 type Block = NonNullable<ReturnType<mineflayer.Bot['blockAt']>>;
 
@@ -21,8 +22,9 @@ function signText(block: Block): string[] {
   const [front = '', back = ''] = block.getSignText();
   const clean = (text: string) => text.split('\n').map(line => line.trim()).filter(Boolean).join(' / ');
   const lines: string[] = [];
-  if (clean(front)) lines.push(`Sign text (front): "${clean(front)}"`);
-  if (clean(back)) lines.push(`Sign text (back): "${clean(back)}"`);
+  // Players write sign text, so it is quoted and escaped like chat (E-035).
+  if (clean(front)) lines.push(`Sign text (front): ${quoteUntrusted(clean(front))}`);
+  if (clean(back)) lines.push(`Sign text (back): ${quoteUntrusted(clean(back))}`);
   if (lines.length === 0) lines.push('Sign text: blank');
   return lines;
 }

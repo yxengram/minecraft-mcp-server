@@ -190,7 +190,9 @@ test('damaged events ignore damage to other entities and stale damage info', (t)
 test('system messages, action bar text and titles are forwarded with their kind', (t) => {
   const { bot, client, onSystemMessage } = connectionWithFakeBot();
 
-  bot.emit('message', { toString: () => 'Steve: hi' }, 'chat');
+  // E-035: chat with a sender is the playerChat handler's; chat without one (console /say) is a system line.
+  bot.emit('message', { toString: () => '<Steve> hi' }, 'chat', '0b1c2d3e-0000-4000-8000-000000000001');
+  bot.emit('message', { toString: () => '[Server] restart soon' }, 'chat');
   bot.emit('message', { toString: () => 'Teleported Bot to 1, 2, 3' }, 'system');
   bot.emit('message', { toString: () => 'legacy action bar' }, 'game_info');
   bot.emit('message', { toString: () => '   ' }, 'system');
@@ -199,6 +201,7 @@ test('system messages, action bar text and titles are forwarded with their kind'
   client.emit('action_bar', { text: { type: 'compound', value: { text: { type: 'string', value: 'You may not rest now' } } } });
 
   t.deepEqual(onSystemMessage.getCalls().map(call => call.args), [
+    ['system', '[Server] restart soon'],
     ['system', 'Teleported Bot to 1, 2, 3'],
     ['action_bar', 'legacy action bar'],
     ['title', 'Welcome'],
