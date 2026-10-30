@@ -9,7 +9,7 @@ import pathfinderPkg from 'mineflayer-pathfinder';
 const { goals } = pathfinderPkg;
 import type { BehaviorContext, BehaviorServices } from '../task-manager.js';
 import { delay } from '../task-manager.js';
-import type { Waypoint } from '../../waypoint-store.js';
+import { legacyWaypointError, type Waypoint } from '../../waypoint-store.js';
 import { stopPathfinder } from '../../tools/movement-utils.js';
 
 type Goal = InstanceType<typeof goals.Goal>;
@@ -122,17 +122,25 @@ export interface ResolvedWaypoint {
   position: Vec3;
 }
 
-/** A saved waypoint in the bot's current dimension, or the reason it cannot be used. */
+/**
+ * A saved waypoint of this world in the bot's current dimension, or the reason it cannot be used. One found only among
+ * the host's waypoints from before they were kept per world may be another world's, so it is refused with the
+ * migration error (E-041): return-home, guard's waypoint and the go_home chat command never walk to it.
+ */
 export function resolveWaypoint(bot: mineflayer.Bot, services: BehaviorServices, name: string): { error: string } | { value: ResolvedWaypoint } {
   const store = services.waypoints;
   if (!store) return { error: 'Waypoints are not available' };
   const key = store.normalizeName(name);
   let waypoint: Waypoint | undefined;
+  let legacy: Waypoint | undefined;
   try {
     waypoint = store.get(name);
+    // A store stand-in without legacy waypoints may leave legacyGet out.
+    if (!waypoint) legacy = store.legacyGet?.(name);
   } catch (error) {
     return { error: error instanceof Error ? error.message : String(error) };
   }
+  if (legacy) return { error: legacyWaypointError(key, legacy) };
   if (!waypoint) return { error: `No waypoint named '${key}'` };
 
   const dimension = bot.game?.dimension;

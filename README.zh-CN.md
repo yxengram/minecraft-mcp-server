@@ -44,7 +44,7 @@
 - **聊天分拣：**决策模型对聊天分类，只有发给机器人的消息才会以 `chat_request` 事件唤醒 LLM。除非 LLM 允许，任何人都不能通过聊天指挥机器人。
 
 ### 3. 在游戏里实测，而不只是纸面
-- 1460 个单元测试。
+- 1480 个单元测试。
 - 实机测试：在真实服务器上逐一运行全部 67 个工具。
 - 情景测试：比较有无 Autopilot 时机器人的表现，包括僵尸潮、空手被僵尸追赶、苦力怕、饥饿、着火、溺水、有意潜水、岩浆岸边和聊天。
 - 普通难度下的 10 天生存测试：机器人度过了全部十个夜晚，没有死亡，并建起一座 7×7 的房子，带门、八扇玻璃窗、床、箱子、工作台、熔炉和火把。
@@ -164,7 +164,7 @@ npm run build
 | `--host` | `localhost` | Minecraft 服务器地址 |
 | `--port` | `25565` | Minecraft 服务器端口（即局域网端口） |
 | `--username` | `LLMBot` | 机器人的名字 |
-| `--waypoint-file` | `~/.minecraft-mcp-server/waypoints.json` | 路点的保存位置（按服务器地址分开） |
+| `--waypoint-file` | `~/.minecraft-mcp-server/waypoints.json` | 路点的保存位置，按世界分开（服务器地址加世界种子）；见[路点](#路点) |
 | `--decision-model` | `perplexity/pplx-decider-v1.2-20261016` | OpenRouter 上的决策模型 |
 | `--allow-commands` | 关闭 | 允许 `send-chat` 执行服务器命令（`/give`、`/fill`、`/tp` 等）；聊天和 `/msg`、`/tell`、`/w`、`/me`、`/teammsg`、`/tm` 始终可用 |
 | `--greeting` | 不设：机器人进入世界时什么都不说 | 机器人每次进入世界时在聊天里说的一句话（复活时不说）：一行普通聊天，最多 256 个字符，不以 `/` 开头 |
@@ -282,6 +282,12 @@ API key 只从环境变量 `OPENROUTER_API_KEY` 读取，不要把它写进仓�
 - `list-waypoints`：列出路点及距离
 - `delete-waypoint`：删除一个路点
 - `goto-waypoint`：走到某个路点（路点在下界传送门里时走进门里）；报告与被围住时的规则同 move-to-position
+
+路点按世界分开保存：按服务器地址，加上机器人进入时服务器发来的世界种子散列（单向散列，所以路点文件里没有种子本身）。端口不算在内，因为局域网世界每次打开都可能换端口。所以同一台电脑上的两个局域网世界虽然都是 `localhost`，一个世界的 `home` 也不是另一个世界的 `home`。
+
+在此之前保存的路点只按服务器地址分开，可能属于这个地址上的任何一个世界。它们不会被搬动或修改。`list-waypoints` 在本世界的路点之后单独列出它们（本世界有同名路点的不列）：`Saved before waypoints were kept per world (they may belong to another world on this host): …; to keep one here, call set-waypoint with its name and coordinates`。`goto-waypoint`、`return-home`、带 `waypoint` 的 `guard` 和聊天命令 `go_home` 用到这样的路点时返回 `Waypoint 'home' was saved before waypoints were kept per world and may belong to another world: (x, y, z) in overworld. If it is in this world, save it again with set-waypoint, then retry`，不移动。`set-waypoint` 只保存到本世界。`delete-waypoint` 在本世界没有这个名字时删除同名的旧路点，并在回复里注明是旧路点。
+
+两点限制：用同一个种子生成的世界（例如同一个世界的副本）共用路点；服务器不发种子散列时，路点照旧按服务器地址保存，而每次进入都发不同值的服务器会让路点像换了世界一样看不见。
 
 ### 背包与合成
 - `list-inventory`：物品，含名称、耐久和附魔
@@ -414,7 +420,7 @@ API key 只从环境变量 `OPENROUTER_API_KEY` 读取，不要把它写进仓�
 ## 测试
 
 ```bash
-npm test             # 1460 个单元测试
+npm test             # 1480 个单元测试
 npm run lint
 npm run test:live -- <局域网端口>                                 # 对世界做只读检查
 npm run test:live:world -- <局域网端口> --allow-world-changes      # 在开启作弊的一次性世界中运行每个工具

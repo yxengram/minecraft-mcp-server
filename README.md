@@ -44,7 +44,7 @@ The upstream project is a good, simple bridge: the LLM calls a tool, and the bot
 - **Chat triage:** the decision model sorts chat. Only messages meant for the bot wake the LLM, as `chat_request` events. Nobody can command the bot by chat unless the LLM allows it.
 
 ### 3. Tested in the game, not only on paper
-- 1460 unit tests.
+- 1480 unit tests.
 - A live test that exercises all 67 tools against a real server.
 - A scenario test that compares the bot with and without the Autopilot: zombie waves, being chased by zombies with bare hands, creepers, hunger, fire, drowning, diving on purpose, a lava shore, chat.
 - A 10-day survival test on Normal difficulty. The bot survived all ten nights without dying and built a 7×7 house with a door, eight glass windows, a bed, a chest, a crafting table, a furnace and torches.
@@ -164,7 +164,7 @@ Restart the client completely. The bot joins the world once the client starts th
 | `--host` | `localhost` | Minecraft server host |
 | `--port` | `25565` | Minecraft server port (the LAN port) |
 | `--username` | `LLMBot` | The bot's name |
-| `--waypoint-file` | `~/.minecraft-mcp-server/waypoints.json` | Where waypoints are stored (per server host) |
+| `--waypoint-file` | `~/.minecraft-mcp-server/waypoints.json` | Where waypoints are stored, per world (host and world seed); see [Waypoints](#waypoints) |
 | `--decision-model` | `perplexity/pplx-decider-v1.2-20261016` | The OpenRouter decision model |
 | `--allow-commands` | off | Let `send-chat` run server commands (`/give`, `/fill`, `/tp` and so on); chat and `/msg`, `/tell`, `/w`, `/me`, `/teammsg`, `/tm` always work |
 | `--greeting` | not set: the bot says nothing when it joins | A line the bot says in chat each time it joins the world (not when it respawns): one line of plain chat, at most 256 characters, not starting with `/` |
@@ -282,6 +282,12 @@ An MCP client that asks for progress (a request with a `progressToken`; the Type
 - `list-waypoints`: list waypoints with distances
 - `delete-waypoint`: delete one
 - `goto-waypoint`: walk to one (into the portal when the waypoint is in a Nether portal); reports and refuses like move-to-position
+
+Waypoints are kept per world: per server host and a hash of the world seed that the server sends when the bot joins (a one-way hash, so the waypoint file does not hold the seed). The port does not count, because a LAN world may get another port each time it is opened. So `home` in one LAN world is not `home` in another world on the same computer, although both are `localhost`.
+
+Waypoints saved before this change were kept per host only, so they may belong to any world on that host. They are never moved or changed. `list-waypoints` lists them apart, after this world's (leaving out those this world has a waypoint of the same name for): `Saved before waypoints were kept per world (they may belong to another world on this host): …; to keep one here, call set-waypoint with its name and coordinates`. `goto-waypoint`, `return-home`, `guard` with `waypoint` and the chat command `go_home` refuse one with `Waypoint 'home' was saved before waypoints were kept per world and may belong to another world: (x, y, z) in overworld. If it is in this world, save it again with set-waypoint, then retry`, and do not move. `set-waypoint` saves only to this world. `delete-waypoint` deletes an old waypoint when this world has none of that name, and says it was one.
+
+Two limits: worlds made from the same seed (for example copies of one world) share waypoints; and a server that does not send the seed hash keeps waypoints per host, as before, while one that sends a different value on each join hides them as if each join were another world.
 
 ### Inventory and crafting
 - `list-inventory`: items, with names, durability and enchantments
@@ -414,7 +420,7 @@ The policy lives in memory only, and goes back to these defaults whenever the bo
 ## Testing
 
 ```bash
-npm test             # 1460 unit tests
+npm test             # 1480 unit tests
 npm run lint
 npm run test:live -- <LAN_PORT>                                 # read-only check against a world
 npm run test:live:world -- <LAN_PORT> --allow-world-changes      # every tool, in a throwaway world with cheats on

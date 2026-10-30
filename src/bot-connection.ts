@@ -68,6 +68,19 @@ function endsAttempt(failure: { code?: string; message: string }): boolean {
   return (failure.code !== undefined && ATTEMPT_ENDING_CODES.has(failure.code)) || VERSION_FAILURE.test(failure.message);
 }
 
+/**
+ * The world fingerprint in a login packet (E-041): worldState.hashedSeed, the i64 of 26.1's SpawnInfo, as 16 hex digits
+ * of its unsigned value. protodef hands the i64 over as a SignedBigInt, an array whose valueOf() is a bigint. Null when
+ * it is missing or 0. The seed's hash is one-way, so storing it does not store the seed.
+ */
+function worldFingerprintOf(packet: unknown): string | null {
+  const hashedSeed = (packet as { worldState?: { hashedSeed?: unknown } } | null | undefined)?.worldState?.hashedSeed;
+  const value = typeof hashedSeed === 'object' && hashedSeed !== null ? hashedSeed.valueOf() : hashedSeed;
+  if (typeof value !== 'bigint') return null;
+  const unsigned = BigInt.asUintN(64, value);
+  return unsigned === 0n ? null : unsigned.toString(16).padStart(16, '0');
+}
+
 // Kicks whose text does not say what to do get the explanation after it in the kicked event (E-028). "Kicked by an
 // operator" and "The server is full!" say enough by themselves.
 const EXPLAINED_KICKS: ReadonlySet<FailureKind> = new Set<FailureKind>(['online_mode', 'same_name', 'version', 'not_whitelisted', 'banned', 'ip_banned']);
@@ -226,6 +239,8 @@ export class BotConnection {
   private serverVersion: ServerVersion | null = null;
   // The version warning of the latest join, until a tool reply takes it (E-030).
   private joinNote: { bot: mineflayer.Bot; text: string } | null = null;
+  // The current attempt's world fingerprint, from its login packet (E-041).
+  private worldFingerprint: string | null = null;
   private readonly reconnectDelayMs: number;
   private readonly createBot: CreateBot;
 
@@ -258,6 +273,15 @@ export class BotConnection {
   /** The server's version from the current attempt's ping response, or null before it arrives (E-030). */
   getServerVersion(): Readonly<ServerVersion> | null {
     return this.serverVersion;
+  }
+
+  /**
+   * The world the current attempt joined (E-041): the login packet's hashedSeed as 16 hex digits. Null before the login
+   * packet arrives, and when it has none or 0. The port is not part of it: a LAN world may get another port each time it
+   * is opened. The waypoint store keeps waypoints per host and this fingerprint.
+   */
+  getWorldFingerprint(): string | null {
+    return this.worldFingerprint;
   }
 
   /**
@@ -313,9 +337,10 @@ export class BotConnection {
     };
 
     this.clearConnectTimer();
-    // A new attempt may reach a server that has changed since the last join (E-030).
+    // A new attempt may reach a server that has changed since the last join (E-030), or another world (E-041).
     this.serverVersion = null;
     this.joinNote = null;
+    this.worldFingerprint = null;
     let bot: mineflayer.Bot;
     try {
       bot = this.createBot(botOptions);
@@ -334,6 +359,7 @@ export class BotConnection {
     this.isReconnecting = false;
 
     this.watchServerVersion(bot);
+    this.watchWorldFingerprint(bot);
     this.registerEventHandlers(bot);
     this.connectTimer = setTimeout(() => {
       this.failAttempt(bot, { code: 'SPAWN_TIMEOUT', message: `no spawn within ${CONNECT_TIMEOUT_MS / 1000} s` });
@@ -367,6 +393,25 @@ export class BotConnection {
         this.serverVersion = { name, protocol, version: name?.match(VERSION_NUMBER)?.[0] ?? null };
       } catch (err) {
         this.callbacks.onLog('warn', `Could not read the server version: ${this.formatError(err)}`);
+      }
+    });
+  }
+
+  /**
+   * Reads the world fingerprint from the login packet of each connection (E-041), not from respawns: a respawn into
+   * another dimension is the same world. The login packet comes before the spawn, so onBotReady can hand it to the
+   * waypoint store. A stand-in without _client is skipped.
+   */
+  private watchWorldFingerprint(bot: mineflayer.Bot): void {
+    const client = (bot as unknown as { _client?: { on?: (event: string, listener: (packet: unknown) => void) => void } })._client;
+    if (typeof client?.on !== 'function') return;
+    client.on('login', packet => {
+      // Thrown here, it would reach minecraft-protocol's packet stream.
+      try {
+        if (this.bot !== bot) return;
+        this.worldFingerprint = worldFingerprintOf(packet);
+      } catch (err) {
+        this.callbacks.onLog('warn', `Could not read the world fingerprint: ${this.formatError(err)}`);
       }
     });
   }

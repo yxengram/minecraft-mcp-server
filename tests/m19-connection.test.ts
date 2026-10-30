@@ -5,6 +5,7 @@ import sinon from 'sinon';
 import { EventEmitter } from 'node:events';
 import { Vec3 } from 'vec3';
 import minecraftData from 'minecraft-data';
+import minecraftProtocol from 'minecraft-protocol';
 import type mineflayer from 'mineflayer';
 import { BotConnection, CONNECT_TIMEOUT_MS } from '../src/bot-connection.js';
 import { explainFailure, kickInfo } from '../src/connection-errors.js';
@@ -1234,4 +1235,125 @@ test('E-030 a connection stand-in without takeJoinNote leaves the results as the
   factory.registerTool('break-thing', 'Fails', {}, async () => { throw new Error('boom'); });
   t.deepEqual(await getTool('get-thing')!.execute({}), { content: [text('thing')] });
   t.deepEqual(await getTool('break-thing')!.execute({}), { content: [text('Failed: boom')], isError: true });
+});
+
+// ---------------------------------------------------------------------------------------------------------------
+// E-041: the world fingerprint. Each connection reads worldState.hashedSeed from its login packet (an i64, which
+// protodef hands over as a SignedBigInt whose valueOf() is a bigint) and gives BigInt.asUintN(64, …) as 16 hex
+// digits; null before the login packet, and when the value is missing or 0. Respawns do not change it.
+// ---------------------------------------------------------------------------------------------------------------
+
+const loginSerializer = minecraftProtocol.createSerializer({ state: minecraftProtocol.states.PLAY, isServer: true, version: '26.1.2', customPackets: {} });
+const loginDeserializer = minecraftProtocol.createDeserializer({ state: minecraftProtocol.states.PLAY, isServer: false, version: '26.1.2', customPackets: {} });
+
+/** A 26.1.2 login packet as minecraft-protocol hands it to the client: written to the wire and read back. */
+function loginPacket(hashedSeed: bigint) {
+  const buffer = loginSerializer.createPacketBuffer({
+    name: 'login',
+    params: {
+      entityId: 1, isHardcore: false, worldNames: ['minecraft:overworld'], maxPlayers: 8, viewDistance: 10, simulationDistance: 10,
+      reducedDebugInfo: false, enableRespawnScreen: true, doLimitedCrafting: false,
+      worldState: {
+        dimension: 0, name: 'minecraft:overworld', hashedSeed, gamemode: 'survival', previousGamemode: 255, isDebug: false, isFlat: false,
+        death: undefined, portalCooldown: 0, seaLevel: 63
+      },
+      enforcesSecureChat: false
+    }
+  });
+  const { name, params } = loginDeserializer.parsePacketBuffer(buffer).data;
+  return { name: name as string, params: params as { worldState: { hashedSeed: unknown } } };
+}
+
+const fingerprintCases: { name: string; seed: bigint; fingerprint: string }[] = [
+  { name: 'a positive value', seed: 0x0123456789abcdefn, fingerprint: '0123456789abcdef' },
+  { name: 'a small positive value, padded to 16 digits', seed: 123n, fingerprint: '000000000000007b' },
+  { name: 'a negative value, as its unsigned 64 bits', seed: -0x0123456789abcdefn, fingerprint: 'fedcba9876543211' },
+  { name: '-1', seed: -1n, fingerprint: 'ffffffffffffffff' }
+];
+
+for (const { name, seed, fingerprint } of fingerprintCases) {
+  test.serial(`E-041 the login packet's hashedSeed, ${name}`, (t) => {
+    const s = setup();
+    t.teardown(() => s.clock.restore());
+    const packet = loginPacket(seed);
+    // What the probe on 26.1.2 found: a SignedBigInt, whose valueOf() is the bigint.
+    t.is(packet.name, 'login');
+    t.true(Array.isArray(packet.params.worldState.hashedSeed));
+    t.is(typeof packet.params.worldState.hashedSeed, 'object');
+    t.is((packet.params.worldState.hashedSeed as bigint).valueOf(), seed);
+
+    s.connection.connect();
+    t.is(s.connection.getWorldFingerprint(), null, 'nothing before the login packet');
+    s.bots[0]._client.emit('login', packet.params);
+    t.is(s.connection.getWorldFingerprint(), fingerprint);
+    s.bots[0].emit('spawn');
+    t.is(s.connection.getWorldFingerprint(), fingerprint);
+  });
+}
+
+test.serial('E-041 a hashedSeed of 0, a missing hashedSeed or worldState, and a value that is not an i64 give null', (t) => {
+  const s = setup();
+  t.teardown(() => s.clock.restore());
+  s.connection.connect();
+  const client = s.bots[0]._client;
+
+  client.emit('login', loginPacket(0n).params);
+  t.is(s.connection.getWorldFingerprint(), null, '0');
+  client.emit('login', loginPacket(5n).params);
+  t.is(s.connection.getWorldFingerprint(), '0000000000000005');
+  client.emit('login', { worldState: { dimension: 0, name: 'minecraft:overworld' } });
+  t.is(s.connection.getWorldFingerprint(), null, 'no hashedSeed');
+  client.emit('login', loginPacket(5n).params);
+  client.emit('login', { entityId: 1 });
+  t.is(s.connection.getWorldFingerprint(), null, 'no worldState');
+  t.notThrows(() => client.emit('login', undefined));
+  t.is(s.connection.getWorldFingerprint(), null);
+  client.emit('login', { worldState: { hashedSeed: 'abc' } });
+  t.is(s.connection.getWorldFingerprint(), null);
+});
+
+test.serial('E-041 a respawn into another dimension keeps the fingerprint of the login packet', (t) => {
+  const s = setup();
+  t.teardown(() => s.clock.restore());
+  s.connection.connect();
+  const bot = s.bots[0];
+  bot._client.emit('login', loginPacket(0x0123456789abcdefn).params);
+  bot.emit('spawn');
+  bot._client.emit('respawn', { worldState: { dimension: 1, name: 'minecraft:the_nether', hashedSeed: loginPacket(7n).params.worldState.hashedSeed } });
+  bot.emit('spawn');
+  t.is(s.connection.getWorldFingerprint(), '0123456789abcdef');
+});
+
+test.serial('E-041 each attempt starts without a fingerprint, and a late login packet of an instance let go is ignored', async (t) => {
+  const s = setup();
+  t.teardown(() => s.clock.restore());
+  s.connection.connect();
+  const old = s.bots[0];
+  old._client.emit('login', loginPacket(0x0123456789abcdefn).params);
+  old.emit('spawn');
+  t.is(s.connection.getWorldFingerprint(), '0123456789abcdef');
+  old.emit('end', 'socketClosed');
+
+  const reply = s.connection.checkConnectionAndReconnect();
+  await s.clock.tickAsync(RECONNECT_DELAY_MS);
+  t.is(s.bots.length, 2);
+  t.is(s.connection.getWorldFingerprint(), null, 'the earlier world says nothing about this attempt');
+  old._client.emit('login', loginPacket(7n).params);
+  t.is(s.connection.getWorldFingerprint(), null);
+  s.bots[1]._client.emit('login', loginPacket(-0x0123456789abcdefn).params);
+  s.bots[1].emit('spawn');
+  t.is(s.connection.getWorldFingerprint(), 'fedcba9876543211');
+  await s.clock.tickAsync(100);
+  t.deepEqual(await reply, { connected: true });
+});
+
+test.serial('E-041 onBotReady can read the fingerprint: the login packet comes before the spawn', (t) => {
+  const s = setup();
+  t.teardown(() => s.clock.restore());
+  const seen: (string | null)[] = [];
+  s.callbacks.onBotReady.callsFake(() => seen.push(s.connection.getWorldFingerprint()));
+  s.connection.connect();
+  s.bots[0]._client.emit('login', loginPacket(0x0123456789abcdefn).params);
+  s.bots[0].emit('spawn');
+  t.deepEqual(seen, ['0123456789abcdef']);
 });

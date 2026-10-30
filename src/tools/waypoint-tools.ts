@@ -3,7 +3,7 @@ import mineflayer from 'mineflayer';
 import pathfinderPkg from 'mineflayer-pathfinder';
 const { goals } = pathfinderPkg;
 import { ToolFactory, type ToolContext } from '../tool-factory.js';
-import { WaypointStore } from '../waypoint-store.js';
+import { WaypointStore, describeWaypointPlace, legacyWaypointError } from '../waypoint-store.js';
 import { coerceCoordinates } from './coordinate-utils.js';
 import { Vec3 } from 'vec3';
 import { AbortError, MoveTimeout, gotoWithTimeout, arrivalProblem, portalReport, watchPathEdits } from './movement-utils.js';
@@ -54,9 +54,16 @@ export function registerWaypointTools(factory: ToolFactory, getBot: () => minefl
     {},
     async () => {
       const bot = getBot();
-      const entries = Object.entries(store.list());
+      const waypoints = store.list();
+      const entries = Object.entries(waypoints);
+      // E-041: the host's waypoints from before they were kept per world, after this world's; one this world has a
+      // waypoint of the same name for is left out. Empty without a world fingerprint.
+      const legacy = Object.entries(store.legacyList()).filter(([name]) => !Object.hasOwn(waypoints, name));
+      const legacyNote = legacy.length === 0 ? '' :
+        `Saved before waypoints were kept per world (they may belong to another world on this host): ${legacy.map(([name, wp]) => `${name} ${describeWaypointPlace(wp)}`).join(', ')}; ` +
+        'to keep one here, call set-waypoint with its name and coordinates';
       if (entries.length === 0) {
-        return factory.createResponse("No waypoints saved");
+        return factory.createResponse(legacyNote ? `No waypoints saved\n\n${legacyNote}` : "No waypoints saved");
       }
 
       const currentDimension = bot.game?.dimension;
@@ -72,6 +79,7 @@ export function registerWaypointTools(factory: ToolFactory, getBot: () => minefl
         if (wp.note) line += ` - ${wp.note}`;
         output += `${line}\n`;
       });
+      if (legacyNote) output += `\n${legacyNote}\n`;
 
       return factory.createResponse(output);
     }
@@ -84,10 +92,12 @@ export function registerWaypointTools(factory: ToolFactory, getBot: () => minefl
       name: z.string().trim().min(1).describe("Waypoint name")
     },
     async ({ name }) => {
-      if (!store.delete(name)) {
-        return factory.createErrorResponse(`No waypoint named '${store.normalizeName(name)}'`);
+      if (store.delete(name)) return factory.createResponse(`Deleted waypoint '${store.normalizeName(name)}'`);
+      // E-041: without one in this world, the host's waypoint of that name from before they were kept per world.
+      if (store.legacyDelete(name)) {
+        return factory.createResponse(`Deleted waypoint '${store.normalizeName(name)}', which was saved before waypoints were kept per world`);
       }
-      return factory.createResponse(`Deleted waypoint '${store.normalizeName(name)}'`);
+      return factory.createErrorResponse(`No waypoint named '${store.normalizeName(name)}'`);
     }
   );
 
@@ -104,6 +114,9 @@ export function registerWaypointTools(factory: ToolFactory, getBot: () => minefl
       const bot = getBot();
       const waypoint = store.get(name);
       if (!waypoint) {
+        // E-041: one saved before waypoints were kept per world may be another world's; it is not walked to.
+        const legacy = store.legacyGet(name);
+        if (legacy) return factory.createErrorResponse(legacyWaypointError(store.normalizeName(name), legacy));
         return factory.createErrorResponse(`No waypoint named '${store.normalizeName(name)}'`);
       }
 

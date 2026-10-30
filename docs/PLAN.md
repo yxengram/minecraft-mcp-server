@@ -1640,3 +1640,13 @@
 - **对世界的影响**：实机与情景测试照常；恶魂炸掉的传送门由脚本用命令补上。
 - **文件状态**：F-052 仍为 verified（部分），加上 E-040 的用例；G6 的 I8 已实现并由单元测试逐条断言。
 - **留给以后**：传送门一步在恶魂把下界一侧的传送门炸掉、脚本补上后，bot 可能已被送回主世界，接下来的 goto-waypoint 就会失败；脚本可以在补门之后先看 bot 在哪个维度（本步没有改）。
+
+### 2026-10-30 M19 第 19 步：E-041 路标按主机加世界指纹分开，旧路标单独处理（Q30）
+
+- **实现前的实测**：一次性探测脚本让离线 bot 两次进入测试世界：26.1.2 的 login 包中 worldState 含 dimension、name、hashedSeed、gamemode 等字段；hashedSeed 为 SignedBigInt，valueOf 为 bigint，非零，两次相同。已记入 E-041 行。
+- **实现**（多代理工作流：一个实现；契约、测试、安全三个角度各一个审查；一个修正。审查提出 7 条，修正代理应用了 6 条：补强两个用例、加一个“没有可列的旧路标时回复与以前相同”的用例、实机步骤用 try/finally 收尾、BLUEPRINT 的 F-035 与 F-033；另一条是记录实现选定的文字，由主会话写入 E-041 行）：`src/bot-connection.ts` 每次连接从 login 包读 worldState.hashedSeed，转为 16 位十六进制，getWorldFingerprint() 在没收到、缺失或为 0 时为 null。`src/waypoint-store.ts` 新增 setWorld（有指纹时命名空间为 “<host>|seed:<hex>”）与 legacyList、legacyGet、legacyDelete（只在设了指纹时读写旧键）；文件格式不变。`src/main.ts` 在 autopilot.bind 之前调用 setWorld。list-waypoints 在本世界的路标之后单独列出旧路标；goto-waypoint 与 resolveWaypoint（return-home、guard 的 waypoint、聊天命令 go_home）对只在旧键里的名字返回契约的迁移错误，不寻路；delete-waypoint 本世界没有时删旧路标；set-waypoint 只写本世界。`scripts/lib/live-arena.mjs` 导出 SERVER_HOST 并能预置旧路标；`scripts/test-live-world.mjs` 新增一步：预置的 live-legacy 被单独列出，goto-waypoint 与 return-home 返回迁移错误且没有移动，set-waypoint 后可以去，删除先删本世界的、再删旧的。README 中英文改写 --waypoint-file 的说明并写明旧路标的处理与两点限制，单元测试数改为 1480；CHANGELOG 加一条。
+- **实施时补充的说法**（已写入 E-041 行与 F-035、F-033，guard 与 return-home 的条目也补上了迁移错误）：旧路标一句中每项的写法；只有旧路标时的回复；delete-waypoint 删旧路标时的回复 `Deleted waypoint '<名字>', which was saved before waypoints were kept per world`（契约要求注明是旧路标，没有给文字）；在其他维度的旧路标也是迁移错误；只读 worldState.hashedSeed。
+- **检查**：`npm test`（不带 key）1480 个通过（新增 20 个）；`npm run lint`、`tsc --noEmit`、`git diff --check` 无输出；`node --check` 两个脚本通过。`npm run build` 后 `npm run test:smoke` 13 项全部 PASS。实机 `npm run test:live:world -- 63320 --allow-world-changes` 无 key、有 key 各一轮 41 步全部 ok（含新的旧路标一步；“tasks: return-home (daytime)” 一步用会话中设的 home 到达，覆盖了 setWorld 先于 bind 的接线），覆盖 67/67。
+- **对世界的影响**：实机测试照常，路标只写在临时路标文件里。
+- **文件状态**：F-047 仍为 verified（部分），加上 E-041 的用例。
+- **留给所有者**：契约要求的手工检查还没做：换一个种子不同的 LAN 世界后，list-waypoints 看不到前一个世界的路标（测试世界只有一个，代理做不了）。

@@ -75,7 +75,11 @@ async function main() {
       onChatMessage: chat.onChatMessage,
       onEvent: (type, message) => eventStore.addEvent(type, message),
       onSystemMessage: chat.onSystemMessage,
-      onBotReady: bot => autopilot.bind(bot),
+      // The world first, so that nothing the Autopilot starts at bind reads another world's waypoints (E-041).
+      onBotReady: bot => {
+        waypointStore.setWorld(connection.getWorldFingerprint());
+        autopilot.bind(bot);
+      },
       onBotEnd: () => autopilot.unbind('disconnected'),
       onDamage: info => autopilot.noteDamage(info)
     }

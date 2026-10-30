@@ -28,13 +28,20 @@ const keyMode = !hasDecisionKey ? 'none' : fakeKey ? 'fake' : 'real';
 // E-036: the health each round must show, in the same words on stderr, in the events, get-policy and get-observation.
 const OFFLINE_REASON = { none: 'no OPENROUTER_API_KEY', fake: 'OpenRouter rejected the API key (HTTP 401)' }[keyMode];
 const KEY_CHECK_WAIT_MS = 15000;
+// E-041: a waypoint as servers before E-041 saved it, under the bare --host key of the temporary waypoint file. Its
+// place says nothing about this world, and the server must not walk there until set-waypoint saves it again.
+const LEGACY_WAYPOINT = { name: 'live-legacy', waypoint: { x: 0, y: 64, z: 0, dimension: 'overworld', note: 'seeded by the live test', createdAt: 0 } };
+const LEGACY_LISTED = 'Saved before waypoints were kept per world (they may belong to another world on this host): ';
+const LEGACY_ERROR = "Waypoint 'live-legacy' was saved before waypoints were kept per world and may belong to another world: (0, 64, 0) in overworld. " +
+  'If it is in this world, save it again with set-waypoint, then retry';
 
 const session = createArena({
   port,
   botName: BOT_NAME,
   helperName: HELPER_NAME,
   clientName: 'minecraft-world-test',
-  serverEnv: { OPENROUTER_API_KEY: process.env.OPENROUTER_API_KEY }
+  serverEnv: { OPENROUTER_API_KEY: process.env.OPENROUTER_API_KEY },
+  legacyWaypoints: { [LEGACY_WAYPOINT.name]: LEGACY_WAYPOINT.waypoint }
 });
 const {
   client, covered, results, call, expect, expectIncludes, waitFor, cmd, position, inventoryCount, waitForCount, block,
@@ -304,6 +311,42 @@ try {
     expect(px === cx && pz === cz, `goto-waypoint ended at ${px}, ${pz}`);
     await call('delete-waypoint', { name: 'arena' });
     await call('goto-waypoint', { name: 'arena' }, { expectError: true });
+  });
+
+  await step('waypoints: one saved before they were kept per world is listed apart and refused until saved again (M19 E-041)', async () => {
+    // Listed apart first: if the server had no world fingerprint, the seeded waypoint would be this world's, and the
+    // moves below would head for (0, 64, 0) far under the arena.
+    const list = await call('list-waypoints');
+    expectIncludes(list, `${LEGACY_LISTED}live-legacy (0, 64, 0) in overworld`, 'list-waypoints with a legacy waypoint');
+    expect(!list.includes('- live-legacy:'), `the legacy waypoint is listed as this world's:\n${list}`);
+
+    const before = await position();
+    try {
+      expectIncludes(await call('goto-waypoint', { name: 'live-legacy' }, { expectError: true }), LEGACY_ERROR, 'goto-waypoint to a legacy waypoint');
+      expectIncludes(await call('start-task', { behavior: 'return-home', params: { waypoint: 'live-legacy' } }, { expectError: true }),
+        LEGACY_ERROR, 'return-home to a legacy waypoint');
+    } finally {
+      // A return-home that started after all would walk on toward (0, 64, 0) during the later steps.
+      await call('stop-pathfinding');
+    }
+    await sleep(1000);
+    const after = await position();
+    expect(after.every((value, i) => value === before[i]), `the bot moved from (${before.join(', ')}) to (${after.join(', ')})`);
+
+    expectIncludes(await call('set-waypoint', { name: 'live-legacy', x: cx + 3, y: y0, z: cz }), "Saved waypoint 'live-legacy'", 'set-waypoint live-legacy');
+    const saved = await call('list-waypoints');
+    expectIncludes(saved, '- live-legacy: (', 'list-waypoints after saving it again');
+    expect(!saved.includes(LEGACY_LISTED), `the waypoint saved again is still listed apart:\n${saved}`);
+    await call('goto-waypoint', { name: 'live-legacy', range: 0, timeoutMs: 20000 });
+    const [px, , pz] = await position();
+    expect(px === cx + 3 && pz === cz, `goto-waypoint live-legacy ended at ${px}, ${pz}`);
+
+    // This world's first, then the legacy one, which the reply names as such.
+    expectIncludes(await call('delete-waypoint', { name: 'live-legacy' }), "Deleted waypoint 'live-legacy'", 'delete-waypoint (this world)');
+    expectIncludes(await call('list-waypoints'), `${LEGACY_LISTED}live-legacy (0, 64, 0)`, 'list-waypoints after deleting this world\'s');
+    expectIncludes(await call('delete-waypoint', { name: 'live-legacy' }), 'saved before waypoints were kept per world', 'delete-waypoint (legacy)');
+    expectIncludes(await call('goto-waypoint', { name: 'live-legacy' }, { expectError: true }), "No waypoint named 'live-legacy'", 'goto-waypoint after both are deleted');
+    await call('move-to-position', { x: cx, y: y0, z: cz, range: 0, timeoutMs: 20000 });
   });
 
   await step('follow and flee', async () => {

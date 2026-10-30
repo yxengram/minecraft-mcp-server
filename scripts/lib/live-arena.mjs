@@ -14,6 +14,8 @@ import path from 'node:path';
 // A fixed altitude keeps repeated runs from stacking arenas on top of each other.
 export const ARENA_Y = 240;
 export const ARENA_RADIUS = 10;
+// The --host the server is started with, which is also the key of its waypoints from before E-041.
+export const SERVER_HOST = '127.0.0.1';
 
 export const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
@@ -68,18 +70,22 @@ export function responseText(result) {
  * it logged (E-036); a pipe nobody reads fills up and stalls a long run. The lines are not printed.
  * Every call() is timed (`durations`, `slowestCalls()`), and one that replies after 55 s without an explicit long
  * time limit fails (E-038).
+ * `legacyWaypoints` (name → waypoint) are written to the temporary waypoint file under the bare --host key before the
+ * server starts, as waypoints were kept before E-041; the server sees them as saved before waypoints were kept per world.
  */
-export function createArena({ port, botName, helperName, clientName, serverArgs = [], serverEnv = {} }) {
+export function createArena({ port, botName, helperName, clientName, serverArgs = [], serverEnv = {}, legacyWaypoints }) {
   const waypointDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-live-world-'));
+  const waypointFile = path.join(waypointDir, 'waypoints.json');
+  if (legacyWaypoints) fs.writeFileSync(waypointFile, JSON.stringify({ [SERVER_HOST]: legacyWaypoints }, null, 2));
   const client = new Client({ name: clientName, version: '1.0.0' });
   const transport = new StdioClientTransport({
     command: process.execPath,
     args: [
       fileURLToPath(new URL('../../dist/main.js', import.meta.url)),
-      '--host', '127.0.0.1',
+      '--host', SERVER_HOST,
       '--port', String(port),
       '--username', botName,
-      '--waypoint-file', path.join(waypointDir, 'waypoints.json'),
+      '--waypoint-file', waypointFile,
       '--allow-commands',
       ...serverArgs
     ],
