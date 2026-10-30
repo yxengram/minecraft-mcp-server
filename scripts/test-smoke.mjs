@@ -214,6 +214,7 @@ async function checkMcp(entry, args, pkg) {
       'serverInfo matches package.json',
       `got ${serverInfo?.name} ${serverInfo?.version}, package.json has ${expectedName} ${pkg.version}`
     );
+    await checkInstructions(entry, client);
 
     try {
       const { tools } = await client.listTools(undefined, { timeout: 10000 });
@@ -248,6 +249,27 @@ async function checkMcp(entry, args, pkg) {
     );
     await client.close();
   }
+}
+
+// F-056 (E-045): the instructions in the initialize result must be the SERVER_INSTRUCTIONS of server-instructions.js
+// beside the entry, which main.ts passes to McpServer; this covers that wiring, which the unit tests only read.
+async function checkInstructions(entry, client) {
+  const file = path.join(path.dirname(entry), 'server-instructions.js');
+  let expected;
+  try {
+    // A file URL: import() takes no bare absolute path on Windows.
+    ({ SERVER_INSTRUCTIONS: expected } = await import(pathToFileURL(file).href));
+    if (typeof expected !== 'string' || expected === '') throw new Error('SERVER_INSTRUCTIONS is not a text');
+  } catch (error) {
+    report(false, 'server-instructions.js beside the entry', `${file}: ${error.message}`);
+    return;
+  }
+  const got = client.getInstructions();
+  report(
+    got === expected,
+    'initialize gives the SERVER_INSTRUCTIONS of server-instructions.js',
+    got === expected ? `${expected.length} characters` : got === undefined ? 'the server gave no instructions' : `got ${got.length} characters that differ`
+  );
 }
 
 // F-055 (E-044): tool-annotations.js beside the entry is the source of the tool list, so a packed or installed server

@@ -7,6 +7,7 @@ import { setupStdioFiltering } from './stdio-filter.js';
 import { log } from './logger.js';
 import { ConfigError, parseConfig, usernameWarning, type ServerConfig } from './config.js';
 import { COMMAND_NAME, PACKAGE_VERSION } from './package-info.js';
+import { SERVER_INSTRUCTIONS } from './server-instructions.js';
 import { BotConnection, SUPPORTED_MINECRAFT_VERSION } from './bot-connection.js';
 import { runSelfCheck } from './self-check.js';
 import { ToolFactory } from './tool-factory.js';
@@ -107,10 +108,11 @@ async function main() {
   connection.connect();
 
   // Name and version come from package.json (F-049, E-024); the name is the command name, without the package's scope.
+  // The instructions (F-056, E-045) reach the client in the initialize result.
   const server = new McpServer({
     name: COMMAND_NAME,
     version: PACKAGE_VERSION
-  });
+  }, { instructions: SERVER_INSTRUCTIONS });
 
   // --call-limit-seconds sets each call's budget, for clients that wait longer than 60 s for a reply (E-038).
   const factory = new ToolFactory(server, connection, { callLimitMs: config.callLimitSeconds * 1000 });

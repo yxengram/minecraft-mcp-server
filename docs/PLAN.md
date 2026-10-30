@@ -1677,3 +1677,12 @@
 - **对世界的影响**：实机测试照常。
 - **文件状态**：F-055 由 placeholder 改为 verified；F-050 加上 E-044 的断言；F-052 加上 E-044 的用例。
 - **留给所有者**：契约的人工检查还没做：在 Claude Desktop 或 Claude Code 中看到工具标题，记录客户端与版本；65 个由实现拟定的 title 也请顺便看一遍。
+
+### 2026-10-30 M19 第 23 步：E-045 MCP 服务器说明 instructions（F-056 补全；Q32）
+
+- **实现**（多代理工作流：一个实现；契约、测试、安全三个角度各一个审查；一个修正。审查提出 11 条：修正代理应用了 8 条，另 3 条是 BLUEPRINT 的说法，由主会话写入）：`src/server-instructions.ts` 按 F-056 的（a）～（h）补全，E-035 的（f）一段逐字不变，全文 2000 个字符（上限）。`src/main.ts` 只改为 `new McpServer({ name, version }, { instructions: SERVER_INSTRUCTIONS })`。`scripts/test-smoke.mjs` 在 initialize 之后核对 client.getInstructions() 等于入口旁边 server-instructions.js 导出的常量；`scripts/test-live-world.mjs` 连接后做同样的核对。README 中英文第 4 步说明服务器把这些习惯作为 instructions 交给客户端、有的客户端不显示，并补齐要点；单元测试数改为 1523；CHANGELOG 加一条。
+- **实施时补充的说法**（已写入 E-045 行）：每一句按当时的代码写；时限写成 “within the call limit (50 s by default)”，因为说明是常量而 --call-limit-seconds 可以改；审查发现 stop-all 一句起初写 “pauses non-urgent instinct actions”，而代码按线索种类过滤，改为 “pauses the instinct except for lava, drowning, low air and swelling creepers”；Busy 与 isError 的写法。
+- **检查**：`npm test`（不带 key）1523 个通过（新增 7 个）；`npm run lint`、`tsc --noEmit`、`git diff --check` 无输出；`node --check` 两个脚本通过。实现代理做了反向检查：去掉 main.ts 的第二个参数、给 instinct.intent 加反引号、去掉 “by default” 时，对应的用例都失败。`npm run build` 后 `npm run test:smoke` 17 项全部 PASS（含 “initialize gives the SERVER_INSTRUCTIONS of server-instructions.js (2000 characters)”）。实机 `npm run test:live:world -- 63320 --allow-world-changes` 无 key、有 key 各一轮 43 步全部 ok（新增的 initialize 一步通过），覆盖 67/67。
+- **对世界的影响**：实机测试照常。
+- **文件状态**：F-056 由 implemented-unverified（部分）改为 verified；F-051 加上说明的核对；F-052 加上 E-045 的用例。
+- **留给所有者**：契约的人工检查还没做：在 Claude Desktop 或 Claude Code 开一局，确认客户端读到了说明（例如开局先调用 get-observation），记录客户端与版本。

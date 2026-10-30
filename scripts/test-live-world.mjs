@@ -16,6 +16,8 @@ import { Vec3 } from 'vec3';
 import { createArena, parseLiveArgs, responseText, SetupFailed, sleep } from './lib/live-arena.mjs';
 // F-055 (E-044): the tool list of the build under test, the only source of the tools and their number.
 import { TOOL_NAMES } from '../dist/tool-annotations.js';
+// F-056 (E-045): the instructions the build under test gives the client in initialize.
+import { SERVER_INSTRUCTIONS } from '../dist/server-instructions.js';
 
 const { port } = parseLiveArgs('This test');
 const BOT_NAME = 'MCPWorldTest';
@@ -95,6 +97,11 @@ try {
       .filter(tool => !(typeof tool.title === 'string' && tool.title.trim()) || typeof tool.annotations !== 'object' || tool.annotations === null)
       .map(tool => tool.name);
     expect(bare.length === 0, `without a title or annotations: ${bare.join(', ')}`);
+  });
+  await step('initialize: the instructions are the SERVER_INSTRUCTIONS of dist/server-instructions.js (M19 E-045)', async () => {
+    const instructions = client.getInstructions();
+    expect(instructions === SERVER_INSTRUCTIONS,
+      instructions === undefined ? 'the server gave no instructions' : `the instructions differ (${instructions.length} characters, expected ${SERVER_INSTRUCTIONS.length})`);
   });
   await session.setup();
   ({ cx, y0, cz, helper } = session.arena);
