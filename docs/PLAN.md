@@ -1622,3 +1622,12 @@
 - **对世界的影响**：实机、探测与情景测试照常（探测搭了场地并在结束时拆除）。
 - **文件状态**：F-052 仍为 verified（部分），加上 E-038 的用例；F-033 补上 E-038 的说明。
 - **留给以后**：lead-animal 在 Still 回复之后的寻路改动不报告（见上）；gotoWithTimeout 与 smelt-item 的等待在极大的 timeoutMs 下仍可能让 setTimeout 溢出（E-038 之前就如此，本步没有改）。
+
+### 2026-10-30 M19 第 17 步：E-039 请求带 progressToken 时发送进度通知
+
+- **实现**（多代理工作流：一个实现；契约、测试、安全三个角度各一个审查；一个修正。审查提出 5 条：修正代理应用了 3 条（测试标题的编号、补一个由预算中止的调用回复后不再发送的用例、去掉依赖未写明规则的断言），另 2 条是 BLUEPRINT 的说法，由主会话写入）：`src/tool-factory.ts` 导出 PROGRESS_INTERVAL_MS（5000，构造选项 progressIntervalMs 可改小）；请求带 extra._meta.progressToken 时每 5 秒经 extra.sendNotification 发 `notifications/progress` { progressToken, progress, message }，progress 从 1 起递增，不给 total；调用结束或中止时清除定时器；发送失败只写 warn 日志；没有 progressToken 时不设定时器。ctx.setProgress 接受文字或函数（每次发送前求值，抛错或为空时用默认的 “<name>: running for N s”）。各工具的文字：collect-block、lead-animal 用任务记录的 progress（没有时用 step），move-to-position、goto-waypoint 用 “N blocks to go”，区域工具用 “dug / placed N of M”，smelt-item 用 “smelted N of M”。`scripts/lib/live-arena.mjs` 的 call() 增加 onprogress；`scripts/test-live-world.mjs` 的 collect-block 一步带 onprogress，要求至少一条、progress 递增且有文字。README 中英文在 “Time limits” 末尾说明进度只是信息，不延长客户端的请求超时；CHANGELOG 加一条。主会话按写入契约的“空文字用默认文字”补了一个用例，README 的单元测试数改为 1440。
+- **SDK 1.27.1 的核对**（实现代理读了 node_modules 中的源码）：onprogress 让客户端在请求中加 _meta.progressToken；服务器的 extra 带 _meta 与 sendNotification，请求被取消后 sendNotification 不再发送；进度通知不需要声明能力；resetTimeoutOnProgress 默认为 false。
+- **实施时补充的说法**（已写入 BLUEPRINT 的 E-039 行与 F-033）：契约例子改为小写的 “mined 3 of 10 oak_log”（任务记录本来就是小写）；空文字用默认文字；中止时也清除定时器；失败的发送也计数；“blocks to go” 取整；“dug N” 数实际挖掉的方块；smelt-item 开始等产物时才用 “smelted”。
+- **检查**：`npm test`（不带 key）1440 个通过（新增 14 个）；`npm run lint`、`tsc --noEmit`、`git diff --check` 无输出；`node --check` 两个脚本通过。`npm run build` 后 `npm run test:smoke` 13 项全部 PASS。实机 `npm run test:live:world -- 63320 --allow-world-changes` 无 key、有 key 各一轮 39 步全部 ok（collect-block 一步收到了进度通知），覆盖 66/66；最慢的调用是 lead-animal 14.5 秒与 14.7 秒。本步不改本能，没有跑情景测试。
+- **对世界的影响**：实机测试照常。
+- **文件状态**：F-052 仍为 verified（部分），加上 E-039 的用例；F-033 补上 E-039 的说明。

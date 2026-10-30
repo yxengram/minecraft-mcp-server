@@ -5,6 +5,7 @@ import type { Autopilot } from './autopilot/autopilot.js';
 import { PRIORITY, type HolderInfo, type Lease } from './autopilot/action-arbiter.js';
 import type { EventStore } from './event-store.js';
 import { AbortError, stopPathfinder, throwIfAborted } from './tools/movement-utils.js';
+import { log } from './logger.js';
 import type mineflayer from 'mineflayer';
 
 // After a death or another abort, how long a stopped command may take to give up before its reply is replaced and
@@ -22,6 +23,9 @@ export const CALL_LIMIT_MS = 50000;
 export const REPLY_MARGIN_MS = 5000;
 // The longest delay setTimeout takes; a longer one fires after 1 ms.
 const MAX_TIMER_MS = 2 ** 31 - 1;
+// How often a call whose request carries a progressToken sends notifications/progress (E-039). The default; the
+// factory's options set another (the tests make it shorter).
+export const PROGRESS_INTERVAL_MS = 5000;
 
 type McpContent =
   | { type: "text"; text: string }
@@ -75,7 +79,11 @@ export interface ToolContext {
   extendDeadline(ms: number): void;
   /** Throws the abort reason (an AbortError) once the signal is aborted. */
   throwIfAborted(): void;
-  /** Text for progress notifications; only E-039 sends them, so until then this does nothing. */
+  /**
+   * The message of the call's progress notifications (E-039), sent only when the request asked for them: the text, or
+   * a function called before each one. A function that throws, or text that is empty, gives the default
+   * "<name>: running for N s".
+   */
   setProgress(text: string | (() => string)): void;
 }
 
@@ -109,9 +117,19 @@ export interface InFlightCall {
   abort(reason: AbortReason): void;
 }
 
+/** A notifications/progress for the request that carried `progressToken` (E-039); no total is given. */
+interface ProgressNotification {
+  method: 'notifications/progress';
+  params: { progressToken: string | number; progress: number; message: string };
+}
+
 /** The part of the SDK's RequestHandlerExtra the factory reads. Direct calls (unit tests) pass none. */
 interface CallExtra {
   signal?: AbortSignal;
+  /** The request's _meta; a client that wants progress puts a progressToken there (the SDK's onprogress does). */
+  _meta?: { progressToken?: string | number };
+  /** Sends a notification about this request; the SDK drops it once the request was cancelled. */
+  sendNotification?: (notification: ProgressNotification) => Promise<void>;
 }
 
 class ToolCall implements InFlightCall {
@@ -126,9 +144,15 @@ class ToolCall implements InFlightCall {
   stopBody: () => void = () => {};
   readonly ctx: ToolContext;
   private watchdog: ReturnType<typeof setTimeout> | undefined;
+  private progressTimer: ReturnType<typeof setInterval> | undefined;
+  private progressSent = 0;
+  private progressText: string | (() => string) | null = null;
   private readonly onCancel = () => this.abort('cancelled');
 
-  constructor(readonly name: string, readonly body: boolean, private readonly extra: CallExtra | undefined, limitMs: number) {
+  constructor(
+    readonly name: string, readonly body: boolean, private readonly extra: CallExtra | undefined, limitMs: number,
+    progressIntervalMs: number
+  ) {
     this.deadline = this.started + limitMs;
     const call = this;
     this.ctx = {
@@ -140,7 +164,7 @@ class ToolCall implements InFlightCall {
         call.arm();
       },
       throwIfAborted: () => throwIfAborted(call.controller.signal),
-      setProgress: () => {}
+      setProgress: text => { call.progressText = text; }
     };
     // A direct call without extra has no client to cancel it and no watchdog, as before (E-027). It still has a
     // deadline, so the long tools' default limits (E-038) apply to it as well.
@@ -148,6 +172,12 @@ class ToolCall implements InFlightCall {
     if (cancel?.aborted) this.abort('cancelled');
     else cancel?.addEventListener('abort', this.onCancel, { once: true });
     this.arm();
+    // Progress only for a request that asked for it (E-039); without a progressToken there is no timer at all.
+    const token = extra?._meta?.progressToken;
+    const send = extra?.sendNotification;
+    if ((typeof token === 'string' || typeof token === 'number') && typeof send === 'function' && !this.signal.aborted) {
+      this.progressTimer = setInterval(() => this.sendProgress(token, send), progressIntervalMs);
+    }
   }
 
   get signal(): AbortSignal {
@@ -164,6 +194,8 @@ class ToolCall implements InFlightCall {
     if (this.controller.signal.aborted) return;
     this.abortedAt = Date.now();
     clearTimeout(this.watchdog);
+    // A stopped call is ending: what is left is its reply.
+    clearInterval(this.progressTimer);
     // The body first, so a loop that wakes up on the abort finds the pathfinder already stopped.
     this.stopBody();
     this.controller.abort(new CallAborted(reason));
@@ -171,7 +203,40 @@ class ToolCall implements InFlightCall {
 
   dispose(): void {
     clearTimeout(this.watchdog);
+    clearInterval(this.progressTimer);
     this.extra?.signal?.removeEventListener('abort', this.onCancel);
+  }
+
+  /**
+   * One progress notification (E-039): progress counts up from 1, and the message is the executor's setProgress text,
+   * or the default. A failed send is only logged; the call and its result go on as if nothing was sent.
+   */
+  private sendProgress(progressToken: string | number, send: NonNullable<CallExtra['sendNotification']>): void {
+    this.progressSent++;
+    const notification: ProgressNotification = {
+      method: 'notifications/progress',
+      params: { progressToken, progress: this.progressSent, message: this.progressMessage() }
+    };
+    const failed = (error: unknown) =>
+      log('warn', `Could not send a progress notification for ${this.name}: ${error instanceof Error ? error.message : String(error)}`);
+    try {
+      void Promise.resolve(send(notification)).catch(failed);
+    } catch (error) {
+      // A send that throws instead of rejecting.
+      failed(error);
+    }
+  }
+
+  private progressMessage(): string {
+    const fallback = `${this.name}: running for ${Math.round((Date.now() - this.started) / 1000)} s`;
+    const text = this.progressText;
+    if (text === null) return fallback;
+    try {
+      const value = typeof text === 'function' ? text() : text;
+      return typeof value === 'string' && value !== '' ? value : fallback;
+    } catch {
+      return fallback;
+    }
   }
 
   // The watchdog is only on body tools; the others keep their own limits (wait-for-event at most 55 s). A deadline an
@@ -205,6 +270,8 @@ export interface ToolOptions {
 export interface ToolFactoryOptions {
   /** Each call's time budget (E-038's --call-limit-seconds); CALL_LIMIT_MS when not given. */
   callLimitMs?: number;
+  /** How often progress notifications go out (E-039); PROGRESS_INTERVAL_MS when not given. */
+  progressIntervalMs?: number;
 }
 
 export class ToolFactory {
@@ -215,6 +282,7 @@ export class ToolFactory {
   private readonly endWatchers = new WeakMap<mineflayer.Bot, Set<ToolCall>>();
   /** Each call's time budget, for the tools' descriptions and replies (E-038). */
   readonly callLimitMs: number;
+  private readonly progressIntervalMs: number;
 
   constructor(
     private server: McpServer,
@@ -222,6 +290,7 @@ export class ToolFactory {
     options: ToolFactoryOptions = {}
   ) {
     this.callLimitMs = options.callLimitMs ?? CALL_LIMIT_MS;
+    this.progressIntervalMs = options.progressIntervalMs ?? PROGRESS_INTERVAL_MS;
   }
 
   setAutopilot(provider: () => Autopilot | null): void {
@@ -270,8 +339,9 @@ export class ToolFactory {
       }
     };
     const handler = async (args: unknown, extra?: CallExtra): Promise<McpResponse> => {
-      // The budget starts now: the connection check and the wait for the lease count too (E-027).
-      const call = new ToolCall(name, body, extra, this.callLimitMs);
+      // The budget starts now: the connection check and the wait for the lease count too (E-027). So does the
+      // progress a client asked for (E-039): a call stuck in a reconnect is still running.
+      const call = new ToolCall(name, body, extra, this.callLimitMs, this.progressIntervalMs);
       this.calls.add(call);
       try {
         return this.withJoinNote(call, await respond(call, args));

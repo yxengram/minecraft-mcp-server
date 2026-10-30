@@ -55,6 +55,19 @@ async function awaitTask(tasks: Autopilot['tasks'], id: string, timeoutMs: numbe
   return { final: await tasks.waitForEnd(id) };
 }
 
+/**
+ * The text of the call's progress notifications (E-039): the task's progress, or its step when it has none, as in
+ * "t5 gather: mined 3 of 10 oak_log". Read at each notification; empty (the call's default text) before there is any.
+ */
+function taskProgress(tasks: Autopilot['tasks'], id: string): () => string {
+  return () => {
+    const current = tasks.currentTask();
+    const task = current?.id === id ? current : tasks.list().history.find(record => record.id === id);
+    const detail = task?.progress ?? task?.step;
+    return task && detail ? `${task.id} ${task.behavior}: ${detail}` : '';
+  };
+}
+
 /** The reply for a task still going when the call has to answer (E-038); a success, the task is not stopped. */
 function stillReply(verb: 'collecting' | 'leading', task: TaskRecord, startedAt: number): string {
   const progress = task.progress ?? task.step;
@@ -69,6 +82,7 @@ function stillReply(verb: 'collecting' | 'leading', task: TaskRecord, startedAt:
 // collect-block runs a gather task and waits for it (BLUEPRINT E-004); its arguments and replies stay the same. It does
 // not report the pathfinder's edits as lead-animal does (E-049): the blocks a gather digs are the task itself. Both
 // tools reply within the call's budget (E-038): a task that is still going then keeps running in the background.
+// Their progress notifications, for a client that asks for them, give the task's progress (E-039).
 export function registerGatheringTools(factory: ToolFactory, getAutopilot: () => Autopilot): void {
   const replyS = Math.round((factory.callLimitMs - REPLY_MARGIN_MS) / 1000);
   const inBackground = `waits for it to finish, at most about ${replyS} s: a task still going then keeps running in the background, and the reply says how to wait for it`;
@@ -91,6 +105,7 @@ export function registerGatheringTools(factory: ToolFactory, getAutopilot: () =>
       if (!started.ok) return factory.createErrorResponse(started.error);
       // Tell the LLM what this command replaced, as an interruption report would.
       const replaced = previous ? `\nReplaced ${tasks.describe(previous)}: it was cancelled.` : '';
+      ctx.setProgress(taskProgress(tasks, started.task.id));
 
       const waited = await awaitTask(tasks, started.task.id, timeoutMs, ctx);
       if ('running' in waited) return factory.createResponse(`${stillReply('collecting', waited.running, startedAt)}${replaced}`);
@@ -133,6 +148,7 @@ export function registerGatheringTools(factory: ToolFactory, getAutopilot: () =>
         const started = await tasks.start('lead', params, { source: 'tool' });
         if (!started.ok) return factory.createErrorResponse(started.error);
         const replaced = previous ? `\nReplaced ${tasks.describe(previous)}: it was cancelled.` : '';
+        ctx.setProgress(taskProgress(tasks, started.task.id));
 
         const waited = await awaitTask(tasks, started.task.id, timeoutMs, ctx);
         // The edits so far, on the first line as in every other reply (E-049); the watch stops with the call.

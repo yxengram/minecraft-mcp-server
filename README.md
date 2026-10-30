@@ -44,7 +44,7 @@ The upstream project is a good, simple bridge: the LLM calls a tool, and the bot
 - **Chat triage:** the decision model sorts chat. Only messages meant for the bot wake the LLM, as `chat_request` events. Nobody can command the bot by chat unless the LLM allows it.
 
 ### 3. Tested in the game, not only on paper
-- 1387 unit tests.
+- 1440 unit tests.
 - A live test that exercises all 66 tools against a real server.
 - A scenario test that compares the bot with and without the Autopilot: zombie waves, being chased by zombies with bare hands, creepers, hunger, fire, drowning, diving on purpose, a lava shore, chat.
 - A 10-day survival test on Normal difficulty. The bot survived all ten nights without dying and built a 7×7 house with a door, eight glass windows, a bed, a chest, a crafting table, a furnace and torches.
@@ -263,6 +263,8 @@ Commands that move or use the bot's body, and `collect-block` and `lead-animal`,
 
 A `timeoutMs` given to the moves, the region tools or `smelt-item` is kept and lengthens the call's limit, so the MCP client must then wait that long for the reply. A larger `--call-limit-seconds` lengthens all these defaults with it; use it only with a client whose request timeout is longer still.
 
+An MCP client that asks for progress (a request with a `progressToken`; the TypeScript SDK adds one for `onprogress`) gets a `notifications/progress` every 5 seconds while a call runs. Its message says how far the call got, for example the task's progress for `collect-block` and `lead-animal` (`t5 gather: mined 3 of 10 oak_log`), `12 blocks to go` (`move-to-position`, `goto-waypoint`), `dug 12 of 40`, `placed 12 of 40` or `smelted 2 of 8`, and otherwise `<tool>: running for N s`. Progress is for information only: it does not lengthen the client's request timeout unless the client resets that timeout on progress (`resetTimeoutOnProgress` in the TypeScript SDK, off by default), and the limits above stay as they are. A request without a `progressToken` gets no notifications.
+
 ### Movement
 - `get-position`: the bot's position
 - `move-to-position`: walk to coordinates; reports an error if the pathfinder stops short, the blocks it dug and placed on the way, and the trip when it ends in a Nether portal; refuses to move while the bot is walled in on every side (as after the instinct's dig_in) unless `leaveShelter: true` is passed, because the pathfinder would dig the shelter open
@@ -411,7 +413,7 @@ The policy lives in memory only, and goes back to these defaults whenever the bo
 ## Testing
 
 ```bash
-npm test             # 1387 unit tests
+npm test             # 1440 unit tests
 npm run lint
 npm run test:live -- <LAN_PORT>                                 # read-only check against a world
 npm run test:live:world -- <LAN_PORT> --allow-world-changes      # every tool, in a throwaway world with cheats on

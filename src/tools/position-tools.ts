@@ -74,14 +74,30 @@ export function moveTimeoutDefault(callLimitMs: number): string {
     'a longer timeout needs an MCP client that waits that long';
 }
 
+/** From the bot's block to the target's block, in blocks. */
+function cellDistance(position: Vec3, target: { x: number; y: number; z: number }): number {
+  const at = position.floored();
+  return Math.hypot(at.x - Math.floor(target.x), at.y - Math.floor(target.y), at.z - Math.floor(target.z));
+}
+
 /** Added to "Move timed out after Nms" (E-038): where the walk stopped, how far from the target, and what to do next. */
 export function moveTimeoutNote(bot: mineflayer.Bot, target: { x: number; y: number; z: number }, tool: string): string {
   const position = bot.entity?.position;
   // Test fakes may have no entity.
   if (!position) return ` at an unknown place; call ${tool} again to continue`;
   const at = position.floored();
-  const distance = Math.hypot(at.x - Math.floor(target.x), at.y - Math.floor(target.y), at.z - Math.floor(target.z));
-  return ` at (${at.x}, ${at.y}, ${at.z}), ${distance.toFixed(1)} blocks from the target; call ${tool} again to continue`;
+  return ` at (${at.x}, ${at.y}, ${at.z}), ${cellDistance(position, target).toFixed(1)} blocks from the target; call ${tool} again to continue`;
+}
+
+/**
+ * A move's progress text (E-039), read at each notification: "12 blocks to go", measured as in moveTimeoutNote and
+ * rounded to whole blocks. Empty (the call's default text) without a position.
+ */
+export function blocksToGo(bot: mineflayer.Bot, target: { x: number; y: number; z: number }): () => string {
+  return () => {
+    const position = bot.entity?.position;
+    return position ? `${Math.round(cellDistance(position, target))} blocks to go` : '';
+  };
 }
 
 export function registerPositionTools(factory: ToolFactory, getBot: () => mineflayer.Bot, getAutopilot?: () => Autopilot | null): void {
@@ -122,6 +138,7 @@ export function registerPositionTools(factory: ToolFactory, getBot: () => minefl
       if (sheltered && !leaveShelter) return factory.createErrorResponse(shelterRefusal(bot));
       const left = () => (sheltered && !walledIn(bot) ? leftShelterNote(bot) : '');
       const edits = watchPathEdits(bot);
+      ctx.setProgress(blocksToGo(bot, { x, y, z }));
 
       try {
         // Stops the pathfinder itself when its time limit runs out; on an abort the tool factory has stopped it (E-027).

@@ -44,7 +44,7 @@
 - **聊天分拣：**决策模型对聊天分类，只有发给机器人的消息才会以 `chat_request` 事件唤醒 LLM。除非 LLM 允许，任何人都不能通过聊天指挥机器人。
 
 ### 3. 在游戏里实测，而不只是纸面
-- 1387 个单元测试。
+- 1440 个单元测试。
 - 实机测试：在真实服务器上逐一运行全部 66 个工具。
 - 情景测试：比较有无 Autopilot 时机器人的表现，包括僵尸潮、空手被僵尸追赶、苦力怕、饥饿、着火、溺水、有意潜水、岩浆岸边和聊天。
 - 普通难度下的 10 天生存测试：机器人度过了全部十个夜晚，没有死亡，并建起一座 7×7 的房子，带门、八扇玻璃窗、床、箱子、工作台、熔炉和火把。
@@ -263,6 +263,8 @@ API key 只从环境变量 `OPENROUTER_API_KEY` 读取，不要把它写进仓�
 
 给移动工具、区域工具或 `smelt-item` 的 `timeoutMs` 照常生效，并延长这次调用的时限，这时 MCP 客户端必须等这么久才能收到回复。调大 `--call-limit-seconds`，这些默认值也随之变长；只在客户端的请求超时更长时才这样做。
 
+要求进度的 MCP 客户端（请求带 `progressToken`；TypeScript SDK 用 `onprogress` 时会加上）在调用进行期间每 5 秒收到一条 `notifications/progress`。消息说明做到了哪里，例如 `collect-block`、`lead-animal` 写任务的进度（`t5 gather: mined 3 of 10 oak_log`）、`12 blocks to go`（`move-to-position`、`goto-waypoint`）、`dug 12 of 40`、`placed 12 of 40` 或 `smelted 2 of 8`，其他情况为 `<工具名>: running for N s`。进度只是信息：除非客户端收到进度时重置请求超时（TypeScript SDK 的 `resetTimeoutOnProgress`，默认关闭），它不会延长客户端的请求超时；上面的时限也不变。不带 `progressToken` 的请求收不到进度通知。
+
 ### 移动
 - `get-position`：机器人的位置
 - `move-to-position`：走到指定坐标；寻路器中途停下时报错；报告途中挖掉和放下的方块；停在下界传送门里时报告是否到了另一个维度；机器人四面都被围住时（例如本能 dig_in 之后）拒绝移动，除非传入 `leaveShelter: true`，因为寻路器会挖开掩体
@@ -411,7 +413,7 @@ API key 只从环境变量 `OPENROUTER_API_KEY` 读取，不要把它写进仓�
 ## 测试
 
 ```bash
-npm test             # 1387 个单元测试
+npm test             # 1440 个单元测试
 npm run lint
 npm run test:live -- <局域网端口>                                 # 对世界做只读检查
 npm run test:live:world -- <局域网端口> --allow-world-changes      # 在开启作弊的一次性世界中运行每个工具

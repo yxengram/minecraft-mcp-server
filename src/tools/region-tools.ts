@@ -78,10 +78,15 @@ function sortByDistance(bot: mineflayer.Bot, positions: Vec3[], verticalOrder: '
 
 /**
  * Once `signal` is aborted (E-027) no further cell is walked to or dug: the loop stops, and the cell it was on counts
- * as not processed, so the reply's counts say how far it got.
+ * as not processed, so the reply's counts say how far it got. `setProgress` gets the progress notifications' text,
+ * "dug 12 of 40" (E-039).
  */
-async function clearPositions(bot: mineflayer.Bot, positions: Vec3[], timeoutMs: number, verticalOrder: 'top-down' | 'none', signal?: AbortSignal) {
+async function clearPositions(
+  bot: mineflayer.Bot, positions: Vec3[], timeoutMs: number, verticalOrder: 'top-down' | 'none', signal?: AbortSignal,
+  setProgress?: ToolContext['setProgress']
+) {
   const stats = { dug: 0, empty: 0, unbreakable: 0, nearLava: 0, failed: 0, remaining: 0, lastError: '' };
+  setProgress?.(() => `dug ${stats.dug} of ${positions.length}`);
   const queue = sortByDistance(bot, positions, verticalOrder);
   const deadline = Date.now() + timeoutMs;
   let consecutiveFailures = 0;
@@ -132,7 +137,7 @@ export function registerRegionTools(factory: ToolFactory, getBot: () => mineflay
     regionShape(factory.callLimitMs),
     async ({ timeoutMs, ...corners }, ctx: ToolContext) => {
       const positions = regionPositions(corners as Corners);
-      const stats = await clearPositions(getBot(), positions, regionLimitMs(ctx, timeoutMs), 'top-down', ctx.signal);
+      const stats = await clearPositions(getBot(), positions, regionLimitMs(ctx, timeoutMs), 'top-down', ctx.signal, ctx.setProgress);
       return factory.createResponse(describeClearStats(stats, `Cleared region of ${positions.length} blocks`));
     }
   );
@@ -149,6 +154,7 @@ export function registerRegionTools(factory: ToolFactory, getBot: () => mineflay
       const positions = sortByDistance(bot, regionPositions(corners as Corners), 'bottom-up');
       const wanted = blockName.toLowerCase();
       const stats = { placed: 0, occupied: 0, onBot: 0, failed: 0, remaining: 0, outOfItems: false };
+      ctx.setProgress(() => `placed ${stats.placed} of ${positions.length}`);
       const deadline = Date.now() + regionLimitMs(ctx, timeoutMs);
 
       for (let i = 0; i < positions.length; i++) {
@@ -238,7 +244,7 @@ export function registerRegionTools(factory: ToolFactory, getBot: () => mineflay
         }
       }
 
-      const stats = await clearPositions(bot, positions, regionLimitMs(ctx, timeoutMs), 'none', ctx.signal);
+      const stats = await clearPositions(bot, positions, regionLimitMs(ctx, timeoutMs), 'none', ctx.signal, ctx.setProgress);
       return factory.createResponse(describeClearStats(stats, `Dug ${direction} tunnel ${length}x${width}x${height}`));
     }
   );

@@ -155,6 +155,7 @@ export function registerFurnaceTools(factory: ToolFactory, getBot: () => minefla
         const deadline = Date.now() + waitMs;
         let taken = 0;
         let outputName = '';
+        ctx.setProgress(() => `smelted ${taken} of ${resolvedInputCount}`);
         while (Date.now() < deadline) {
           // After an abort nothing more is taken out; the furnace closes as the call ends (E-027).
           ctx.throwIfAborted();

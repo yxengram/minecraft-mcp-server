@@ -1,7 +1,8 @@
 // M19 tool experience changes (BLUEPRINT F-052). Each case names its E row and the item of the row's 验证 column; the
 // expected values come from the contract and G6, not from what the code happens to print. A real McpServer and SDK
-// Client talk over InMemoryTransport.createLinkedPair, so extra.signal and notifications/cancelled take the SDK's own
-// path; the bot is a stand-in, the ActionArbiter (and for collect-block the TaskManager) are real.
+// Client talk over InMemoryTransport.createLinkedPair, so extra.signal, notifications/cancelled and
+// notifications/progress take the SDK's own path; the bot is a stand-in, the ActionArbiter (and for collect-block the
+// TaskManager) are real.
 import test, { type ExecutionContext } from 'ava';
 import sinon from 'sinon';
 import { EventEmitter } from 'node:events';
@@ -11,7 +12,8 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import {
-  CALL_LIMIT_MS, DEATH_SETTLE_MS, REPLY_MARGIN_MS, RESPAWN_WAIT_MS, ToolFactory, type ToolContext, type ToolFactoryOptions
+  CALL_LIMIT_MS, DEATH_SETTLE_MS, PROGRESS_INTERVAL_MS, REPLY_MARGIN_MS, RESPAWN_WAIT_MS, ToolFactory, type ToolContext,
+  type ToolFactoryOptions
 } from '../src/tool-factory.js';
 import { PORTAL_WAIT_MS } from '../src/tools/movement-utils.js';
 import { registerWaypointTools } from '../src/tools/waypoint-tools.js';
@@ -100,6 +102,8 @@ function fakeBot(blocks: Record<string, string> = {}) {
 }
 
 type Reply = { text: string; isError: boolean; rejected: boolean };
+/** What the SDK client hands to onprogress: the notification's params without the progressToken. */
+type Progress = { progress: number; total?: number; message?: string };
 
 /**
  * A real MCP server with the factory, the real arbiter and the tools under test, and a client connected to it. The
@@ -148,10 +152,13 @@ async function serve(
     await server.close();
   });
 
-  const call = async (name: string, args: Record<string, unknown> = {}, signal?: AbortSignal): Promise<Reply> => {
+  // With `onprogress` the SDK client puts a progressToken in the request, which asks for progress notifications (E-039).
+  const call = async (
+    name: string, args: Record<string, unknown> = {}, signal?: AbortSignal, onprogress?: (progress: Progress) => void
+  ): Promise<Reply> => {
     try {
       // A long client timeout: the tests are about the server's own limits, not the SDK client's 60 s default.
-      const result = await client.callTool({ name, arguments: args }, undefined, { signal, timeout: 300000 });
+      const result = await client.callTool({ name, arguments: args }, undefined, { signal, timeout: 300000, onprogress });
       const content = (result.content ?? []) as { type: string; text?: string }[];
       return { text: content.map(part => part.text ?? '').join('\n'), isError: result.isError === true, rejected: false };
     } catch (error) {
@@ -160,7 +167,7 @@ async function serve(
     }
   };
   const commandEvents = () => events.query({ types: ['command'], limit: 100 }).events.map(event => event.message);
-  return { factory, arbiter, events, call, commandEvents, stand, connection, client };
+  return { factory, arbiter, events, call, commandEvents, stand, connection, client, serverTransport };
 }
 
 /** Tracks whether a call has replied yet. */
@@ -1715,4 +1722,347 @@ test.serial('E-038 (7): the tool descriptions give the new defaults, from the ca
     // The pinned main descriptions stay as they were.
     t.is(tool('smelt-item').description, 'Smelt items using a furnace-like block');
   }
+});
+
+// ---------------------------------------------------------------------------------------------------------------
+// E-039: a request that carries a progressToken (the SDK client's onprogress adds one) gets notifications/progress
+// every PROGRESS_INTERVAL_MS (5 s) while the call runs: progress counts up from 1, no total, and the message is the
+// tool's ctx.setProgress text, a function form read at each notification, or "<name>: running for N s". Without a
+// progressToken nothing changes; a failed send is only logged; nothing goes out once the call has ended.
+// ---------------------------------------------------------------------------------------------------------------
+
+/** The params of every notifications/progress the server put on its transport, in order. */
+function watchProgress(s: Served) {
+  const send = sinon.spy(s.serverTransport, 'send');
+  const messages = () => send.args.map(([message]) => message as { method?: string; params?: Record<string, unknown> });
+  return {
+    progress: () => messages().filter(message => message.method === 'notifications/progress').map(message => message.params!),
+    /** Everything the server sent that is not a response: requests and notifications. */
+    notifications: () => messages().filter(message => message.method !== undefined)
+  };
+}
+
+const MOVE_TIMED_OUT = 'Failed: Move timed out after 35000ms at (0, 64, 0), 40.0 blocks from the target; call move-to-position again to continue';
+
+test.serial('E-039 (1): a call with onprogress that runs about 12 s gets a notification every 5 s, progress 1 and 2 without a total, and the default text when the tool sets none; its reply is as without', async (t) => {
+  t.is(PROGRESS_INTERVAL_MS, 5000);
+  const clock = useClock(t);
+  const s = await serve(t, fakeBot());
+  const sent = watchProgress(s);
+
+  // wait-for-event is not a body tool and sets no progress text: every tool sends progress when asked.
+  const plain = track(s.call('wait-for-event', { types: ['never'], timeoutMs: 12000 }));
+  await clock.tickAsync(12100);
+  t.true(plain.settled);
+  t.deepEqual(sent.progress(), [], 'nothing without onprogress');
+
+  const notes: Progress[] = [];
+  const asked = track(s.call('wait-for-event', { types: ['never'], timeoutMs: 12000 }, undefined, note => notes.push(note)));
+  await clock.tickAsync(12100);
+  t.true(asked.settled);
+  t.deepEqual(notes, [
+    { progress: 1, message: 'wait-for-event: running for 5 s' },
+    { progress: 2, message: 'wait-for-event: running for 10 s' }
+  ]);
+  t.true(notes.every(note => note.total === undefined), 'no total');
+  const params = sent.progress();
+  t.is(params.length, 2, 'what the client got is what the server sent');
+  t.is(new Set(params.map(param => param.progressToken)).size, 1, 'one progressToken, the request\'s');
+  t.is(asked.reply!.text, plain.reply!.text, 'the reply is the same');
+  t.is(asked.reply!.isError, plain.reply!.isError);
+  t.true(asked.reply!.text.startsWith('Nothing happened within 12.0s'), asked.reply!.text);
+});
+
+test.serial('E-039 (2): collect-block\'s message is its task\'s record, read as each notification goes out: the step before the first block is mined, then the progress', async (t) => {
+  const clock = useClock(t);
+  const s = await gatherServe(t, ['1,64,0', '6,64,0'], x => x === 1);
+  // The first log takes 7 s to dig; the walk to the second never ends.
+  const dig = s.world.bot.dig;
+  s.world.bot.dig = sinon.stub().callsFake(async (block: { position: Vec3 }) => {
+    await new Promise(resolve => setTimeout(resolve, 7000));
+    await dig(block);
+  });
+
+  const notes: Progress[] = [];
+  const pending = track(s.call('collect-block', { blockType: 'oak_log', count: 2 }, undefined, note => notes.push(note)));
+  await clock.tickAsync(5100);
+  const task = s.tasks.currentTask()!;
+  t.is(task.progress, undefined, 'nothing mined yet');
+  t.is(task.step, 'digging oak_log at (1, 64, 0)');
+  t.deepEqual(notes, [{ progress: 1, message: `${task.id} gather: digging oak_log at (1, 64, 0)` }], 'the step while there is no progress');
+
+  await clock.tickAsync(5000);
+  t.is(s.tasks.currentTask()?.progress, 'mined 1 of 2 oak_log');
+  t.deepEqual(notes[1], { progress: 2, message: `${task.id} gather: mined 1 of 2 oak_log` }, 'the progress, as it is now');
+
+  // The reply is E-038's, unchanged.
+  await clock.tickAsync(35000);
+  t.true(pending.settled);
+  t.false(pending.reply!.isError, pending.reply!.text);
+  t.is(pending.reply!.text, still('collecting', task.id, 'gather', 'keeps running in the background (mined 1 of 2 oak_log)'));
+  t.true(notes.length >= 8, `${notes.length} notifications in 45 s`);
+  t.true(notes.every((note, i) => note.progress === i + 1), 'progress counts up by 1');
+  t.true(notes.slice(1).every(note => note.message === `${task.id} gather: mined 1 of 2 oak_log`));
+  await cancelLeftOver(clock, s.tasks);
+});
+
+test.serial('E-039 (2): lead-animal\'s message is its lead task\'s progress, or its step when it has none', async (t) => {
+  const clock = useClock(t);
+  const { manager, ...s } = await leadServe(t);
+
+  const notes: Progress[] = [];
+  const pending = track(s.call('lead-animal', { entityId: 2, x: 20, y: 64, z: 0 }, undefined, note => notes.push(note)));
+  for (let i = 1; i <= 3; i++) {
+    await clock.tickAsync(i === 1 ? 5100 : 5000);
+    const task = manager.currentTask()!;
+    t.is(task.behavior, 'lead');
+    const detail = task.progress ?? task.step;
+    t.truthy(detail, 'the lead task reports what it is doing');
+    t.deepEqual(notes[i - 1], { progress: i, message: `${task.id} lead: ${detail}` });
+  }
+
+  await clock.tickAsync(30000);
+  t.true(pending.settled);
+  t.false(pending.reply!.isError, pending.reply!.text);
+  t.true(pending.reply!.text.startsWith('Still leading after 45 s'), pending.reply!.text);
+  await cancelLeftOver(clock, manager);
+});
+
+for (const [tool, args] of MOVES) {
+  test.serial(`E-039 (2): ${tool} says how many blocks are left, measured as each notification goes out; its time limit and reply are unchanged`, async (t) => {
+    const clock = useClock(t);
+    const bot = fakeBot();
+    const s = await serve(t, bot, factory => registerWaypointTools(factory, () => bot as never, waypointStand));
+
+    const notes: Progress[] = [];
+    const pending = track(s.call(tool, args, undefined, note => notes.push(note)));
+    await clock.tickAsync(5100);
+    t.deepEqual(notes, [{ progress: 1, message: '40 blocks to go' }]);
+    // The walk got somewhere.
+    bot.entity.position = new Vec3(28.5, 64, 0.5);
+    await clock.tickAsync(5000);
+    t.deepEqual(notes[1], { progress: 2, message: '12 blocks to go' });
+
+    await clock.tickAsync(24800);
+    t.false(pending.settled, 'still walking just before 35 s');
+    await clock.tickAsync(200);
+    t.true(pending.settled);
+    t.true(pending.reply!.isError);
+    t.is(pending.reply!.text, `Failed: Move timed out after 35000ms at (28, 64, 0), 12.0 blocks from the target; call ${tool} again to continue`);
+  });
+}
+
+test.serial('E-039 (2): clear-region and dig-tunnel say "dug N of M", fill-region "placed N of M"; their replies are unchanged', async (t) => {
+  const clock = useClock(t);
+  const cases = [
+    ['clear-region', slowDigger(SLAB), CLEAR_SLAB, 'dug',
+      'Cleared region of 24 blocks: dug 12, already empty 0. Stopped early with 12 block(s) not processed; run again to continue'],
+    ['dig-tunnel', slowDigger(Array.from({ length: 24 }, (_, i) => `${1 + (i >> 1)},${64 + (i % 2)},0`)), { direction: 'east', length: 12 }, 'dug',
+      'Dug east tunnel 12x1x2: dug 12, already empty 0. Stopped early with 12 block(s) not processed; run again to continue'],
+    ['fill-region', slowPlacer(), FILL_ROW, 'placed',
+      'Filled region of 24 blocks with dirt: placed 12, already occupied 0. Stopped early with 12 space(s) not processed; run again to continue']
+  ] as const;
+  for (const [tool, bot, args, verb, reply] of cases) {
+    const s = await serve(t, bot);
+    const notes: Progress[] = [];
+    // A cell takes 4 s: one is done at 5 s, two at 10 s.
+    const pending = track(s.call(tool, args, undefined, note => notes.push(note)));
+    await clock.tickAsync(5100);
+    t.deepEqual(notes, [{ progress: 1, message: `${verb} 1 of 24` }], tool);
+    await clock.tickAsync(5000);
+    t.deepEqual(notes[1], { progress: 2, message: `${verb} 2 of 24` }, tool);
+
+    await clock.tickAsync(38000);
+    t.true(pending.settled, tool);
+    t.false(pending.reply!.isError, pending.reply!.text);
+    t.is(pending.reply!.text, reply, tool);
+  }
+});
+
+test.serial('E-039 (2): smelt-item says "smelted N of M" while it waits for the output; the interval comes from the factory\'s options', async (t) => {
+  const clock = useClock(t);
+  // 7 s, so no notification falls on the furnace's 10 s steps.
+  const s = await serve(t, smeltingBot(), () => {}, { progressIntervalMs: 7000 });
+
+  const notes: Progress[] = [];
+  const pending = track(s.call('smelt-item', SMELT_EIGHT, undefined, note => notes.push(note)));
+  await clock.tickAsync(21100);
+  t.deepEqual(notes, [
+    { progress: 1, message: 'smelted 0 of 8' },
+    { progress: 2, message: 'smelted 1 of 8' },
+    { progress: 3, message: 'smelted 2 of 8' }
+  ]);
+
+  await clock.tickAsync(24000);
+  t.true(pending.settled);
+  t.false(pending.reply!.isError, pending.reply!.text);
+  t.is(pending.reply!.text, 'Smelted 4 iron_ingot; 4 raw_iron still in the furnace (stopped after 45000ms); it keeps smelting in the furnace');
+});
+
+test.serial('E-039 (2): ctx.setProgress text is sent as it is, a function is called for each notification, and a function that throws gives the default', async (t) => {
+  const clock = useClock(t);
+  let reads = 0;
+  const s = await serve(t, fakeBot(), factory => {
+    factory.registerTool('progress-probe', 'Changes its progress text as it goes and answers after 16 s', {}, async (_args: unknown, ctx: ToolContext) => {
+      const wait = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+      ctx.setProgress('getting ready');
+      await wait(6000);
+      ctx.setProgress(() => {
+        reads++;
+        if (reads === 1) throw new Error('not ready');
+        return `read ${reads} times`;
+      });
+      await wait(10000);
+      return factory.createResponse('answered after 16 s');
+    });
+  });
+
+  const notes: Progress[] = [];
+  const pending = track(s.call('progress-probe', {}, undefined, note => notes.push(note)));
+  await clock.tickAsync(16100);
+  t.true(pending.settled);
+  t.false(pending.reply!.isError);
+  t.is(pending.reply!.text, 'answered after 16 s');
+  t.deepEqual(notes, [
+    { progress: 1, message: 'getting ready' },
+    { progress: 2, message: 'progress-probe: running for 10 s' },
+    { progress: 3, message: 'read 2 times' }
+  ]);
+  t.is(reads, 2, 'the function was called once for each notification while it was set, and not otherwise');
+});
+
+test.serial('E-039 (2): empty ctx.setProgress text, given or returned by a function, gives the default text', async (t) => {
+  const clock = useClock(t);
+  const s = await serve(t, fakeBot(), factory => {
+    factory.registerTool('empty-probe', 'Sets empty progress text and answers after 11 s', {}, async (_args: unknown, ctx: ToolContext) => {
+      const wait = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+      ctx.setProgress('');
+      await wait(6000);
+      ctx.setProgress(() => '');
+      await wait(5000);
+      return factory.createResponse('answered after 11 s');
+    });
+  });
+
+  const notes: Progress[] = [];
+  const pending = track(s.call('empty-probe', {}, undefined, note => notes.push(note)));
+  await clock.tickAsync(11100);
+  t.true(pending.settled);
+  t.deepEqual(notes, [
+    { progress: 1, message: 'empty-probe: running for 5 s' },
+    { progress: 2, message: 'empty-probe: running for 10 s' }
+  ]);
+});
+
+test.serial('E-039 (1): without onprogress the server sends no notification at all, and a 35 s move replies as before', async (t) => {
+  const clock = useClock(t);
+  const bot = fakeBot();
+  const s = await serve(t, bot);
+  const sent = watchProgress(s);
+
+  const pending = track(s.call('move-to-position', { x: 40, y: 64, z: 0 }));
+  await clock.tickAsync(35100);
+  t.true(pending.settled);
+  t.is(pending.reply!.text, MOVE_TIMED_OUT);
+  t.deepEqual(sent.notifications(), [], 'no notification of any kind');
+  await clock.tickAsync(20000);
+  t.deepEqual(sent.notifications(), []);
+});
+
+test.serial('E-039 (1): a progress notification that cannot be sent is only logged; the call goes on and its reply is unchanged', async (t) => {
+  const clock = useClock(t);
+  const s = await serve(t, fakeBot());
+  const send = s.serverTransport.send.bind(s.serverTransport);
+  sinon.stub(s.serverTransport, 'send').callsFake((message, options) =>
+    ((message as { method?: string }).method === 'notifications/progress'
+      ? Promise.reject(new Error('the client went away'))
+      : send(message, options)));
+  const lines: string[] = [];
+  const write = sinon.stub(process.stderr, 'write').callsFake((chunk: string | Uint8Array) => {
+    lines.push(String(chunk));
+    return true;
+  });
+  t.teardown(() => write.restore());
+
+  const notes: Progress[] = [];
+  const pending = track(s.call('move-to-position', { x: 40, y: 64, z: 0 }, undefined, note => notes.push(note)));
+  await clock.tickAsync(35100);
+  write.restore();
+
+  t.true(pending.settled);
+  t.false(pending.reply!.rejected);
+  t.true(pending.reply!.isError);
+  t.is(pending.reply!.text, MOVE_TIMED_OUT, 'the reply is E-038\'s, unchanged');
+  t.deepEqual(notes, [], 'nothing reached the client');
+  const failures = lines.filter(line => line.includes('[warn] Could not send a progress notification for move-to-position: the client went away'));
+  t.true(failures.length >= 6, `${failures.length} failed sends logged:\n${lines.join('')}`);
+  t.is(s.arbiter.holder(), null, 'the lease is released as usual');
+});
+
+test.serial('E-039 (1): once the call has replied no notification goes out, and the client hears of no unknown progress token', async (t) => {
+  const clock = useClock(t);
+  const s = await serve(t, fakeBot());
+  const sent = watchProgress(s);
+  const errors: Error[] = [];
+  s.client.onerror = error => errors.push(error);
+
+  const notes: Progress[] = [];
+  const pending = track(s.call('wait-for-event', { types: ['never'], timeoutMs: 7000 }, undefined, note => notes.push(note)));
+  await clock.tickAsync(7100);
+  t.true(pending.settled);
+  t.is(notes.length, 1, 'one at 5 s');
+
+  await clock.tickAsync(30000);
+  t.is(sent.progress().length, 1, 'none after the reply');
+  t.is(notes.length, 1);
+  t.deepEqual(errors.map(error => error.message), []);
+});
+
+test.serial('E-039 (1): a call the budget stops sends no notification once it has replied, though its command runs on for 1 s more', async (t) => {
+  const clock = useClock(t);
+  const s = await serve(t, fakeBot(), factory => {
+    factory.registerTool('progress-late', 'Gives up 3 s after the abort', {}, async (_args: unknown, ctx: ToolContext) => {
+      await new Promise(resolve => ctx.signal.addEventListener('abort', resolve, { once: true }));
+      await new Promise(resolve => setTimeout(resolve, 3000));
+      return factory.createResponse('late text');
+    }, { body: true });
+  });
+  const sent = watchProgress(s);
+  const errors: Error[] = [];
+  s.client.onerror = error => errors.push(error);
+
+  const notes: Progress[] = [];
+  const pending = track(s.call('progress-late', {}, undefined, note => notes.push(note)));
+  await clock.tickAsync(CALL_LIMIT_MS + DEATH_SETTLE_MS + 100);
+  t.true(pending.settled);
+  t.is(pending.reply!.text, 'Failed: progress-late did not finish within 50 s, so it was stopped at (0, 64, 0); call it again to continue, or use start-task for long jobs');
+  t.true(notes.length >= 9, `${notes.length} notifications before the reply`);
+  t.true(notes.every((note, i) => note.progress === i + 1), 'progress counts up by 1');
+
+  const count = sent.progress().length;
+  await clock.tickAsync(30000);
+  t.is(sent.progress().length, count, 'none after the reply');
+  t.deepEqual(errors.map(error => error.message), []);
+});
+
+// The SDK (1.27.1) drops a handler's notifications once its request was cancelled, so this checks that drop as the
+// client sees it, not the factory's timer (the budget case above does that).
+test.serial('E-039 (1): once the client cancels a call no notification goes out', async (t) => {
+  const clock = useClock(t);
+  const bot = fakeBot();
+  const s = await serve(t, bot);
+  const sent = watchProgress(s);
+  const controller = new AbortController();
+
+  const notes: Progress[] = [];
+  const pending = track(s.call('move-to-position', { x: 40, y: 64, z: 0 }, controller.signal, note => notes.push(note)));
+  await clock.tickAsync(6000);
+  t.deepEqual(notes, [{ progress: 1, message: '40 blocks to go' }]);
+
+  controller.abort();
+  await clock.tickAsync(30000);
+  t.true(pending.settled && pending.reply!.rejected, 'the client gave up on the request');
+  t.is(sent.progress().length, 1, 'nothing after the cancel');
+  t.is(notes.length, 1);
+  t.deepEqual(s.commandEvents(), ['move-to-position was cancelled by the MCP client after 6.0 s; the bot stopped at (0, 64, 0)'], 'E-027 as before');
 });

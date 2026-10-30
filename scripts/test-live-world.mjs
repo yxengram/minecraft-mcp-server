@@ -421,8 +421,13 @@ try {
     await cmd(`/fill ${cx - 5} ${y0} ${cz - 5} ${cx - 5} ${y0 + 2} ${cz - 5} oak_log`);
     await sleep(500);
     // A gather still going when the reply is due (about 45 s) says "Still collecting …" and runs on as a task (E-038).
-    expectIncludes(await finishedTask(await call('collect-block', { blockType: 'oak_log', count: 3, timeoutMs: 60000 }), 'collecting', 90000),
-      'Mined 3 of 3 oak_log', 'collect-block');
+    // The call asks for progress notifications (E-039): one every 5 s while it runs, and it takes about 12 s here.
+    const progress = [];
+    const reply = await call('collect-block', { blockType: 'oak_log', count: 3, timeoutMs: 60000 }, { onprogress: note => progress.push(note) });
+    expect(progress.length >= 1, `collect-block sent no progress notification (E-039); it replied: ${reply}`);
+    expect(progress.every((note, i) => (i === 0 || note.progress > progress[i - 1].progress) && typeof note.message === 'string' && note.message !== ''),
+      `collect-block's progress notifications should count up and carry a message: ${JSON.stringify(progress)}`);
+    expectIncludes(await finishedTask(reply, 'collecting', 90000), 'Mined 3 of 3 oak_log', 'collect-block');
     await waitForCount('oak_log', count => count >= 3, 'logs to be picked up');
   });
 

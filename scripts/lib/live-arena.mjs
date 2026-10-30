@@ -106,9 +106,10 @@ export function createArena({ port, botName, helperName, clientName, serverArgs 
   /**
    * Calls a tool and checks isError. A reply must come within REPLY_DUE_MS (E-038): a slower one fails the step,
    * unless the call gives a tool whose explicit timeoutMs moves the deadline; such a call must pass a client `timeout`
-   * that covers it.
+   * that covers it. `onprogress` goes to client.callTool, which then asks the server for progress notifications
+   * (E-039); they do not lengthen the client timeout.
    */
-  async function call(name, toolArgs = {}, { expectError = false, timeout = CALL_TIMEOUT_MS } = {}) {
+  async function call(name, toolArgs = {}, { expectError = false, timeout = CALL_TIMEOUT_MS, onprogress } = {}) {
     covered.add(name);
     const longLimit = longLimitMs(name, toolArgs);
     if (longLimit !== null && timeout < longLimit) {
@@ -117,7 +118,7 @@ export function createArena({ port, botName, helperName, clientName, serverArgs 
     const started = Date.now();
     let result;
     try {
-      result = await client.callTool({ name, arguments: toolArgs }, undefined, { timeout });
+      result = await client.callTool({ name, arguments: toolArgs }, undefined, onprogress ? { timeout, onprogress } : { timeout });
     } finally {
       durations.push({ name, ms: Date.now() - started });
     }

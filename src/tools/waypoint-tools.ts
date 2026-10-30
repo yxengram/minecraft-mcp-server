@@ -8,7 +8,8 @@ import { coerceCoordinates } from './coordinate-utils.js';
 import { Vec3 } from 'vec3';
 import { AbortError, MoveTimeout, gotoWithTimeout, arrivalProblem, portalReport, watchPathEdits } from './movement-utils.js';
 import {
-  LEAVE_SHELTER_DESCRIPTION, leavingShelter, leftShelterNote, moveLimitMs, moveTimeoutDefault, moveTimeoutNote, shelterRefusal, walledIn
+  LEAVE_SHELTER_DESCRIPTION, blocksToGo, leavingShelter, leftShelterNote, moveLimitMs, moveTimeoutDefault, moveTimeoutNote, shelterRefusal,
+  walledIn
 } from './position-tools.js';
 
 export function registerWaypointTools(factory: ToolFactory, getBot: () => mineflayer.Bot, store: WaypointStore): void {
@@ -118,6 +119,7 @@ export function registerWaypointTools(factory: ToolFactory, getBot: () => minefl
       if (sheltered && !leaveShelter) return factory.createErrorResponse(shelterRefusal(bot));
       const left = () => (sheltered && !walledIn(bot) ? leftShelterNote(bot) : '');
       const edits = watchPathEdits(bot);
+      ctx.setProgress(blocksToGo(bot, waypoint));
       try {
         await gotoWithTimeout(bot, new goals.GoalNear(waypoint.x, waypoint.y, waypoint.z, range), moveLimitMs(ctx, timeoutMs), ctx.signal);
       } catch (error) {
