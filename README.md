@@ -135,7 +135,7 @@ If you leave the box empty, Minecraft picks a different port each time and print
 Before you change the client's config, you can check in a terminal that the bot can join and that the key works. In the folder of step 1, with the world open to LAN:
 
 ```bash
-node dist/main.js --check --port <LAN port>
+node dist/main.js --check --port <LAN port> --username ClaudeBot
 ```
 
 Give it the same `--host`, `--port` and `--username` that you will put in step 3. To check the key too, set `OPENROUTER_API_KEY` in the same terminal first; the key is never printed. The bot joins the world once and leaves at once, so other players see it join and leave. It says nothing in chat, even with `--greeting`. With a key, the check asks OpenRouter about the key and the decision model, as the server does when it starts; it sends no decision. It writes no files.
@@ -219,6 +219,7 @@ A server with `online-mode=true` checks Microsoft accounts and turns the bot awa
 The UUID of an offline account is worked out from the name alone. Give the bot a name of its own, never yours or another player's: with the same name the bot can share that player's inventory and position, or push them off the server. Chat tells players apart by this UUID too; see the limits under [Chat](#chat).
 
 ## Troubleshooting
+First run the self-check of [Check the connection](#check-the-connection), with the same `--host`, `--port` and `--username` as in the client's config. It tries to join the world once and reports what it found: a `FAIL` line says why the bot could not join, in the words of [The bot cannot connect](#the-bot-cannot-connect), and the other lines say whether the server runs another Minecraft version and whether the key works. If the client's bot is in the game, quit the MCP client completely first: the check joins under the same `--username`, and a second player of that name pushes the first one off the server (see [Accounts](#accounts)).
 
 ### Where to look
 - **The tool reply.** A tool call made while the bot is disconnected first tries to connect again. If that fails, the reply says why.
@@ -236,7 +237,7 @@ The reply starts with `Cannot connect to Minecraft server at <host>:<port>:`, th
 | `<host>:<port> closed the connection during login. Check that it is a Minecraft Java server and that the port is right` | `ECONNRESET`, `EPIPE`, `socketClosed` | |
 | `The server checks Microsoft accounts (online mode); this bot joins with an offline account. See Accounts in the README` | `multiplayer.disconnect.unverified_username` | See [Accounts](#accounts) |
 | `Another player or bot named <name> joined (maybe you, if the bot has your name). Give the bot its own --username` | `multiplayer.disconnect.duplicate_login`, `multiplayer.disconnect.name_taken` | See [Accounts](#accounts) |
-| `The server runs Minecraft <version>; this bot is verified with 26.1.2`, or `The server runs another version of Minecraft; this bot is verified with 26.1.2` | The version error, or `multiplayer.disconnect.outdated_client`, `multiplayer.disconnect.outdated_server`, `multiplayer.disconnect.incompatible` | Use Minecraft Java Edition 26.1.2 |
+| `The server runs Minecraft <version>; this bot is verified with 26.1.2`, or `The server runs another version of Minecraft; this bot is verified with 26.1.2` | The version error, or `multiplayer.disconnect.outdated_client`, `multiplayer.disconnect.outdated_server`, `multiplayer.disconnect.incompatible` | Use Minecraft Java Edition 26.1.2. A server of another version that lets the bot in: see [The bot joined a server of another version](#the-bot-joined-a-server-of-another-version) |
 | `<name> is not on the whitelist: run /whitelist add <name> on the server` | `multiplayer.disconnect.not_whitelisted` | |
 | `<name> is banned from this server: run /pardon <name> on the server`, with `(reason: …)` after "server" when the ban has a reason | `multiplayer.disconnect.banned`, `multiplayer.disconnect.banned.reason` | |
 | `The IP address of this computer is banned from this server: run /pardon-ip <address> on the server` | `multiplayer.disconnect.ip_banned` | |
@@ -247,6 +248,13 @@ A server that sends plain text instead of a translation key gets the same explan
 Two other replies:
 - `Bot is connecting to the Minecraft server. Please wait a moment and try again.`: an attempt is under way. Wait a few seconds and call again.
 - `Cannot connect to Minecraft server at <host>:<port>` followed by `Please ensure:` and a checklist: after about 7 seconds the attempt had neither joined nor failed, for example because it was still logging in. It carries on; call again in a few seconds.
+
+### The bot joined a server of another version
+The bot is verified only with Minecraft 26.1.2, but it adds no version check of its own: when it can talk to the server and the server lets it in, it stays (a version its libraries cannot speak ends as the version error in the table above). Each join then writes a warning to stderr and a `connection` event, and the first tool reply after the join ends with the same sentence:
+
+`Joined <host>:<port> as <name>; the server runs Minecraft <version> (protocol <n>); this bot is verified only with 26.1.2, so some tools may misbehave`
+
+This happens with 26.1 and 26.1.1 too, which share protocol 775 with 26.1.2: the bot tells them apart by the version name the server reports. `--check` writes the sentence as a `WARN` line, and its exit code stays 0. On 26.1.2 the `connection` event only records the join: `Joined <host>:<port> as <name> (Minecraft 26.1.2)`. If tools misbehave, use Minecraft Java Edition 26.1.2.
 
 ### The bot was in the game and left
 When the connection drops or the bot is kicked, nothing happens until the next tool call, which connects again. A kick is a `kicked` event with the server's text. For online mode, a name clash, a version mismatch, the whitelist and bans, the explanation from the table follows after a colon, for example `You are not white-listed on this server!: <name> is not on the whitelist: run /whitelist add <name> on the server`. `Kicked by an operator` means someone ran `/kick`.

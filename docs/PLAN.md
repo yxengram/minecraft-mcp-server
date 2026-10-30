@@ -1662,3 +1662,9 @@
   - 全量实机 `npm run test:live:world -- 63320 --allow-world-changes`（`src/main.ts` 改了，所以照常跑）：无 key、有 key 各一轮 41 步全部 ok，覆盖 67/67。
 - **对世界的影响**：两次 --check 时名为 LLMBot 的离线 bot 进入测试世界又离开（其他玩家会看到加入与离开）；实机测试照常。
 - **文件状态**：F-054 由 placeholder 改为 verified；F-047 加上 F-054 的用例；F-051 加上 (d)，CI 还没跑。
+
+### 2026-10-30 M19 第 21 步：E-043 README 的连接说明（只改文档）
+
+- **实现**（多代理工作流：一个实现；契约、测试、安全三个角度各一个审查；一个修正。审查提出 8 条：修正代理应用了 6 条，另 2 条是 BLUEPRINT H 节的同一行，由主会话改写）：先核对了前面各步已经写好的部分（第 2 步的固定 Port Number、Accounts 与聊天局限的互相引用、默认用户名一句、E-028 的 Troubleshooting 表、“Bot is connecting…” 与 “next tool call connects again” 的说法、E-036 的 key 状态、CONTRIBUTING.md 第 3 节），不重复写。补上的：Troubleshooting 开头建议先运行 `--check`（客户端的 bot 在游戏里时先完全退出客户端，因为同名的第二位玩家会把第一位挤下线）；新小节 “The bot joined a server of another version”（E-030 的警告原文、26.1 与 26.1.1 也会警告、--check 写成 WARN 仍以 0 退出；改正了起初“从不拒绝别的版本”的错误说法，库本身不认识的版本仍以版本错误结束）；--check 的例子加上 `--username ClaudeBot`，与示例输出一致。中英文同步。CHANGELOG 加一条。BLUEPRINT H 节的 --auth microsoft 一行按 E-043 第 5 条改写（设备码只能经工具回复或事件交给用户；刷新令牌缓存写磁盘；新增的服务；验收条件；推迟不增加成本；以后是新参数，另行确认）。
+- **检查**：实现代理用一次性脚本填入占位符、调用真实的 explainFailure，逐条核对两份 README 中 Troubleshooting 与 Accounts 引用的回复文字，全部一致；Port Number 与 1024～65535 按 minecraft-data 26.1 的 language.json 再核对一次；Accounts 标题与 “See Accounts in the README” 对应。`npm test`（不带 key）1507 个通过；`npm run lint`、`tsc --noEmit`、`git diff --check` 无输出。只改文档，没有跑实机测试。
+- **留给所有者**：契约的两项实机检查要所有者打开世界：（1）在 LAN World 界面的 Port Number 填同一个端口，先后两次打开 LAN 世界，--port 不变，两次都能连上（用 --check 确认）；（2）新建一个开启作弊的原版 26.1.2 测试世界并 Open to LAN，用离线 bot 加入一次，结果（接受，或拒绝及原文）记入 PLAN，并按结果修改 Accounts 一节。

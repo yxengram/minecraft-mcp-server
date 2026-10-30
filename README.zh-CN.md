@@ -135,7 +135,7 @@ npm run build
 改客户端配置之前，可以先在终端里确认机器人能进入世界、key 可用。世界对局域网开放后，在第 1 步的文件夹里运行：
 
 ```bash
-node dist/main.js --check --port <局域网端口>
+node dist/main.js --check --port <局域网端口> --username ClaudeBot
 ```
 
 `--host`、`--port`、`--username` 用第 3 步里要写的同样的值。要一并核对 key，先在同一个终端里设好 `OPENROUTER_API_KEY`；key 不会被打印。机器人进入世界一次后马上离开，所以其他玩家会看到它加入和离开。即使给了 `--greeting`，它也不在聊天里说话。有 key 时，自检像服务器启动时那样向 OpenRouter 核对 key 和决策模型，不发决策请求。它不写任何文件。
@@ -219,6 +219,7 @@ API key 只从环境变量 `OPENROUTER_API_KEY` 读取，不要把它写进仓�
 离线账号的 UUID 只由名字决定。请给机器人起一个它自己的名字，不要用你自己或其他玩家的名字：同名时，机器人可能和那位玩家共用背包和位置，或者把对方挤下线。聊天也按这个 UUID 认人，局限见[聊天](#聊天)。
 
 ## 故障排查（Troubleshooting）
+先运行[检查连接](#检查连接)里的自检，`--host`、`--port`、`--username` 用客户端配置里同样的值。它尝试进入世界一次，报告查到的情况：`FAIL` 一行说明机器人没能进入的原因，说法与[机器人连不上](#机器人连不上)中的相同；其余几行说明服务器是不是别的 Minecraft 版本、key 是否可用。客户端的机器人在游戏里时，先完全退出 MCP 客户端：自检用同一个 `--username` 进入，同名的第二位玩家会把第一位挤下线（见[账号（Accounts）](#账号accounts)）。
 
 ### 去哪里看
 - **工具回复。**机器人断开时调用任何工具，都会先重新连接；连不上时，回复会说明原因。
@@ -236,7 +237,7 @@ API key 只从环境变量 `OPENROUTER_API_KEY` 读取，不要把它写进仓�
 | `<host>:<port> closed the connection during login. Check that it is a Minecraft Java server and that the port is right` | `ECONNRESET`、`EPIPE`、`socketClosed` | |
 | `The server checks Microsoft accounts (online mode); this bot joins with an offline account. See Accounts in the README` | `multiplayer.disconnect.unverified_username` | 见[账号（Accounts）](#账号accounts) |
 | `Another player or bot named <name> joined (maybe you, if the bot has your name). Give the bot its own --username` | `multiplayer.disconnect.duplicate_login`、`multiplayer.disconnect.name_taken` | 见[账号（Accounts）](#账号accounts) |
-| `The server runs Minecraft <version>; this bot is verified with 26.1.2`，或 `The server runs another version of Minecraft; this bot is verified with 26.1.2` | 版本错误的原文，或 `multiplayer.disconnect.outdated_client`、`multiplayer.disconnect.outdated_server`、`multiplayer.disconnect.incompatible` | 请使用 Minecraft Java 版 26.1.2 |
+| `The server runs Minecraft <version>; this bot is verified with 26.1.2`，或 `The server runs another version of Minecraft; this bot is verified with 26.1.2` | 版本错误的原文，或 `multiplayer.disconnect.outdated_client`、`multiplayer.disconnect.outdated_server`、`multiplayer.disconnect.incompatible` | 请使用 Minecraft Java 版 26.1.2。别的版本的服务器让机器人进入时，见[机器人进入了别的版本的服务器](#机器人进入了别的版本的服务器) |
 | `<name> is not on the whitelist: run /whitelist add <name> on the server` | `multiplayer.disconnect.not_whitelisted` | |
 | `<name> is banned from this server: run /pardon <name> on the server`；封禁写了原因时，“server” 后面多一段 `(reason: …)` | `multiplayer.disconnect.banned`、`multiplayer.disconnect.banned.reason` | |
 | `The IP address of this computer is banned from this server: run /pardon-ip <address> on the server` | `multiplayer.disconnect.ip_banned` | |
@@ -247,6 +248,13 @@ API key 只从环境变量 `OPENROUTER_API_KEY` 读取，不要把它写进仓�
 另外两种回复：
 - `Bot is connecting to the Minecraft server. Please wait a moment and try again.`：正在连接。等几秒再调用。
 - `Cannot connect to Minecraft server at <host>:<port>` 后面接 `Please ensure:` 和一份检查清单：大约 7 秒后这次连接既没有进入游戏，也没有失败，例如还在登录。连接会继续进行，过几秒再调用。
+
+### 机器人进入了别的版本的服务器
+机器人只在 Minecraft 26.1.2 上验证过，但它自己不按版本拒绝连接：能和服务器通信、服务器也让它进入时，它就留在游戏里（它的库不支持的版本会以上表中的版本错误结束）。这时每次进入都会在 stderr 写一条警告、写一个 `connection` 事件，进入后的第一个工具回复末尾也附上同一句话：
+
+`Joined <host>:<port> as <name>; the server runs Minecraft <version> (protocol <n>); this bot is verified only with 26.1.2, so some tools may misbehave`
+
+26.1 和 26.1.1 与 26.1.2 同为协议 775，也会得到这句警告：机器人按服务器报告的版本名区分它们。`--check` 把这句话写成一行 `WARN`，退出码仍为 0。服务器是 26.1.2 时，`connection` 事件只记下这次进入：`Joined <host>:<port> as <name> (Minecraft 26.1.2)`。工具表现异常时，请使用 Minecraft Java 版 26.1.2。
 
 ### 机器人进过游戏，后来离开了
 连接断开或机器人被踢出后，什么都不会发生，直到下一次工具调用重新连接。被踢出会记为一个 `kicked` 事件，内容是服务器的原文。online mode、同名、版本不符、白名单和封禁这几种，原文后面会加一个冒号和上表中的说明，例如 `You are not white-listed on this server!: <name> is not on the whitelist: run /whitelist add <name> on the server`。`Kicked by an operator` 表示有人执行了 `/kick`。
