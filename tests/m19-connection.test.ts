@@ -12,6 +12,11 @@ import { explainFailure, kickInfo } from '../src/connection-errors.js';
 import { ToolFactory } from '../src/tool-factory.js';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { createFactory } from './_helpers.js';
+import { runSelfCheck, type SelfCheckDecisionClient } from '../src/self-check.js';
+import { OpenRouterClient } from '../src/decisions/openrouter-client.js';
+import { DEFAULT_DECISION_MODEL } from '../src/autopilot/policy.js';
+import type { ServerConfig } from '../src/config.js';
+import type { ConnectionTarget } from '../src/connection-errors.js';
 
 // ---------------------------------------------------------------------------------------------------------------
 // E-021: an attempt that fails before spawning ends in disconnected, so the next tool call connects again.
@@ -1356,4 +1361,396 @@ test.serial('E-041 onBotReady can read the fingerprint: the login packet comes b
   s.bots[0]._client.emit('login', loginPacket(0x0123456789abcdefn).params);
   s.bots[0].emit('spawn');
   t.deepEqual(seen, ['0123456789abcdef']);
+});
+
+// ---------------------------------------------------------------------------------------------------------------
+// E-042 (F-054): --check. runSelfCheck joins once (a real BotConnection on fake bots, never a reconnect), checks the
+// key with E-036's checkAccess (a real OpenRouterClient on a fake fetch: GET /api/v1/key, then the catalog), writes
+// one report line per check (OK, WARN or FAIL; the last one Ready or Not ready) and returns 0 when the bot joined, 1
+// when it did not. The key appears nowhere in the report (I4), and the bot says nothing in chat.
+// ---------------------------------------------------------------------------------------------------------------
+
+// Made up; every test injects it (or no key) and a fake fetch, so a key exported in the shell is never used.
+const CHECK_KEY = 'sk-or-v1-FAKE-SELF-CHECK-KEY-0000-not-a-real-secret-5e2a';
+const CHECK_KEY_ENDPOINT = 'https://openrouter.ai/api/v1/key';
+const CHECK_MODELS_ENDPOINT = 'https://openrouter.ai/api/v1/models';
+const CHECK_CATALOG = { data: [{ id: DEFAULT_DECISION_MODEL, canonical_slug: DEFAULT_DECISION_MODEL }, { id: 'example/other-model' }] };
+
+const AT = 'mc.example.test:41234';
+const CHECK_CANNOT_CONNECT = `Cannot connect to Minecraft server at ${AT}`;
+const KEY_SET = 'OK OPENROUTER_API_KEY is set';
+const KEY_NOT_SET = 'WARN OPENROUTER_API_KEY is not set: the instinct will be offline and the bot will not react to dangers by itself';
+const VERSION_OK = 'OK Minecraft 26.1.2 (protocol 775)';
+const READY = 'Ready: use the same --host, --port and --username in your MCP client config';
+const READY_NO_KEY = `${READY}; the instinct is offline (no OPENROUTER_API_KEY)`;
+const KEY_ACCEPTED = `OK decision model ${DEFAULT_DECISION_MODEL}: key accepted`;
+// Where spawnBot puts the bot, (-12.3, 70, 205.9) in the overworld. F-054 leaves the form open: the coordinates as they
+// are, rounded down or rounded, and the dimension with or without "minecraft:".
+const joinedLine = (username = TARGET.username) =>
+  new RegExp(String.raw`^OK joined mc\.example\.test:41234 as ${username} \(offline account\); spawned at \((-12(\.3)?|-13), 70(\.0)?, (205(\.9)?|206)\) in (minecraft:)?overworld$`);
+
+type FetchRoute = { status: number; body: string } | 'hang' | 'throw';
+const ok = (body: unknown): FetchRoute => ({ status: 200, body: JSON.stringify(body) });
+
+/** Answers by URL; a decision request is never expected. */
+function checkFetch(routes: { key?: FetchRoute; catalog?: FetchRoute } = {}) {
+  const reply = async (route: FetchRoute) => {
+    if (route === 'hang') return new Promise<never>(() => {});
+    if (route === 'throw') throw new TypeError('fetch failed');
+    return { ok: route.status >= 200 && route.status < 300, status: route.status, text: async () => route.body };
+  };
+  return sinon.spy(async (url: string, _init: { method: string; headers: Record<string, string>; signal: AbortSignal }) => {
+    if (url === CHECK_KEY_ENDPOINT) return reply(routes.key ?? ok({ data: { label: 'made-up' } }));
+    if (url.startsWith(`${CHECK_MODELS_ENDPOINT}?`)) return reply(routes.catalog ?? ok(CHECK_CATALOG));
+    throw new Error(`unexpected request to ${url}`);
+  });
+}
+
+function checkConfig(overrides: Partial<ServerConfig> = {}): ServerConfig {
+  return { ...TARGET, allowCommands: false, callLimitSeconds: 50, check: true, ...overrides };
+}
+
+/**
+ * Starts runSelfCheck on fake timers. connect() runs before runSelfCheck's first await, so the first bot is there at
+ * once. `client` replaces the OpenRouterClient for the cases where the check itself throws.
+ */
+function startSelfCheck(t: ExecutionContext, options: {
+  config?: ServerConfig; key?: string; fetch?: ReturnType<typeof checkFetch>; createBot?: sinon.SinonStub; client?: SelfCheckDecisionClient;
+} = {}) {
+  const clock = sinon.useFakeTimers();
+  t.teardown(() => clock.restore());
+  const bots: FakeBot[] = [];
+  const createBot = options.createBot ?? sinon.stub().callsFake(() => newBot(bots));
+  const fetch = options.fetch ?? checkFetch();
+  const onLog = sinon.stub();
+  const targets: ConnectionTarget[] = [];
+  const connections: BotConnection[] = [];
+  const output: string[] = [];
+  const run = {
+    settled: false,
+    result: undefined as unknown as Promise<number>
+  };
+  run.result = runSelfCheck(options.config ?? checkConfig(), {
+    createConnection: (target, callbacks) => {
+      targets.push(target);
+      const connection = new BotConnection(target, { ...callbacks, onLog }, RECONNECT_DELAY_MS, {
+        createBot: createBot as unknown as (botOptions: mineflayer.BotOptions) => mineflayer.Bot
+      });
+      sinon.spy(connection, 'checkConnectionAndReconnect');
+      sinon.spy(connection, 'attemptReconnect');
+      sinon.spy(connection, 'cleanup');
+      connections.push(connection);
+      return connection;
+    },
+    createDecisionClient: options.client
+      ? () => options.client!
+      : getPolicy => new OpenRouterClient({ getPolicy, getKey: () => options.key, fetch }),
+    write: text => { output.push(text); }
+  }).then(code => {
+    run.settled = true;
+    return code;
+  });
+  const lines = () => {
+    const all = output.join('').split('\n');
+    t.is(all.pop(), '', 'the report ends with a line break');
+    return all;
+  };
+  return { clock, bots, createBot, fetch, onLog, targets, connections, output, run, lines };
+}
+
+type SelfCheck = ReturnType<typeof startSelfCheck>;
+
+/** The ping answer and the spawn of a join, at a place in the overworld. */
+function spawnBot(bot: FakeBot, version: PingVersion | undefined = { name: '26.1.2', protocol: 775 }) {
+  Object.assign(bot, { game: { dimension: 'minecraft:overworld' }, entity: { id: 1, position: new Vec3(-12.3, 70, 205.9) } });
+  answerPing(bot, version);
+  bot.emit('spawn');
+}
+
+/** Every line starts with OK, WARN or FAIL, and the last one with Ready or Not ready (E-042 (3)). */
+function assertReportShape(t: ExecutionContext, lines: string[]) {
+  t.true(lines.length >= 2, lines.join('\n'));
+  for (const line of lines.slice(0, -1)) t.regex(line, /^(OK|WARN|FAIL) /);
+  t.regex(lines[lines.length - 1], /^(Ready: |Not ready: )/);
+}
+
+/** Connected once, never reconnected, and let go at the end (F-054 step 1 and the end). */
+function assertOneAttemptAndCleanup(t: ExecutionContext, s: SelfCheck) {
+  const [connection] = s.connections;
+  t.is(s.connections.length, 1);
+  t.true(s.createBot.calledOnce, `createBot was called ${s.createBot.callCount} times`);
+  t.true((connection.checkConnectionAndReconnect as sinon.SinonSpy).notCalled, 'checkConnectionAndReconnect is never called');
+  t.true((connection.attemptReconnect as sinon.SinonSpy).notCalled);
+  t.true((connection.cleanup as sinon.SinonSpy).calledOnce, 'cleanup at the end');
+}
+
+function assertNoKey(t: ExecutionContext, text: string) {
+  t.false(text.includes(CHECK_KEY), text);
+  // "Or any part of it" (I4): no 8 characters in a row of the key.
+  for (let start = 0; start + 8 <= CHECK_KEY.length; start++) {
+    const part = CHECK_KEY.slice(start, start + 8);
+    t.false(text.includes(part), `"${part}" of the key is in: ${text}`);
+  }
+}
+
+test.serial('E-042 joined 26.1.2 with a key that passes: OK lines, Ready, exit code 0, one attempt and cleanup', async (t) => {
+  const s = startSelfCheck(t, { key: CHECK_KEY });
+  t.is(s.bots.length, 1, 'connect() is called at once');
+  spawnBot(s.bots[0]);
+  await s.clock.tickAsync(200);
+  t.true(s.run.settled);
+  t.is(await s.run.result, 0);
+
+  const lines = s.lines();
+  assertReportShape(t, lines);
+  t.regex(lines[0], joinedLine());
+  t.deepEqual(lines.slice(1), [VERSION_OK, KEY_SET, KEY_ACCEPTED, READY]);
+  // E-036's check as implemented: the free GET /api/v1/key, then the catalog; no decision request.
+  t.deepEqual(s.fetch.getCalls().map(call => call.args[0].split('?')[0]), [CHECK_KEY_ENDPOINT, CHECK_MODELS_ENDPOINT]);
+  for (const call of s.fetch.getCalls()) t.is(call.args[1].method, 'GET');
+  assertOneAttemptAndCleanup(t, s);
+  t.true(s.bots[0].end.calledOnceWith('Server shutting down'), 'the bot leaves the world at the end');
+  assertNoKey(t, s.output.join(''));
+});
+
+test.serial('E-042 the target is host, port and username only, and a --greeting is never said', async (t) => {
+  const s = startSelfCheck(t, { config: checkConfig({ greeting: 'hello all' }) });
+  spawnBot(s.bots[0]);
+  await s.clock.tickAsync(200);
+  t.is(await s.run.result, 0);
+  t.deepEqual(s.targets, [{ host: TARGET.host, port: TARGET.port, username: TARGET.username }]);
+  t.true((s.bots[0] as unknown as { chat: sinon.SinonStub }).chat.notCalled, 'bot.chat is not called');
+});
+
+test.serial('E-042 ECONNREFUSED: FAIL with the E-028 explanation, Not ready, exit code 1, no reconnect', async (t) => {
+  const s = startSelfCheck(t, { key: undefined });
+  s.bots[0].emit('error', errno('ECONNREFUSED', 'connect ECONNREFUSED 127.0.0.1:41234'));
+  await s.clock.tickAsync(100);
+  t.true(s.run.settled, 'the failure ends the check at the next look, not at the watchdog');
+  t.is(await s.run.result, 1);
+
+  const lines = s.lines();
+  assertReportShape(t, lines);
+  t.deepEqual(lines, [`FAIL ${CHECK_CANNOT_CONNECT}: ${NOTHING_LISTENING} (ECONNREFUSED)`, KEY_NOT_SET, `Not ready: ${NOTHING_LISTENING}`]);
+  t.false(lines.some(line => line.includes('Minecraft 26') || line.includes('protocol')), 'no version line without a join');
+  await s.clock.tickAsync(CONNECT_TIMEOUT_MS * 2);
+  assertOneAttemptAndCleanup(t, s);
+});
+
+test.serial('E-042 the watchdog (no spawn within 30 s): FAIL with "No answer", exit code 1', async (t) => {
+  const s = startSelfCheck(t);
+  await s.clock.tickAsync(CONNECT_TIMEOUT_MS - 1);
+  t.false(s.run.settled, 'still waiting for the attempt');
+  await s.clock.tickAsync(1 + 100);
+  t.true(s.run.settled);
+  t.is(await s.run.result, 1);
+  const lines = s.lines();
+  assertReportShape(t, lines);
+  t.deepEqual(lines, [`FAIL ${CHECK_CANNOT_CONNECT}: ${NO_ANSWER} (no spawn within 30 s)`, KEY_NOT_SET, `Not ready: ${NO_ANSWER}`]);
+  assertOneAttemptAndCleanup(t, s);
+});
+
+test.serial('E-042 a version error ends the attempt at once (E-021), without waiting for the watchdog', async (t) => {
+  const s = startSelfCheck(t);
+  s.bots[0].emit('error', new Error('No data available for version 26.2'));
+  await s.clock.tickAsync(100);
+  t.true(s.run.settled);
+  t.is(await s.run.result, 1);
+  const lines = s.lines();
+  assertReportShape(t, lines);
+  t.is(lines[0], `FAIL ${CHECK_CANNOT_CONNECT}: ${serverVersion('26.2')} (No data available for version 26.2)`);
+  t.is(lines.at(-1), `Not ready: ${serverVersion('26.2')}`);
+  assertOneAttemptAndCleanup(t, s);
+});
+
+test.serial('E-042 a kick during login: FAIL with the explanation and the translation key, exit code 1', async (t) => {
+  const s = startSelfCheck(t);
+  const bot = s.bots[0];
+  bot.quit = sinon.stub();
+  bot.emit('kicked', '{"translate":"multiplayer.disconnect.not_whitelisted"}', false);
+  bot.emit('end', 'socketClosed');
+  await s.clock.tickAsync(100);
+  t.is(await s.run.result, 1);
+  t.deepEqual(s.lines(), [
+    `FAIL ${CHECK_CANNOT_CONNECT}: ${NOT_WHITELISTED} (multiplayer.disconnect.not_whitelisted)`,
+    KEY_NOT_SET,
+    `Not ready: ${NOT_WHITELISTED}`
+  ]);
+  assertOneAttemptAndCleanup(t, s);
+});
+
+test.serial('E-042 createBot throws synchronously: FAIL with the code and message E-021 recorded, exit code 1', async (t) => {
+  const createBot = sinon.stub().throws(errno('ERR_INVALID_ARG_TYPE', 'The "options.host" property must be of type string'));
+  const s = startSelfCheck(t, { createBot });
+  await s.clock.tickAsync(100);
+  t.is(await s.run.result, 1);
+  const lines = s.lines();
+  assertReportShape(t, lines);
+  t.is(lines[0], `FAIL ${CHECK_CANNOT_CONNECT}: The "options.host" property must be of type string (ERR_INVALID_ARG_TYPE)`);
+  t.is(lines[lines.length - 1], 'Not ready: The "options.host" property must be of type string');
+  t.true(createBot.calledOnce);
+});
+
+test.serial('E-042 another Minecraft version and a lenient username: WARN lines with the E-030 and E-023 sentences, exit code still 0', async (t) => {
+  const s = startSelfCheck(t, { config: checkConfig({ username: 'Bot-1' }) });
+  spawnBot(s.bots[0], { name: '26.1', protocol: 775 });
+  await s.clock.tickAsync(200);
+  t.is(await s.run.result, 0);
+  const lines = s.lines();
+  assertReportShape(t, lines);
+  t.regex(lines[0], joinedLine('Bot-1'));
+  t.deepEqual(lines.slice(1), [
+    'WARN --username "Bot-1" is not 3 to 16 letters, digits or underscores; some servers refuse such names',
+    'WARN Joined mc.example.test:41234 as Bot-1; the server runs Minecraft 26.1 (protocol 775); this bot is verified only with 26.1.2, so some tools may misbehave',
+    KEY_NOT_SET,
+    READY_NO_KEY
+  ]);
+  t.is(lines.filter(line => /Minecraft \d/.test(line)).length, 1, 'only the version line names the version');
+});
+
+// E-030's rule: without a version name, or a name without a version number, only the protocol counts.
+for (const { name, ping, ok: matches } of [
+  { name: 'no name, protocol 775', ping: { protocol: 775 }, ok: true },
+  { name: '"Velocity", protocol 775', ping: { name: 'Velocity', protocol: 775 }, ok: true },
+  { name: '"Paper 26.1.2", protocol 775', ping: { name: 'Paper 26.1.2', protocol: 775 }, ok: true },
+  { name: 'no name, protocol 774', ping: { protocol: 774 }, ok: false }
+]) {
+  test.serial(`E-042 the version line for ${name}`, async (t) => {
+    const s = startSelfCheck(t);
+    spawnBot(s.bots[0], ping);
+    await s.clock.tickAsync(200);
+    t.is(await s.run.result, 0);
+    const versionLines = s.lines().filter(line => /Minecraft \d/.test(line));
+    if (matches) t.deepEqual(versionLines, [VERSION_OK]);
+    else {
+      t.is(versionLines.length, 1);
+      t.regex(versionLines[0], /^WARN Joined mc\.example\.test:41234 as Helper; the server runs Minecraft \S+ \(protocol 774\); this bot is verified only with 26\.1\.2, so some tools may misbehave$/);
+    }
+  });
+}
+
+test.serial('E-042 without a key: no request at all, the key WARN, no decision model line, and Ready names the offline instinct', async (t) => {
+  for (const key of [undefined, '', '   ']) {
+    const fetch = checkFetch();
+    const s = startSelfCheck(t, { key, fetch });
+    spawnBot(s.bots[0]);
+    await s.clock.tickAsync(200);
+    t.is(await s.run.result, 0);
+    t.is(fetch.callCount, 0, `key ${JSON.stringify(key)} must not send a request`);
+    const lines = s.lines();
+    t.deepEqual(lines.slice(1), [VERSION_OK, KEY_NOT_SET, READY_NO_KEY]);
+    t.false(lines.some(line => line.includes('decision model')));
+    s.clock.restore();
+  }
+});
+
+test.serial('E-042 a refused key whose error body echoes the key: WARN OFFLINE, no part of the key in the report, exit code 0', async (t) => {
+  const body = JSON.stringify({ error: { message: `User not found for ${CHECK_KEY}`, code: 401 } });
+  const s = startSelfCheck(t, { key: CHECK_KEY, fetch: checkFetch({ key: { status: 401, body } }) });
+  spawnBot(s.bots[0]);
+  await s.clock.tickAsync(200);
+  t.is(await s.run.result, 0);
+  const reason = 'OpenRouter rejected the API key (HTTP 401)';
+  t.deepEqual(s.lines().slice(1), [VERSION_OK, KEY_SET, `WARN decision model OFFLINE (${reason})`, `${READY}; the instinct is offline (${reason})`]);
+  assertNoKey(t, s.output.join(''));
+  assertNoKey(t, JSON.stringify(s.onLog.args));
+});
+
+test.serial('E-042 a catalog error whose body echoes the key: WARN not checked, the key nowhere, and Ready without the offline note', async (t) => {
+  const s = startSelfCheck(t, { key: CHECK_KEY, fetch: checkFetch({ catalog: { status: 500, body: `internal error for ${CHECK_KEY}` } }) });
+  spawnBot(s.bots[0]);
+  await s.clock.tickAsync(200);
+  t.is(await s.run.result, 0);
+  const lines = s.lines();
+  t.is(lines.length, 5);
+  t.is(lines[3], 'WARN decision model not checked (OpenRouter could not list the decision models (HTTP 500))');
+  t.is(lines[4], READY);
+  assertNoKey(t, s.output.join(''));
+});
+
+test.serial('E-042 an account without credit and a model that is not in the catalog are OFFLINE; --decision-model names the model', async (t) => {
+  const credit = startSelfCheck(t, { key: CHECK_KEY, fetch: checkFetch({ key: { status: 402, body: '{}' } }) });
+  spawnBot(credit.bots[0]);
+  await credit.clock.tickAsync(200);
+  t.is(await credit.run.result, 0);
+  t.is(credit.lines()[3], 'WARN decision model OFFLINE (the OpenRouter account has no credit (HTTP 402))');
+  credit.clock.restore();
+
+  const missing = startSelfCheck(t, { key: CHECK_KEY, config: checkConfig({ decisionModel: 'example/missing-model' }) });
+  spawnBot(missing.bots[0]);
+  await missing.clock.tickAsync(200);
+  t.is(await missing.run.result, 0);
+  const reason = 'model example/missing-model is not in the decision model catalog';
+  t.deepEqual(missing.lines().slice(3), [`WARN decision model OFFLINE (${reason})`, `${READY}; the instinct is offline (${reason})`]);
+  missing.clock.restore();
+
+  const other = startSelfCheck(t, { key: CHECK_KEY, config: checkConfig({ decisionModel: 'example/other-model' }) });
+  spawnBot(other.bots[0]);
+  await other.clock.tickAsync(200);
+  t.is(await other.run.result, 0);
+  t.deepEqual(other.lines().slice(3), ['OK decision model example/other-model: key accepted', READY]);
+});
+
+test.serial('E-042 OpenRouter cannot be reached: WARN not checked with the reason, exit code unchanged', async (t) => {
+  const s = startSelfCheck(t, { key: CHECK_KEY, fetch: checkFetch({ key: 'throw' }) });
+  spawnBot(s.bots[0]);
+  await s.clock.tickAsync(200);
+  t.is(await s.run.result, 0);
+  t.deepEqual(s.lines().slice(3), ['WARN decision model not checked (could not reach OpenRouter)', READY]);
+});
+
+test.serial('E-042 the key is checked even when the bot cannot join, and the whole check ends within about 35 s', async (t) => {
+  const s = startSelfCheck(t, { key: CHECK_KEY, fetch: checkFetch({ key: 'hang' }) });
+  await s.clock.tickAsync(CONNECT_TIMEOUT_MS - 1);
+  t.false(s.run.settled, 'the attempt is still running');
+  await s.clock.tickAsync(1 + 5000 + 200);
+  t.true(s.run.settled, 'within about 35 s: the 30 s attempt plus the 5 s check timeout (F-054)');
+  t.is(s.fetch.callCount, 1, 'the key is checked although the bot did not join');
+  t.is(await s.run.result, 1);
+  const lines = s.lines();
+  assertReportShape(t, lines);
+  t.is(lines[1], KEY_SET);
+  t.is(lines[2], 'WARN decision model not checked (no answer from OpenRouter within 5 s)');
+  t.is(lines[3], `Not ready: ${NO_ANSWER}`);
+});
+
+for (const [name, checkAccess] of [
+  ['throws', () => { throw new Error(`boom ${CHECK_KEY}`); }],
+  ['rejects', () => Promise.reject(new Error(`boom ${CHECK_KEY}`))]
+] as const) {
+  test.serial(`E-042 a check that ${name}: WARN not checked, without its message, and the exit code is unchanged`, async (t) => {
+    const client = { status: () => ({ configured: true }), checkAccess } as unknown as SelfCheckDecisionClient;
+    const s = startSelfCheck(t, { client });
+    spawnBot(s.bots[0]);
+    await s.clock.tickAsync(200);
+    t.is(await s.run.result, 0);
+    const lines = s.lines();
+    t.is(lines[2], KEY_SET);
+    t.regex(lines[3], /^WARN decision model not checked \(.+\)$/);
+    t.false(lines[3].includes('boom'));
+    t.is(lines[4], READY);
+    assertNoKey(t, s.output.join(''));
+  });
+}
+
+test.serial('E-042 an error in cleanup is ignored: the report and the exit code stay', async (t) => {
+  const bots: FakeBot[] = [];
+  const createBot = sinon.stub().callsFake(() => newBot(bots));
+  const s = startSelfCheck(t, { createBot });
+  (s.connections[0].cleanup as sinon.SinonSpy).restore();
+  const cleanup = sinon.stub(s.connections[0], 'cleanup').throws(new Error('end failed'));
+  spawnBot(bots[0]);
+  await s.clock.tickAsync(200);
+  t.is(await s.run.result, 0);
+  t.true(cleanup.calledOnce);
+  t.is(s.lines().at(-1), READY_NO_KEY);
+
+  s.clock.restore();
+  const failed = startSelfCheck(t);
+  (failed.connections[0].cleanup as sinon.SinonSpy).restore();
+  sinon.stub(failed.connections[0], 'cleanup').throws(new Error('end failed'));
+  failed.bots[0].emit('error', errno('ECONNREFUSED', 'connect ECONNREFUSED 127.0.0.1:41234'));
+  await failed.clock.tickAsync(100);
+  t.is(await failed.run.result, 1);
+  t.is(failed.lines().at(-1), `Not ready: ${NOTHING_LISTENING}`);
 });

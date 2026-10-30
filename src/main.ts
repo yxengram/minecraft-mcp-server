@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import { format } from 'node:util';
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { setupStdioFiltering } from './stdio-filter.js';
@@ -7,6 +8,7 @@ import { log } from './logger.js';
 import { ConfigError, parseConfig, usernameWarning, type ServerConfig } from './config.js';
 import { COMMAND_NAME, PACKAGE_VERSION } from './package-info.js';
 import { BotConnection, SUPPORTED_MINECRAFT_VERSION } from './bot-connection.js';
+import { runSelfCheck } from './self-check.js';
 import { ToolFactory } from './tool-factory.js';
 import { MessageStore } from './message-store.js';
 import { EventStore } from './event-store.js';
@@ -51,7 +53,24 @@ async function main() {
     // Nothing is running yet (no connection, timer or transport), so the process ends by itself once stderr is written;
     // process.exit could cut that line short on a pipe. E-042: with --check, the same line exits with 2 instead.
     process.stderr.write(`${COMMAND_NAME}: ${error.message}; run with --help for the options\n`);
-    process.exitCode = 1;
+    process.exitCode = error.exitCode;
+    return;
+  }
+  // --check (E-042): the report on stdout, unfiltered, and no MCP server, stores, Autopilot or stdin handler. The
+  // username warning is a line of the report. The log stays on stderr.
+  if (config.check) {
+    // mineflayer's createBot logs every bot error with console.log by default (an ECONNREFUSED with its stack, for
+    // one), and the report alone goes to stdout: library console output goes to stderr, where it is kept, not dropped.
+    // runSelfCheck writes the report with process.stdout.write, which this leaves as it is.
+    const toStderr = (...args: unknown[]) => {
+      process.stderr.write(`${format(...args)}\n`);
+    };
+    console.log = console.info = console.debug = toStderr;
+    const code = await runSelfCheck(config);
+    // On macOS stdout to a pipe is asynchronous, and exit() could cut the report short: exit once it is written out.
+    // exitCode as well, for a process that ends before the callback, for example on a closed pipe.
+    process.exitCode = code;
+    process.stdout.write('', () => process.exit(code));
     return;
   }
   setupStdioFiltering();

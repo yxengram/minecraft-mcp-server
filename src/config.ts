@@ -28,11 +28,19 @@ export interface ServerConfig {
    * that give up on a request after 60 s. wait-for-event keeps its own cap of 55 s.
    */
   callLimitSeconds: number;
+  /**
+   * --check (BLUEPRINT E-042): join the world once, check the key, print a report on stdout and exit, instead of
+   * serving MCP. src/self-check.ts runs it.
+   */
+  check: boolean;
 }
 
-/** An unknown argument or an invalid value (BLUEPRINT E-023). parseConfig throws it instead of printing or exiting. */
+/**
+ * An unknown argument or an invalid value (BLUEPRINT E-023). parseConfig throws it instead of printing or exiting.
+ * exitCode is what src/main.ts exits with: 2 when the command line has --check (E-042), otherwise 1.
+ */
 export class ConfigError extends Error {
-  constructor(message: string) {
+  constructor(message: string, readonly exitCode: 1 | 2 = 1) {
     super(message);
     this.name = 'ConfigError';
   }
@@ -60,6 +68,10 @@ const GREETING_ERROR = `Invalid --greeting: expected one line of plain chat (not
 const MIN_CALL_LIMIT_SECONDS = 20;
 const MAX_CALL_LIMIT_SECONDS = 3600;
 const DEFAULT_CALL_LIMIT_SECONDS = 50;
+
+// E-042: a wrong option exits with 2 when the command line has --check, so a script can tell it from a failed join (1).
+const CHECK_FLAG = '--check';
+const CHECK_EXIT_CODE = 2;
 
 function quoted(value: unknown): string {
   return `"${String(value).replace(UNPRINTABLE, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`)}"`;
@@ -154,6 +166,11 @@ export function parseConfig(argv: string[] = hideBin(process.argv)): ServerConfi
       description: `How long a command that drives the bot, collect-block or lead-animal may take before it replies, in seconds (${MIN_CALL_LIMIT_SECONDS} to ${MAX_CALL_LIMIT_SECONDS}); raise it only for an MCP client that waits longer than 60 s for a reply`,
       default: DEFAULT_CALL_LIMIT_SECONDS
     })
+    .option('check', {
+      type: 'boolean',
+      description: 'Join the world once, check the OpenRouter key, print a report and exit (0: joined, 1: could not join, 2: wrong options) instead of serving MCP',
+      default: false
+    })
     .strict()
     .check(checkArguments)
     .fail((message, error) => {
@@ -162,7 +179,8 @@ export function parseConfig(argv: string[] = hideBin(process.argv)): ServerConfi
       const bare = new Set(argv.filter((arg) => !arg.startsWith('-')));
       throw new ConfigError(
         text.replace(/^(Unknown arguments?: )(.*)$/s, (_, head: string, list: string) =>
-          head + list.split(', ').map((item) => (bare.has(item) ? BARE_VALUE : item)).join(', '))
+          head + list.split(', ').map((item) => (bare.has(item) ? BARE_VALUE : item)).join(', ')),
+        argv.includes(CHECK_FLAG) ? CHECK_EXIT_CODE : 1
       );
     })
     .example('$0 --port 25565 --username ClaudeBot', 'Join the world opened to LAN on port 25565 as ClaudeBot')

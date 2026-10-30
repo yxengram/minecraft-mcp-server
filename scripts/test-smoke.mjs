@@ -285,6 +285,26 @@ async function checkConnectionError(client) {
   }
 }
 
+// The self-check (E-042): on a port nothing listens on, --check joins nowhere. It exits with 1 within 10 s, and stdout
+// holds only its report: lines that start with OK, WARN or FAIL, then Ready or Not ready, never JSON-RPC. The FAIL line
+// carries the E-028 explanation.
+async function checkSelfCheck(entry, args, port) {
+  const run = await runCli(entry, ['--check', ...args], 'the --check run', 10000);
+  const lines = run.stdout.split(/\r?\n/).filter(line => line !== '');
+  const strays = lines.filter(line => !/^(OK |WARN |FAIL |Ready: |Not ready: )/.test(line));
+  const explained = lines.some(line => line.startsWith('FAIL ') && line.includes(`Nothing is listening on 127.0.0.1:${port}`));
+  const problems = [
+    lines.length === 0 ? 'nothing on stdout' : '',
+    strays.length > 0 ? `not a report line: ${strays.slice(0, 2).join(' | ')}` : '',
+    lines.length > 0 && !explained ? 'no FAIL line saying "Nothing is listening on 127.0.0.1:<port>"' : ''
+  ].filter(Boolean);
+  report(
+    run.code === 1 && problems.length === 0,
+    '--check on a closed port exits with 1 within 10 s, and stdout is only the report, with the FAIL of E-028',
+    [exitDetail(run), `${lines.length} stdout line(s)`, ...problems].join(', ')
+  );
+}
+
 // node:child_process rather than the SDK: Client.close() gives no exit code and sends SIGTERM after 2 s.
 async function checkShutdown(entry, args) {
   const name = 'exits with 0 within 5 s after stdin closes';
@@ -334,6 +354,7 @@ async function smoke(entryArg) {
   await checkCommandLine(entry, pkg);
   const port = await closedPort();
   const args = ['--host', '127.0.0.1', '--port', String(port), '--username', 'SmokeTest'];
+  await checkSelfCheck(entry, args, port);
   await checkMcp(entry, args, pkg);
   await checkShutdown(entry, args);
 }

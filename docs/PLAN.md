@@ -1650,3 +1650,15 @@
 - **对世界的影响**：实机测试照常，路标只写在临时路标文件里。
 - **文件状态**：F-047 仍为 verified（部分），加上 E-041 的用例。
 - **留给所有者**：契约要求的手工检查还没做：换一个种子不同的 LAN 世界后，list-waypoints 看不到前一个世界的路标（测试世界只有一个，代理做不了）。
+
+### 2026-10-30 M19 第 20 步：E-042 自检命令 --check（新文件 F-054 `src/self-check.ts`；Q33、Q25）
+
+- **实现**（多代理工作流：一个实现；契约、测试、安全三个角度各一个审查；一个修正。审查提出 10 条，应用 9 条，另一条与第 1 条重复）：新文件 `src/self-check.ts` 导出 runSelfCheck(config, deps?)：用只带 host、port、username 的 BotConnection 连一次（不问候、不重连），按契约的顺序写 OK、WARN、FAIL 行与最后的 Ready 或 Not ready 行，结束时 cleanup，进入世界返回 0，否则 1；有 key 时用 OpenRouterClient.checkAccess（免费的 GET /api/v1/key 加目录）核对，不发付费请求；本文件不读 OPENROUTER_API_KEY。`src/config.ts` 新增 --check，ConfigError 带 exitCode（原始 argv 含 --check 时为 2）。`src/main.ts` 在解析参数之后分支：check 模式不过滤 stdio，不创建 MCP 服务器、存储与 Autopilot，只运行自检后退出；审查发现 mineflayer 默认把 bot 的错误用 console.log 打到 stdout，所以 check 模式下 console.log、console.info、console.debug 改写到 stderr。`scripts/test-smoke.mjs` 加 (d)：对刚关闭的端口运行 --check，10 秒内以 1 退出，stdout 每行都以 OK、WARN、FAIL、Ready 或 Not ready 开头，含 “Nothing is listening …”。README 中英文在第 2、3 步之间加 “Check the connection”，选项表加 --check，单元测试数改为 1507；CHANGELOG 加两处。BLUEPRINT 的 F-049、F-051、F-053 随之更新。
+- **检查**：`npm test`（不带 key）1507 个通过（新增 27 个）；`npm run lint`、`tsc --noEmit`、`git diff --check` 无输出；`node --check scripts/test-smoke.mjs` 通过。`npm run build` 后 `npm run test:smoke` 14 项全部 PASS（新增 (d)）。在 dist 上实测：
+  - 无 key：`node dist/main.js --check --port 63320` 以 0 退出，输出 `OK joined localhost:63320 as LLMBot (offline account); spawned at (…) in overworld`、`OK Minecraft 26.1.2 (protocol 775)`、`WARN OPENROUTER_API_KEY is not set: the instinct will be offline and the bot will not react to dangers by itself`、`Ready: use the same --host, --port and --username in your MCP client config; the instinct is offline (no OPENROUTER_API_KEY)`；stderr 3 行日志。
+  - 有 key（`OPENROUTER_API_KEY="$(cat ~/.minecraft-mcp-server/openrouter-key)"`）：以 0 退出，`OK OPENROUTER_API_KEY is set`、`OK decision model perplexity/pplx-decider-v1.2-20261016: key accepted`、`Ready: …`；用 `grep -c -F -f` 核对 stdout 与 stderr 中含 key 的行数为 0（没有打印 key）。
+  - 刚关闭的端口：以 1 退出，`FAIL Cannot connect to Minecraft server at 127.0.0.1:<port>: Nothing is listening on 127.0.0.1:<port>. … (ECONNREFUSED)`，最后一行 `Not ready: Nothing is listening …`。
+  - `--check --port 0`：以 2 退出，stderr 一行 “minecraft-mcp-server: Invalid --port: expected a whole number from 1 to 65535; run with --help for the options”。
+  - 全量实机 `npm run test:live:world -- 63320 --allow-world-changes`（`src/main.ts` 改了，所以照常跑）：无 key、有 key 各一轮 41 步全部 ok，覆盖 67/67。
+- **对世界的影响**：两次 --check 时名为 LLMBot 的离线 bot 进入测试世界又离开（其他玩家会看到加入与离开）；实机测试照常。
+- **文件状态**：F-054 由 placeholder 改为 verified；F-047 加上 F-054 的用例；F-051 加上 (d)，CI 还没跑。

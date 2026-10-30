@@ -44,7 +44,7 @@
 - **聊天分拣：**决策模型对聊天分类，只有发给机器人的消息才会以 `chat_request` 事件唤醒 LLM。除非 LLM 允许，任何人都不能通过聊天指挥机器人。
 
 ### 3. 在游戏里实测，而不只是纸面
-- 1480 个单元测试。
+- 1507 个单元测试。
 - 实机测试：在真实服务器上逐一运行全部 67 个工具。
 - 情景测试：比较有无 Autopilot 时机器人的表现，包括僵尸潮、空手被僵尸追赶、苦力怕、饥饿、着火、溺水、有意潜水、岩浆岸边和聊天。
 - 普通难度下的 10 天生存测试：机器人度过了全部十个夜晚，没有死亡，并建起一座 7×7 的房子，带门、八扇玻璃窗、床、箱子、工作台、熔炉和火把。
@@ -131,6 +131,33 @@ npm run build
 
 这一栏留空时，Minecraft 每次另选一个端口，并在聊天栏显示，英文界面是 `Local game hosted on port N`。把这个 N 写进 `--port`，然后完全重启客户端：服务器只在启动时读取 `--port`。
 
+### 检查连接
+改客户端配置之前，可以先在终端里确认机器人能进入世界、key 可用。世界对局域网开放后，在第 1 步的文件夹里运行：
+
+```bash
+node dist/main.js --check --port <局域网端口>
+```
+
+`--host`、`--port`、`--username` 用第 3 步里要写的同样的值。要一并核对 key，先在同一个终端里设好 `OPENROUTER_API_KEY`；key 不会被打印。机器人进入世界一次后马上离开，所以其他玩家会看到它加入和离开。即使给了 `--greeting`，它也不在聊天里说话。有 key 时，自检像服务器启动时那样向 OpenRouter 核对 key 和决策模型，不发决策请求。它不写任何文件。
+
+报告写到 stdout，每项一行，以 `OK`、`WARN` 或 `FAIL` 开头；最后一行是 `Ready: use the same --host, --port and --username in your MCP client config` 或 `Not ready: <原因>`。例如：
+
+```text
+OK joined localhost:25565 as ClaudeBot (offline account); spawned at (12, 64, -30) in overworld
+OK Minecraft 26.1.2 (protocol 775)
+OK OPENROUTER_API_KEY is set
+OK decision model perplexity/pplx-decider-v1.2-20261016: key accepted
+Ready: use the same --host, --port and --username in your MCP client config
+```
+
+日志照常写到 stderr。退出码说明结果：
+
+| 退出码 | 含义 |
+|---|---|
+| `0` | 机器人进入了世界。`WARN` 行（服务器是别的 Minecraft 版本、名字可能被有些服务器拒绝、没有 key、key 不可用）不改变退出码。本能会离线时（没有 key、key 被拒绝、账户没有余额、模型不在目录中），`Ready:` 一行末尾加上 `; the instinct is offline (<原因>)` |
+| `1` | 机器人没能进入世界。`FAIL` 一行说明原因，说法与[机器人连不上](#机器人连不上)中的相同 |
+| `2` | 选项有误。stderr 上的那一行说明是哪个 |
+
 ### 3. 在 MCP 客户端中添加服务器
 在 Claude Desktop 中进入 `Settings → Developer → Edit Config`，在 `claude_desktop_config.json` 中添加：
 
@@ -169,12 +196,13 @@ npm run build
 | `--allow-commands` | 关闭 | 允许 `send-chat` 执行服务器命令（`/give`、`/fill`、`/tp` 等）；聊天和 `/msg`、`/tell`、`/w`、`/me`、`/teammsg`、`/tm` 始终可用 |
 | `--greeting` | 不设：机器人进入世界时什么都不说 | 机器人每次进入世界时在聊天里说的一句话（复活时不说）：一行普通聊天，最多 256 个字符，不以 `/` 开头 |
 | `--call-limit-seconds` | `50` | 驱动 bot 的命令以及 `collect-block`、`lead-animal` 最多用多久必须回复，20～3600 秒；见[时限](#时限)。只在 MCP 客户端等待回复超过 60 秒时才调大 |
+| `--check` | 关闭 | 进入世界一次、核对 key、打印报告后退出，不提供 MCP 服务；见[检查连接](#检查连接) |
 | `--help`、`-h` | — | 显示选项后退出 |
 | `--version` | — | 显示版本号后退出 |
 
 API key 只从环境变量 `OPENROUTER_API_KEY` 读取，不要把它写进仓库里的任何文件。
 
-服务器启动时检查选项。未知的选项、不是 1～65535 之间整数的 `--port`、空的 `--host`，为空、超过 16 个字符、含空格或控制字符的 `--username`，为空、超过 256 个字符、含换行或控制字符、以 `/` 开头的 `--greeting`，或者不是 20～3600 之间整数的 `--call-limit-seconds`，都会让服务器在 stderr 写一行错误，并在连接之前以 1 退出。这时 MCP 客户端显示这个服务器启动失败，这一行在客户端为它保存的日志里（见[去哪里看](#去哪里看)）。通过了检查、但不是 3～16 个字母、数字或下划线的名字（例如 `Bot-1`、`ab` 或中文名字）只在这份日志里得到一条警告，因为有些服务器会拒绝这样的名字。
+服务器启动时检查选项。未知的选项、不是 1～65535 之间整数的 `--port`、空的 `--host`，为空、超过 16 个字符、含空格或控制字符的 `--username`，为空、超过 256 个字符、含换行或控制字符、以 `/` 开头的 `--greeting`，或者不是 20～3600 之间整数的 `--call-limit-seconds`，都会让服务器在 stderr 写一行错误，并在连接之前以 1 退出（带 `--check` 时为 2）。这时 MCP 客户端显示这个服务器启动失败，这一行在客户端为它保存的日志里（见[去哪里看](#去哪里看)）。通过了检查、但不是 3～16 个字母、数字或下划线的名字（例如 `Bot-1`、`ab` 或中文名字）只在这份日志里得到一条警告，因为有些服务器会拒绝这样的名字。
 
 ### 4. 开始玩
 让 LLM 在 Minecraft 里做事。几个习惯能让它玩得好得多：
@@ -195,7 +223,7 @@ API key 只从环境变量 `OPENROUTER_API_KEY` 读取，不要把它写进仓�
 ### 去哪里看
 - **工具回复。**机器人断开时调用任何工具，都会先重新连接；连不上时，回复会说明原因。
 - **`get-events`。**机器人进入游戏之后被踢出，会记为一个 `kicked` 事件。
-- **MCP 客户端的日志。**服务器把日志写到 stderr，格式是 `<时间> [minecraft] [mcp-server] [<级别>] <内容>`，例如 `Bot error [ECONNREFUSED]: …` 或 `Bot was kicked from server: …`。Claude Desktop 把它保存在 `~/Library/Logs/Claude/mcp-server-<key>.log`（macOS）和 `%APPDATA%\Claude\logs\mcp-server-<key>.log`（Windows），其中 `<key>` 是这个服务器在 `mcpServers` 下的键名（上面的例子里是 `minecraft`）。选项有误时，服务器改为只写一行不带时间的 `<命令名>: <错误>; run with --help for the options`，然后以 1 退出。
+- **MCP 客户端的日志。**服务器把日志写到 stderr，格式是 `<时间> [minecraft] [mcp-server] [<级别>] <内容>`，例如 `Bot error [ECONNREFUSED]: …` 或 `Bot was kicked from server: …`。Claude Desktop 把它保存在 `~/Library/Logs/Claude/mcp-server-<key>.log`（macOS）和 `%APPDATA%\Claude\logs\mcp-server-<key>.log`（Windows），其中 `<key>` 是这个服务器在 `mcpServers` 下的键名（上面的例子里是 `minecraft`）。选项有误时，服务器改为只写一行不带时间的 `<命令名>: <错误>; run with --help for the options`，然后以 1 退出（带 `--check` 时为 2）。
 
 ### 机器人连不上
 回复以 `Cannot connect to Minecraft server at <host>:<port>:` 开头，接着说明出了什么问题、该怎么做，括号里是依据的错误代码或消息。回复是英文的，下表原样引用；`<host>`、`<port>`、`<name>` 分别代表你的 `--host`、`--port`、`--username`。
@@ -420,7 +448,7 @@ API key 只从环境变量 `OPENROUTER_API_KEY` 读取，不要把它写进仓�
 ## 测试
 
 ```bash
-npm test             # 1480 个单元测试
+npm test             # 1507 个单元测试
 npm run lint
 npm run test:live -- <局域网端口>                                 # 对世界做只读检查
 npm run test:live:world -- <局域网端口> --allow-world-changes      # 在开启作弊的一次性世界中运行每个工具

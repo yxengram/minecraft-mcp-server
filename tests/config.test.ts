@@ -370,3 +370,58 @@ test('E-038: a bad --call-limit-seconds is a ConfigError that prints nothing, do
     sandbox.restore();
   }
 });
+
+// ---------------------------------------------------------------------------------------------------------------
+// E-042: --check, off by default. A wrong option is the same ConfigError as without it, and src/main.ts writes the
+// same one stderr line, but exits with 2 when the command line has --check and with 1 otherwise. The exit code is
+// carried by the error, so these cases need no real exit.
+// ---------------------------------------------------------------------------------------------------------------
+
+test('E-042: check is false by default and true with --check', (t) => {
+  t.is(parseConfig([]).check, false);
+  t.is(parseConfig(['--check']).check, true);
+  t.is(parseConfig(['--no-check']).check, false);
+});
+
+test('E-042: --check goes together with --host, --port and --username, which keep their meaning', (t) => {
+  const config = parseConfig(['--check', '--host', '127.0.0.1', '--port', '63320', '--username', 'SmokeTest']);
+  t.true(config.check);
+  t.is(config.host, '127.0.0.1');
+  t.is(config.port, 63320);
+  t.is(config.username, 'SmokeTest');
+  t.is(parseConfig(['--port', '63320', '--check']).check, true);
+});
+
+for (const argv of [['--port', '0'], ['--hots', 'x']]) {
+  test(`E-042: ${JSON.stringify(['--check', ...argv])} fails with exit code 2, ${JSON.stringify(argv)} with 1`, (t) => {
+    const withCheck = configError(t, ['--check', ...argv]);
+    const without = configError(t, argv);
+    t.is(withCheck?.exitCode, 2);
+    t.is(without?.exitCode, 1);
+    t.is(withCheck?.message, without?.message, 'the same error text');
+  });
+}
+
+test('E-042: --check after the wrong option also fails with 2', (t) => {
+  t.is(configError(t, ['--port', '0', '--check'])?.exitCode, 2);
+  t.is(configError(t, ['--username', 'Bad Name', '--check'])?.exitCode, 2);
+});
+
+test('E-042: a ConfigError with --check is thrown without printing anything or exiting', (t) => {
+  const sandbox = sinon.createSandbox();
+  const exit = sandbox.stub(process, 'exit');
+  const consoleError = sandbox.stub(console, 'error');
+  const consoleLog = sandbox.stub(console, 'log');
+  const stderrWrite = sandbox.stub(process.stderr, 'write');
+  try {
+    for (const argv of [['--check', '--port', '0'], ['--check', '--hots', 'x']]) {
+      t.throws(() => parseConfig(argv), { instanceOf: ConfigError });
+    }
+    t.false(exit.called, 'process.exit was called');
+    t.false(consoleError.called, 'console.error was called');
+    t.false(consoleLog.called, 'console.log was called');
+    t.false(stderrWrite.called, 'process.stderr.write was called');
+  } finally {
+    sandbox.restore();
+  }
+});
