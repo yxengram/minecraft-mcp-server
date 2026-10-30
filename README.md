@@ -2,7 +2,7 @@
 
 **English** | [简体中文](README.zh-CN.md)
 
-A Minecraft bot that a large language model (for example Claude) plays through the [Model Context Protocol](https://modelcontextprotocol.io) (MCP). The bot runs on [Mineflayer](https://github.com/PrismarineJS/mineflayer). The LLM sees the world and acts in it through 66 MCP tools.
+A Minecraft bot that a large language model (for example Claude) plays through the [Model Context Protocol](https://modelcontextprotocol.io) (MCP). The bot runs on [Mineflayer](https://github.com/PrismarineJS/mineflayer). The LLM sees the world and acts in it through 67 MCP tools.
 
 What sets this fork apart is the **Autopilot**: background tasks for long jobs, and an **instinct** that reacts to danger within about a second. The instinct pairs a fast *decision model* with code that carries out the chosen move. Without it, the LLM would have to notice every creeper in time by itself.
 
@@ -25,8 +25,8 @@ The upstream project is a good, simple bridge: the LLM calls a tool, and the bot
 
 ## What changed
 
-### 1. More tools, and seeing like a player (23 → 66 tools)
-- **Moving:** follow or flee from an entity, stop, saved waypoints.
+### 1. More tools, and seeing like a player (23 → 67 tools)
+- **Moving:** follow or flee from an entity, stop, an emergency stop, saved waypoints.
 - **Building and mining:** collect a number of blocks, clear or fill a region, dig a tunnel, read and use containers.
 - **Interacting:** right-click blocks and entities, trade with villagers, sleep and wake, ride and dismount, attack.
 - **Perception:**
@@ -44,8 +44,8 @@ The upstream project is a good, simple bridge: the LLM calls a tool, and the bot
 - **Chat triage:** the decision model sorts chat. Only messages meant for the bot wake the LLM, as `chat_request` events. Nobody can command the bot by chat unless the LLM allows it.
 
 ### 3. Tested in the game, not only on paper
-- 1440 unit tests.
-- A live test that exercises all 66 tools against a real server.
+- 1460 unit tests.
+- A live test that exercises all 67 tools against a real server.
 - A scenario test that compares the bot with and without the Autopilot: zombie waves, being chased by zombies with bare hands, creepers, hunger, fire, drowning, diving on purpose, a lava shore, chat.
 - A 10-day survival test on Normal difficulty. The bot survived all ten nights without dying and built a 7×7 house with a door, eight glass windows, a bed, a chest, a crafting table, a furnace and torches.
 - A 5-day survival test on Hard difficulty, from an empty inventory. The bot survived all five nights without dying, sleeping in a sealed pit with a bed, and ended with iron armor and 14 cooked meals.
@@ -249,7 +249,7 @@ An `OFFLINE` comes first: the line shows it even when the instinct is also turne
 
 ---
 
-## Tools (66)
+## Tools (67)
 
 A command that moves or uses the bot's body stops when the bot dies, and its reply says where and why the bot died and where it respawned. The pathfinder keeps away from lava shores when it can and never bridges lava.
 
@@ -272,6 +272,7 @@ An MCP client that asks for progress (a request with a `progressToken`; the Type
 - `look-at`: look at coordinates
 - `jump`: jump
 - `stop-pathfinding`: stop moving, and cancel the current task
+- `stop-all`: emergency stop. It stops every command that moves or uses the bot's body (also those waiting for their turn), `collect-block` and `lead-animal`, cancels the current task, interrupts the instinct's action and stops the pathfinder, the controls and digging. Then the instinct pauses for `pauseInstinctS` seconds (default 10, at most 300; 0 for no pause, which also ends an earlier one) and meanwhile handles only lava, drowning, low air and swelling creepers; `get-policy` shows how long the pause has left. Queries and `wait-for-event` go on. The reply lists what was stopped and the bot's state, for example `Stopped: task t5 gather (cancelled), move-to-position (stopped after 12.3s), instinct action flee (interrupted). The instinct is paused for 10 s (lava, drowning, low air and swelling creepers are still handled). The bot is at (x, y, z), health H, food F; hostile mobs within 16 blocks: …`, or starts with `Nothing was running`; each stopped command replies `<name> was stopped by stop-all after N s at (x, y, z)`. An instinct action started during the pause for one of those dangers keeps the body, and the reply names it. If anything else still holds the body after 2.5 seconds, the reply is an error that says `still held by <holder>`; it is also an error when a command that moves or uses the body, `collect-block` or `lead-animal` has still not replied by then
 - `follow-entity`: keep following a player or mob (as a task)
 - `flee-from`: run from an entity to a safe distance (as a task)
 - `fly-to`: fly to coordinates (creative)
@@ -413,7 +414,7 @@ The policy lives in memory only, and goes back to these defaults whenever the bo
 ## Testing
 
 ```bash
-npm test             # 1440 unit tests
+npm test             # 1460 unit tests
 npm run lint
 npm run test:live -- <LAN_PORT>                                 # read-only check against a world
 npm run test:live:world -- <LAN_PORT> --allow-world-changes      # every tool, in a throwaway world with cheats on

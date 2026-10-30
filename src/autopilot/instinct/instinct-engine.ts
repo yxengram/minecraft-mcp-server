@@ -37,11 +37,22 @@ export interface InstinctStatus {
   enabled: boolean;
   /** Why the last request got no decision, while that is still the latest news. */
   offline: string | null;
-  running: { action: OptionId; ms: number; reason: string } | null;
+  /** `duringPause`: started while a pause (E-040) was on, so for one of PAUSE_CUES. */
+  running: { action: OptionId; ms: number; reason: string; duringPause: boolean } | null;
   lastDecision: string | null;
   /** Per-tick evaluation cost (invariant I6). */
   timing: { ticks: number; averageMs: number; maxMs: number };
+  /** What is left of a pause (E-040), in milliseconds; 0 when the instinct is not paused. */
+  pausedMs: number;
+  /** Who paused it ('stop-all'), while it is paused. */
+  pausedBy: string | null;
 }
+
+// During a pause (E-040, stop-all) only these cues count; the others are taken as absent: no request, no lease. They are
+// the ones that kill within seconds and need no LLM to see it: lava, drowning, low air and a swelling creeper.
+export const PAUSE_CUES: CueKind[] = ['in_lava', 'trapped_underwater', 'low_air', 'creeper_swelling'];
+// The longest pause (I8).
+export const MAX_PAUSE_MS = 300_000;
 
 const FULL_AIR_TICKS = 300;
 
@@ -67,6 +78,14 @@ interface Running {
   /** Health when it started and hits taken since: whether the running action is working (E-016). */
   startHealth: number | null;
   hits: number;
+  /** Started during a pause (E-040), so for one of PAUSE_CUES; stop-all leaves such an action running. */
+  duringPause: boolean;
+}
+
+interface Pause {
+  until: number;
+  reason: string;
+  timer: ReturnType<typeof setTimeout>;
 }
 
 // The instinct's recent actions and how they turned out, as facts for the model (E-016): whether a mob the bot ran
@@ -182,6 +201,11 @@ export class InstinctEngine {
   private recentActions: RecentAction[] = [];
   // The current danger episode: what it is about, how many times the model was asked, and the last action's result.
   private episodeInfo = { kinds: '', rounds: 0, result: null as string | null };
+  // A pause (E-040): only PAUSE_CUES count until it ends. It lives in this engine only, so a rejoin (a new engine)
+  // ends it. Requests numbered up to `seqBeforePause` were sent before the latest pause began; their answers are not
+  // acted on.
+  private pause: Pause | null = null;
+  private seqBeforePause = 0;
   private readonly onTick = () => this.tick();
   private readonly onDeath = () => {
     this.diedSinceSpawn = true;
@@ -228,6 +252,9 @@ export class InstinctEngine {
 
   stop(reason = 'stopped'): void {
     if (this.running) this.finish(this.running, 'interrupted', reason);
+    // The engine is done with: its pause goes with it, without an event (a rejoin starts a new engine, unpaused).
+    if (this.pause) clearTimeout(this.pause.timer);
+    this.pause = null;
     if (this.stopped) return;
     this.stopped = true;
     this.options.bot.removeListener('physicsTick', this.onTick);
@@ -235,14 +262,69 @@ export class InstinctEngine {
     this.options.bot.removeListener('spawn', this.onSpawn);
   }
 
+  /**
+   * Pauses the instinct for `ms` (at most MAX_PAUSE_MS) on behalf of `reason`, e.g. 'stop-all' (E-040): until then only
+   * PAUSE_CUES count. A new pause replaces the one before; 0 ends it. The requests already sent are not acted on, and
+   * the danger so far counts as over, so a PAUSE_CUES cue that is still there is asked about at once.
+   */
+  pauseFor(ms: number, reason: string): void {
+    const length = Math.min(MAX_PAUSE_MS, Math.max(0, Math.round(Number.isFinite(ms) ? ms : 0)));
+    if (length === 0) {
+      this.endPause();
+      return;
+    }
+    if (this.pause) clearTimeout(this.pause.timer);
+    const now = Date.now();
+    const timer = setTimeout(() => this.endPause(), length);
+    // A pause must not keep the process (or a test worker) alive.
+    (timer as { unref?: () => void }).unref?.();
+    this.pause = { until: now + length, reason, timer };
+    this.seqBeforePause = this.requestSeq;
+    // The answer on its way may be about a cue the pause hides: nothing waits for it any more.
+    this.inFlight = false;
+    this.inFlightCues = [];
+    if (this.attention.inEpisode()) this.endEpisode(now);
+    this.attention.reset();
+    this.options.events.addEvent('instinct', `instinct paused for ${Math.round(length / 1000)} s by ${reason} (urgent dangers are still handled)`);
+  }
+
+  /**
+   * Ends the running action, if any, as interrupted (E-040); the next evaluation decides again as usual. Returns the
+   * action that was interrupted.
+   */
+  interrupt(reason: string): OptionId | null {
+    const run = this.running;
+    if (!run) return null;
+    this.finish(run, 'interrupted', reason);
+    return run.option.id;
+  }
+
+  /** Whether a pause is on at `now`; one that has run out ends here, if its timer has not ended it yet. */
+  private paused(now = Date.now()): boolean {
+    if (this.pause && now >= this.pause.until) this.endPause();
+    return this.pause !== null;
+  }
+
+  private endPause(): void {
+    const pause = this.pause;
+    if (!pause) return;
+    clearTimeout(pause.timer);
+    this.pause = null;
+    this.options.events.addEvent('instinct', `instinct watching again after the ${pause.reason} pause`);
+  }
+
   status(): InstinctStatus {
     const run = this.running;
+    const now = Date.now();
+    const paused = this.paused(now);
     return {
       enabled: this.options.getPolicy().instinct.enabled,
       offline: this.offline,
-      running: run ? { action: run.option.id, ms: Date.now() - run.started, reason: run.reason } : null,
+      running: run ? { action: run.option.id, ms: now - run.started, reason: run.reason, duringPause: run.duringPause } : null,
       lastDecision: this.lastDecision,
-      timing: { ticks: this.stats.ticks, averageMs: this.stats.ticks ? this.stats.totalMs / this.stats.ticks : 0, maxMs: this.stats.maxMs }
+      timing: { ticks: this.stats.ticks, averageMs: this.stats.ticks ? this.stats.totalMs / this.stats.ticks : 0, maxMs: this.stats.maxMs },
+      pausedMs: paused ? this.pause!.until - now : 0,
+      pausedBy: paused ? this.pause!.reason : null
     };
   }
 
@@ -277,6 +359,8 @@ export class InstinctEngine {
       this.options.log?.('warn', `Instinct could not read the situation: ${error}`);
       return;
     }
+    // During a pause the other cues are as if they were not there: no request, so no lease for them (I8).
+    if (this.paused(now)) cues = cues.filter(cue => PAUSE_CUES.includes(cue.kind));
     const wasInEpisode = this.attention.inEpisode();
     const episode = this.attention.episode;
     // The episode lasts while an instinct action runs, even if its cue is hidden meanwhile (a fight hides 'attacked').
@@ -374,6 +458,8 @@ export class InstinctEngine {
     const hedge = cues.some(cue => HEDGE_CUES.includes(cue.kind));
     this.decide(state, instinctQuestions(menu, { hasTask }), hedge, seq, episode)
       .then(result => {
+        // Asked before a pause began (E-040): the cues it was about may be hidden now, so the answer is dropped.
+        if (seq <= this.seqBeforePause) return;
         if (seq !== this.requestSeq) {
           // A newer request about a new cue is out: this answer only goes on record.
           if (result.ok && result.answers.action?.type === 'choice') {
@@ -407,8 +493,8 @@ export class InstinctEngine {
         clearTimeout(timer);
         resolve(result);
       };
-      const current = () => !this.stopped && seq === this.requestSeq && this.options.getPolicy().instinct.enabled &&
-        this.attention.inEpisode() && this.attention.episode === episode;
+      const current = () => !this.stopped && seq === this.requestSeq && seq > this.seqBeforePause &&
+        this.options.getPolicy().instinct.enabled && this.attention.inEpisode() && this.attention.episode === episode;
       const launch = (isSecond: boolean) => {
         pending++;
         (isSecond ? this.options.decide(state, questions, { second: true }) : this.options.decide(state, questions))
@@ -589,7 +675,8 @@ export class InstinctEngine {
       finished: false,
       watch,
       startHealth: typeof bot.health === 'number' ? bot.health : null,
-      hits: 0
+      hits: 0,
+      duringPause: this.paused()
     };
     this.running = running;
     macro.run({ bot, signal: controller.signal, target: option.target ?? null, entityId: option.entityId, policy: this.options.getPolicy() })

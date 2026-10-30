@@ -11,6 +11,9 @@ import type mineflayer from 'mineflayer';
 // After a death or another abort, how long a stopped command may take to give up before its reply is replaced and
 // its lease released (E-018, E-027).
 export const DEATH_SETTLE_MS = 2000;
+// How long stop-all waits for the body to be free (E-040): longer than DEATH_SETTLE_MS, or a stopped command that
+// takes all of it to let go would be reported as still holding the body.
+export const STOP_SETTLE_MS = 2500;
 // How long to wait for the respawn, to say where the bot is now.
 export const RESPAWN_WAIT_MS = 5000;
 // Damage this recent is named as the likely cause of a death.
@@ -46,6 +49,9 @@ export const BODY_TOOLS = new Set([
   'read-container', 'container-deposit', 'container-withdraw',
   'clear-region', 'fill-region', 'dig-tunnel'
 ]);
+
+// Tools that are not body tools but run a task and wait for it; stop-all stops them too, and their task (E-040).
+const TASK_WAIT_TOOLS = new Set(['collect-block', 'lead-animal']);
 
 /** Why a tool call was stopped (E-027; ended, the bot left the game, since E-029). */
 export type AbortReason = 'death' | 'cancelled' | 'budget' | 'stop-all' | 'ended';
@@ -115,6 +121,14 @@ export interface InFlightCall {
   readonly queued: boolean;
   /** Stops the call: the body first when this call drives it, then the signal. Only the first reason counts. */
   abort(reason: AbortReason): void;
+}
+
+/** A call stopAll stopped (E-040): its name, how long it had run, and whether it was waiting for the lease. */
+export interface StoppedCall {
+  readonly call: InFlightCall;
+  readonly name: string;
+  readonly ms: number;
+  readonly queued: boolean;
 }
 
 /** A notifications/progress for the request that carried `progressToken` (E-039); no total is given. */
@@ -307,6 +321,29 @@ export class ToolFactory {
     return [...this.calls];
   }
 
+  /** The calls stop-all stops (E-040): body calls, queued ones included, and collect-block and lead-animal. */
+  static stoppable(call: InFlightCall): boolean {
+    return call.body || TASK_WAIT_TOOLS.has(call.name);
+  }
+
+  /**
+   * Stops every body call in flight, the ones waiting for the lease included, and collect-block and lead-animal, which
+   * cancel the task they started (E-040). Queries, wait-for-event and stop-all itself go on. A call that was already
+   * stopped for another reason is left to that. Each reply then reads "<name> was stopped by stop-all after N s at
+   * (x, y, z)". Returns what was stopped, with the times and queue state from just before.
+   */
+  stopAll(reason: AbortReason): StoppedCall[] {
+    const now = Date.now();
+    const stopped: StoppedCall[] = [];
+    for (const call of [...this.calls]) {
+      if (!ToolFactory.stoppable(call) || call.signal.aborted) continue;
+      stopped.push({ call, name: call.name, ms: now - call.started, queued: call.queued });
+    }
+    // All are aborted before any lets go of the lease, so a command waiting in the queue cannot take it in between.
+    for (const { call } of stopped) call.abort(reason);
+    return stopped;
+  }
+
   registerTool(
     name: string,
     description: string,
@@ -333,8 +370,13 @@ export class ToolFactory {
         if (body) {
           return await this.runWithBody(call, () => executor(parsedArgs, call.ctx));
         }
-        return await executor(parsedArgs, call.ctx);
+        const response = await executor(parsedArgs, call.ctx);
+        // collect-block and lead-animal stopped by stop-all have cancelled their task by now; the reply is stop-all's
+        // as for a body command (E-040).
+        if (call.reason === 'stop-all') return this.stopAllReply(call, this.currentBot());
+        return response;
       } catch (error) {
+        if (!body && call.reason === 'stop-all') return this.stopAllReply(call, this.currentBot());
         return this.createErrorResponse(error as Error);
       }
     };
@@ -476,11 +518,8 @@ export class ToolFactory {
         // reaches the client.
         return this.createErrorResponse(
           `The bot left the game during ${name} (${call.endedBecause}); the command was stopped. The next tool call reconnects`);
-      case 'stop-all': {
-        const text = `${name} was stopped by stop-all after ${seconds} s at ${at}`;
-        this.events?.addEvent('command', text);
-        return this.createErrorResponse(text);
-      }
+      case 'stop-all':
+        return this.stopAllReply(call, bot);
       case 'cancelled':
       default: {
         // The SDK drops the reply to a cancelled request, so the event is what the LLM can read later.
@@ -491,6 +530,14 @@ export class ToolFactory {
         return this.createErrorResponse(text);
       }
     }
+  }
+
+  /** The reply of a call stop-all stopped (E-040), also written as a `command` event. */
+  private stopAllReply(call: ToolCall, bot: mineflayer.Bot | null): McpResponse {
+    const seconds = (((call.abortedAt ?? Date.now()) - call.started) / 1000).toFixed(1);
+    const text = `${call.name} was stopped by stop-all after ${seconds} s at ${cellText(bot?.entity?.position)}`;
+    this.events?.addEvent('command', text);
+    return this.createErrorResponse(text);
   }
 
   /**
@@ -640,8 +687,11 @@ function untilAborted(signal: AbortSignal): Promise<void> {
   });
 }
 
-/** Stops the pathfinder, the controls and digging; each part on its own, so one failing does not skip the rest. */
-function stopBody(bot: mineflayer.Bot): void {
+/**
+ * Stops the pathfinder, the controls and digging; each part on its own, so one failing does not skip the rest. Only for
+ * a body nobody else holds (G4); stop-all uses it once the lease is free (E-040).
+ */
+export function stopBody(bot: mineflayer.Bot): void {
   const parts = [() => stopPathfinder(bot), () => bot.clearControlStates?.(), () => bot.stopDigging?.()];
   for (const stop of parts) {
     try {

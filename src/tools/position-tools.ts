@@ -3,7 +3,8 @@ import mineflayer from 'mineflayer';
 import pathfinderPkg from 'mineflayer-pathfinder';
 const { goals } = pathfinderPkg;
 import { Vec3 } from 'vec3';
-import { REPLY_MARGIN_MS, ToolFactory, allowFor, defaultLimitMs, type ToolContext } from '../tool-factory.js';
+import { REPLY_MARGIN_MS, STOP_SETTLE_MS, ToolFactory, allowFor, defaultLimitMs, stopBody, type ToolContext } from '../tool-factory.js';
+import { formatStat } from '../format.js';
 import { coerceCoordinates } from './coordinate-utils.js';
 import {
   AbortError, MoveTimeout, PORTAL_WAIT_MS, abortError, gotoWithTimeout, stopPathfinder, arrivalProblem, portalReport, throwIfAborted,
@@ -12,6 +13,7 @@ import {
 import type { Autopilot } from '../autopilot/autopilot.js';
 import { enclosedNow } from '../autopilot/hazards.js';
 import { assessThreats } from '../autopilot/threats.js';
+import { MAX_PAUSE_MS } from '../autopilot/instinct/instinct-engine.js';
 
 type Direction = 'forward' | 'back' | 'left' | 'right';
 
@@ -73,6 +75,12 @@ export function moveTimeoutDefault(callLimitMs: number): string {
   return `default: about ${callLimitMs - REPLY_MARGIN_MS - PORTAL_WAIT_MS}, so that the reply arrives within ${Math.round(callLimitMs / 1000)} s; ` +
     'a longer timeout needs an MCP client that waits that long';
 }
+
+// stop-all (E-040): the instinct's pause unless pauseInstinctS says otherwise, and how often it looks whether the body
+// is free while it waits (at most STOP_SETTLE_MS).
+export const DEFAULT_PAUSE_INSTINCT_S = 10;
+const MAX_PAUSE_INSTINCT_S = MAX_PAUSE_MS / 1000;
+const STOP_POLL_MS = 50;
 
 /** From the bot's block to the target's block, in blocks. */
 function cellDistance(position: Vec3, target: { x: number; y: number; z: number }): number {
@@ -233,6 +241,78 @@ export function registerPositionTools(factory: ToolFactory, getBot: () => minefl
       stopPathfinder(bot);
       bot.clearControlStates();
       return factory.createResponse(task ? `Stopped all movement and cancelled task ${task.id} (${task.behavior})` : "Stopped all movement");
+    }
+  );
+
+  // The emergency stop (E-040, invariant I8). Not a body tool: it takes no lease, so it never queues behind what it is
+  // to stop. The instinct is paused first and the task cancelled before the instinct's action ends, so that when a
+  // stopped command lets go of the body nobody is left to take it over (as in Autopilot.unbind).
+  factory.registerTool(
+    "stop-all",
+    "Emergency stop: stops every command that moves or uses the bot's body (also those waiting for their turn), collect-block and lead-animal, cancels the current task, interrupts the instinct's action and stops the pathfinder. " +
+      "The instinct then pauses for pauseInstinctS seconds, handling only lava, drowning, low air and swelling creepers. Queries and wait-for-event go on. The reply lists what was stopped and the bot's state",
+    {
+      pauseInstinctS: z.number().int().min(0).max(MAX_PAUSE_INSTINCT_S).optional().describe(
+        `How long the instinct pauses, in seconds (0-${MAX_PAUSE_INSTINCT_S}, default: ${DEFAULT_PAUSE_INSTINCT_S}); 0 does not pause it and ends an earlier pause`
+      )
+    },
+    async ({ pauseInstinctS = DEFAULT_PAUSE_INSTINCT_S }: { pauseInstinctS?: number }) => {
+      const bot = getBot();
+      const autopilot = getAutopilot?.();
+      // Without the Autopilot there is no task, instinct or lease: only the commands and the body are stopped.
+      const ready = autopilot?.isReady() ? autopilot : null;
+      const arbiter = ready?.arbiter ?? null;
+      // Read first: a stopped collect-block cancels its own task.
+      const task = ready?.tasks.currentTask() ?? null;
+
+      // (1) The pause, (2) the commands, (3) the task, (4) the instinct's action; all before anything lets go of the body.
+      ready?.instinct.pauseFor(pauseInstinctS * 1000, 'stop-all');
+      const stopped = factory.stopAll('stop-all');
+      const cancelling = task && ready!.tasks.currentTask()?.id === task.id ? ready!.tasks.cancel(task.id, 'stopped by stop-all') : Promise.resolve();
+      const interrupted = ready?.instinct.interrupt('stopped by stop-all') ?? null;
+
+      // (5) At most STOP_SETTLE_MS for the body to be free and for every body call, collect-block and lead-animal to
+      // have replied (I8): also one stopped earlier for another reason (a death, the client) and one that came in
+      // meanwhile. The one holder left alone is an instinct action started during the pause, so for an urgent danger.
+      let cancelled = false;
+      void cancelling.then(() => { cancelled = true; }, () => { cancelled = true; });
+      const lingering = () => factory.inFlight().filter(call => ToolFactory.stoppable(call));
+      const urgentHolder = () => {
+        const holder = arbiter?.holder();
+        const run = ready?.instinct.status().running ?? null;
+        return holder && run?.duringPause && holder.holder === `instinct ${run.action}` ? run : null;
+      };
+      const settled = () => cancelled && lingering().length === 0 && (!arbiter?.holder() || urgentHolder() !== null);
+      const deadline = Date.now() + STOP_SETTLE_MS;
+      while (!settled() && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, STOP_POLL_MS));
+
+      const holder = arbiter?.holder() ?? null;
+      const urgent = urgentHolder();
+      // (6) Only a body nobody holds is stopped (G4).
+      if (!holder) stopBody(bot);
+
+      const items: string[] = [];
+      if (task) {
+        const final = ready!.tasks.list().history.find(record => record.id === task.id);
+        items.push(`task ${task.id} ${task.behavior} (${final?.status ?? task.status})`);
+      }
+      for (const entry of stopped) items.push(`${entry.name} (stopped after ${(entry.ms / 1000).toFixed(1)}s)`);
+      if (interrupted) items.push(`instinct action ${interrupted} (interrupted)`);
+      const problems = [
+        ...(holder && !urgent ? [`still held by ${holder.holder}`] : []),
+        // A call that is stopped but has not replied yet, or one that came in after the others were stopped.
+        ...lingering().map(call => (call.controller.signal.aborted ? `${call.name} is still stopping` : `${call.name} was called during stop-all`))
+      ];
+      const sentences = [`${items.length > 0 ? `Stopped: ${items.join(', ')}` : 'Nothing was running'}${problems.map(problem => `; ${problem}`).join('')}.`];
+      if (ready && pauseInstinctS > 0) {
+        const during = urgent ? `; instinct action ${urgent.action} started for ${urgent.reason} during the pause` : '';
+        sentences.push(`The instinct is paused for ${pauseInstinctS} s (lava, drowning, low air and swelling creepers are still handled)${during}.`);
+      }
+      const position = bot.entity?.position;
+      const at = position ? `(${Math.floor(position.x)}, ${Math.floor(position.y)}, ${Math.floor(position.z)})` : 'an unknown place';
+      sentences.push(`The bot is at ${at}, health ${formatStat(bot.health)}, food ${formatStat(bot.food)}; hostile mobs within 16 blocks: ${hostilesNear(bot)}`);
+      const text = sentences.join(' ');
+      return problems.length > 0 ? factory.createErrorResponse(text) : factory.createResponse(text);
     }
   );
 }

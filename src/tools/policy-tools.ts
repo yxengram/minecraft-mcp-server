@@ -1,6 +1,7 @@
 // Contract: docs/BLUEPRINT.md F-018: get-policy, set-policy (M3) and list-decision-models (M4). Never prints the API key (I4).
 // E-036: the decision model's health from the key check, shown the same way here, in get-observation, in the instinct
 // events and on stderr. E-037: a pause after a failure shows the same way, and the Spend line counts every request.
+// E-040: get-policy says when stop-all has paused the instinct, and for how much longer.
 import { ToolFactory } from '../tool-factory.js';
 import type { Autopilot } from '../autopilot/autopilot.js';
 import type { EventStore } from '../event-store.js';
@@ -83,6 +84,10 @@ export function registerPolicyTools(factory: ToolFactory, getAutopilot: () => Au
         const instinct = autopilot.instinct.status();
         lines.push('');
         lines.push(`Instinct: ${instinctState(autopilot)}; ${status.instinctCallsLastMinute} call(s) in the last minute`);
+        // E-040: while stop-all's pause lasts, only the urgent cues count.
+        if (instinct.pausedMs > 0) {
+          lines.push(`Instinct paused by ${instinct.pausedBy} for ${Math.ceil(instinct.pausedMs / 1000)} more s: only lava, drowning, low air and swelling creepers are handled`);
+        }
         lines.push(instinct.running ? `Instinct action running now: ${instinct.running.action} (${(instinct.running.ms / 1000).toFixed(1)}s; ${instinct.running.reason})` : 'No instinct action is running');
         if (instinct.lastDecision) lines.push(`Last instinct decision: ${instinct.lastDecision}`);
         const { ticks, averageMs, maxMs } = instinct.timing;

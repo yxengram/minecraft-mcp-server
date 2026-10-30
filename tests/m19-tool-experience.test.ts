@@ -2,26 +2,30 @@
 // expected values come from the contract and G6, not from what the code happens to print. A real McpServer and SDK
 // Client talk over InMemoryTransport.createLinkedPair, so extra.signal, notifications/cancelled and
 // notifications/progress take the SDK's own path; the bot is a stand-in, the ActionArbiter (and for collect-block the
-// TaskManager) are real.
+// TaskManager, for stop-all also the InstinctEngine) are real.
 import test, { type ExecutionContext } from 'ava';
 import sinon from 'sinon';
 import { EventEmitter } from 'node:events';
 import { Vec3 } from 'vec3';
 import minecraftData from 'minecraft-data';
+import { z } from 'zod';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import {
-  CALL_LIMIT_MS, DEATH_SETTLE_MS, PROGRESS_INTERVAL_MS, REPLY_MARGIN_MS, RESPAWN_WAIT_MS, ToolFactory, type ToolContext,
-  type ToolFactoryOptions
+  BODY_TOOLS, CALL_LIMIT_MS, DEATH_SETTLE_MS, PROGRESS_INTERVAL_MS, REPLY_MARGIN_MS, RESPAWN_WAIT_MS, STOP_SETTLE_MS, ToolFactory,
+  type ToolContext, type ToolFactoryOptions
 } from '../src/tool-factory.js';
 import { PORTAL_WAIT_MS } from '../src/tools/movement-utils.js';
 import { registerWaypointTools } from '../src/tools/waypoint-tools.js';
 import type { WaypointStore } from '../src/waypoint-store.js';
 import { ActionArbiter, PRIORITY } from '../src/autopilot/action-arbiter.js';
-import { TaskManager } from '../src/autopilot/task-manager.js';
-import { BEHAVIORS } from '../src/autopilot/autopilot.js';
-import type { Autopilot } from '../src/autopilot/autopilot.js';
+import { TaskManager, delay, type BehaviorDefinition } from '../src/autopilot/task-manager.js';
+import { Autopilot, BEHAVIORS } from '../src/autopilot/autopilot.js';
+import { InstinctEngine, MAX_PAUSE_MS, PAUSE_CUES } from '../src/autopilot/instinct/instinct-engine.js';
+import { PolicyStore } from '../src/autopilot/policy.js';
+import { OpenRouterClient, type DecisionResult } from '../src/decisions/openrouter-client.js';
+import { registerPolicyTools } from '../src/tools/policy-tools.js';
 import type { BotConnection } from '../src/bot-connection.js';
 import { EventStore } from '../src/event-store.js';
 import { registerPositionTools } from '../src/tools/position-tools.js';
@@ -112,7 +116,8 @@ type Progress = { progress: number; total?: number; message?: string };
  * what the tool factory and the tools did.
  */
 async function serve(
-  t: ExecutionContext, bot: unknown, extra: (factory: ToolFactory, stand: Record<string, unknown>) => void = () => {},
+  t: ExecutionContext, bot: unknown,
+  extra: (factory: ToolFactory, stand: Record<string, unknown>, events: EventStore) => void = () => {},
   factoryOptions: ToolFactoryOptions = {}
 ) {
   const events = new EventStore();
@@ -133,8 +138,9 @@ async function serve(
   factory.setEvents(events);
   factory.setAutopilot(() => stand as unknown as Autopilot);
   const getBot = () => bot as never;
-  // Registered before connecting: the server sets up its tool handlers on the first registration.
-  registerPositionTools(factory, getBot);
+  // Registered before connecting: the server sets up its tool handlers on the first registration. stop-all (E-040)
+  // reads the stand-in; the E-040 cases below give it a task manager and an instinct engine.
+  registerPositionTools(factory, getBot, () => stand as unknown as Autopilot);
   registerBlockTools(factory, getBot);
   registerRegionTools(factory, getBot);
   registerInteractionTools(factory, getBot);
@@ -142,7 +148,7 @@ async function serve(
   registerEventTools(factory, events, getBot);
   registerInventoryTools(factory, getBot);
   registerFurnaceTools(factory, getBot);
-  extra(factory, stand);
+  extra(factory, stand, events);
 
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   const client = new Client({ name: 'm19-tool-experience-client', version: '0.0.0' });
@@ -2065,4 +2071,734 @@ test.serial('E-039 (1): once the client cancels a call no notification goes out'
   t.is(sent.progress().length, 1, 'nothing after the cancel');
   t.is(notes.length, 1);
   t.deepEqual(s.commandEvents(), ['move-to-position was cancelled by the MCP client after 6.0 s; the bot stopped at (0, 64, 0)'], 'E-027 as before');
+});
+
+// ---------------------------------------------------------------------------------------------------------------
+// E-040: stop-all, the emergency stop (Q28), and invariant I8. It is not a body tool and takes no lease. In order it
+// pauses the instinct (pauseInstinctS, default 10 s; meanwhile only in_lava, trapped_underwater, low_air and
+// creeper_swelling count), stops the body calls in flight and in the queue and collect-block and lead-animal, cancels
+// the task, interrupts the instinct's action, waits at most STOP_SETTLE_MS (2.5 s) for the body to be free, and then
+// stops the pathfinder, the controls and digging. I8: when it returns without isError the task is cancelled, no body
+// call, collect-block or lead-animal is left, nobody holds the body, the pathfinder has no goal and the controls are
+// clear; the one exception is an instinct action started during the pause for one of those four cues, which the reply
+// names. The ActionArbiter, TaskManager and InstinctEngine are real; the decision model is a stub.
+// ---------------------------------------------------------------------------------------------------------------
+
+const PAUSED = 'The instinct is paused for 10 s (lava, drowning, low air and swelling creepers are still handled)';
+const AT_REST = 'The bot is at (0, 64, 0), health 20, food 20; hostile mobs within 16 blocks: none';
+const PAUSE_LINE = /^Instinct paused by stop-all for (\d+) more s: only lava, drowning, low air and swelling creepers are handled$/m;
+
+function answer(choice: string, p: number, urgent = 0.1): DecisionResult {
+  return {
+    ok: true,
+    answers: {
+      action: { type: 'choice', choice, confidence: p, probabilities: { [choice]: p } },
+      urgent: { type: 'noul', noul: urgent },
+      resume_task: { type: 'noul', noul: 0.9 }
+    },
+    model: 'test/model',
+    latencyMs: 600
+  };
+}
+
+/** A task that runs until it is cancelled. */
+const idle: BehaviorDefinition<Record<string, never>, null> = {
+  name: 'idle',
+  description: 'runs until cancelled',
+  schema: z.object({}),
+  summarize: () => 'idle',
+  async run({ signal, isPaused, waitUntilRunning }) {
+    for (;;) {
+      if (isPaused()) await waitUntilRunning();
+      await delay(50, signal);
+    }
+  }
+};
+
+/**
+ * fakeBot() with what the instinct reads and its macros use: food (with bread to eat), eating that lasts until it is
+ * cut short, look, and lava at the bot's cell once `lava.on` is set.
+ */
+function instinctBot({ food = 20 } = {}) {
+  const bot = fakeBot();
+  const lava = { on: false };
+  const blockAt = bot.blockAt;
+  let finishEating: (() => void) | null = null;
+  return Object.assign(bot, {
+    food,
+    foodSaturation: 5,
+    lava,
+    inventory: { items: () => [{ name: 'bread', count: 3, type: minecraftData('1.20.4').itemsByName.bread.id }] },
+    look: sinon.stub().resolves(),
+    consume: sinon.stub().callsFake(() => new Promise<void>(resolve => { finishEating = resolve; })),
+    deactivateItem: sinon.stub().callsFake(() => finishEating?.()),
+    blockAt: (pos: Vec3) => {
+      const block = blockAt(pos);
+      return lava.on && block.position.equals(new Vec3(0, 64, 0)) ? { ...block, name: 'lava' } : block;
+    }
+  });
+}
+
+/**
+ * serve() with the rest of the Autopilot stand-in: a real TaskManager (with `idle`), InstinctEngine and PolicyStore,
+ * and a decision client without a key (for get-policy). The engine decides with `decide`, a stub that answers `none`
+ * unless a case says otherwise; it evaluates when a case calls tick() or emits physicsTick. collect-block, lead-animal
+ * and the policy tools are registered as well, and `extra` registers more. `ready` false is an Autopilot that is not
+ * ready.
+ */
+async function stopServe(
+  t: ExecutionContext, bot: unknown, { ready = true, extra = () => {} }: { ready?: boolean; extra?: (factory: ToolFactory) => void } = {}
+) {
+  const s = await serve(t, bot, (factory, stand, events) => {
+    const arbiter = stand.arbiter as ActionArbiter;
+    const policy = new PolicyStore();
+    const tasks = new TaskManager({ getBot: () => bot as never, getArbiter: () => arbiter, events, behaviors: [...BEHAVIORS, idle as never] });
+    const decide = sinon.stub().resolves(answer('none', 0.9));
+    const instinct = new InstinctEngine({ bot: bot as never, arbiter, tasks, getPolicy: () => policy.get(), events, decide });
+    instinct.start();
+    const decisions = new OpenRouterClient({ getPolicy: () => policy.get(), getKey: () => undefined });
+    Object.assign(stand, { isReady: () => ready, tasks, instinct, policy, decisions, decide });
+    registerGatheringTools(factory, () => stand as unknown as Autopilot);
+    registerPolicyTools(factory, () => stand as unknown as Autopilot, events);
+    extra(factory);
+  });
+  const tasks = s.stand.tasks as TaskManager;
+  const instinct = s.stand.instinct as InstinctEngine;
+  const decide = s.stand.decide as sinon.SinonStub;
+  t.teardown(() => instinct.stop('test over'));
+  const instinctEvents = () => s.events.query({ types: ['instinct'], limit: 200 }).events.map(event => event.message);
+  /** The calls I8 says must be gone, from its text: body calls (queued ones too), collect-block and lead-animal. */
+  const stoppable = () => s.factory.inFlight()
+    .filter(call => call.body || call.name === 'collect-block' || call.name === 'lead-animal')
+    .map(call => call.name);
+  /** stop-all, tracked, with what I8 is about at the moment it replies: the calls left and who holds the body. */
+  const stopAll = (args: Record<string, unknown> = {}) => {
+    const state = { settled: false, reply: null as Reply | null, atReply: { stoppable: [] as string[], holder: null as string | null } };
+    void s.call('stop-all', args).then(reply => {
+      state.atReply = { stoppable: stoppable(), holder: s.arbiter.holder()?.holder ?? null };
+      state.settled = true;
+      state.reply = reply;
+    });
+    return state;
+  };
+  return { ...s, tasks, instinct, decide, instinctEvents, stoppable, stopAll };
+}
+
+/** A body tool that never ends and never looks at ctx.signal. */
+const stubborn = (factory: ToolFactory) =>
+  factory.registerTool('stubborn-command', 'Never ends and never looks at ctx.signal', {}, () => new Promise(() => {}), { body: true });
+
+/** The final record of task `id`. */
+function ended(tasks: TaskManager, id: string) {
+  return tasks.list().history.find(record => record.id === id);
+}
+
+test.serial('E-040: stop-all is a tool of its own, not a body tool: BODY_TOOLS is unchanged and the call holds no lease', async (t) => {
+  t.false(BODY_TOOLS.has('stop-all'));
+  t.is(BODY_TOOLS.size, 25, 'the same 25 body tools as before');
+  t.is(STOP_SETTLE_MS, 2500, 'longer than the 2 s a stopped command may take to let go');
+  t.true(STOP_SETTLE_MS > DEATH_SETTLE_MS);
+  t.deepEqual(PAUSE_CUES, ['in_lava', 'trapped_underwater', 'low_air', 'creeper_swelling']);
+  t.is(MAX_PAUSE_MS, 300000);
+
+  const clock = useClock(t);
+  const s = await stopServe(t, fakeBot(), { extra: stubborn });
+  const { tools } = await s.client.listTools();
+  const tool = tools.find(entry => entry.name === 'stop-all');
+  t.truthy(tool);
+  t.deepEqual(Object.keys((tool!.inputSchema as { properties: object }).properties), ['pauseInstinctS']);
+  // A stopped command that ignores the signal keeps the lease for 2 s, so stop-all has to wait for it.
+  const pending = track(s.call('stubborn-command'));
+  await clock.tickAsync(500);
+  const acquire = sinon.spy(s.arbiter, 'acquire');
+  const stop = track(s.call('stop-all'));
+  await clock.tickAsync(500);
+  t.false(stop.settled, 'still waiting for the stopped command to let go');
+  t.deepEqual(s.factory.inFlight().filter(call => call.name === 'stop-all').map(call => ({ name: call.name, body: call.body, queued: call.queued })),
+    [{ name: 'stop-all', body: false, queued: false }], 'in flight as a call that is not a body call and waits for no lease');
+  t.is(s.arbiter.holder()?.holder, 'manual stubborn-command', 'the body is still the stopped command\'s');
+  t.false(acquire.getCalls().some(call => call.args[0].holder === 'manual stop-all'), 'stop-all never asks for the lease');
+  await clock.tickAsync(2000);
+  t.true(stop.settled);
+  t.true(pending.settled);
+});
+
+test.serial('E-040, I8: with a running task, a body command that obeys the signal and one queued behind it, stop-all cancels the task, stops both, frees the body, and lists what it stopped', async (t) => {
+  const clock = useClock(t);
+  const bot = fakeBot();
+  const s = await stopServe(t, bot);
+  t.true((await s.tasks.start('idle', {})).ok);
+  const first = track(s.call('move-to-position', { x: 40, y: 64, z: 0 }));
+  await clock.tickAsync(1000);
+  const queued = track(s.call('move-to-position', { x: -40, y: 64, z: 0 }));
+  // Not stopped: wait-for-event is not a body tool.
+  const waiting = track(s.call('wait-for-event', { types: ['never'], timeoutMs: 20000 }));
+  await clock.tickAsync(1000);
+  t.is(s.arbiter.holder()?.holder, 'manual move-to-position');
+  t.is(s.tasks.currentTask()?.status, 'paused', 'the move paused the task');
+  t.deepEqual(s.factory.inFlight().filter(call => call.body).map(call => call.queued), [false, true]);
+
+  const stop = track(s.call('stop-all'));
+  await clock.tickAsync(100);
+
+  t.true(stop.settled, 'stop-all replied without waiting the 10 s a queued command would');
+  t.false(stop.reply!.isError, stop.reply!.text);
+  t.is(stop.reply!.text,
+    `Stopped: task t1 idle (cancelled), move-to-position (stopped after 2.0s), move-to-position (stopped after 1.0s). ${PAUSED}. ${AT_REST}`);
+  // The commands.
+  t.true(first.settled && first.reply!.isError);
+  t.is(first.reply!.text, 'Failed: move-to-position was stopped by stop-all after 2.0 s at (0, 64, 0)');
+  t.true(queued.settled && queued.reply!.isError);
+  t.is(queued.reply!.text, 'Failed: move-to-position was stopped by stop-all after 1.0 s at (0, 64, 0)');
+  // The queued one replies first: it has no command to wait for.
+  t.deepEqual([...s.commandEvents()].sort(), [
+    'move-to-position was stopped by stop-all after 1.0 s at (0, 64, 0)',
+    'move-to-position was stopped by stop-all after 2.0 s at (0, 64, 0)'
+  ]);
+  // I8, clause by clause.
+  t.is(s.tasks.currentTask(), null, 'I8: no current task');
+  t.like(ended(s.tasks, 't1'), { status: 'cancelled', result: 'stopped by stop-all' }, 'I8: the task is cancelled');
+  t.deepEqual(s.stoppable(), [], 'I8: no body call in flight or in the queue');
+  t.is(s.arbiter.holder(), null, 'I8: nobody holds the body');
+  t.true(bot.pathfinder.stop.called);
+  t.is(bot.pathfinder.setGoal.lastCall.args[0], null, 'I8: the pathfinder has no goal');
+  t.true(bot.clearControlStates.called, 'I8: the controls are cleared');
+  t.true(bot.stopDigging.called);
+  t.true(s.instinct.status().pausedMs > 0, 'the instinct is paused');
+  // Queries and wait-for-event go on.
+  t.false(waiting.settled);
+  t.deepEqual(s.factory.inFlight().map(call => call.name), ['wait-for-event']);
+
+  // The queued command never runs, not even once the body is free.
+  await clock.tickAsync(20000);
+  t.is(bot.pathfinder.goto.callCount, 1);
+  t.is(s.arbiter.holder(), null);
+  t.true(waiting.settled);
+  t.false(waiting.reply!.text.includes('stop-all'), waiting.reply!.text);
+});
+
+test.serial('E-040: stop-all does not queue behind a body command that holds the lease and ignores the signal; it waits for the 2 s release and still succeeds', async (t) => {
+  const clock = useClock(t);
+  const bot = fakeBot();
+  const s = await stopServe(t, bot, { extra: stubborn });
+  const pending = track(s.call('stubborn-command'));
+  await clock.tickAsync(500);
+
+  const stop = track(s.call('stop-all'));
+  await clock.tickAsync(DEATH_SETTLE_MS - 100);
+  t.false(stop.settled, 'still waiting for the stopped command to let go');
+  t.is(s.arbiter.holder()?.holder, 'manual stubborn-command');
+  await clock.tickAsync(200);
+  t.true(stop.settled, 'replied soon after the release, within STOP_SETTLE_MS');
+  t.false(stop.reply!.isError, stop.reply!.text);
+  t.is(stop.reply!.text, `Stopped: stubborn-command (stopped after 0.5s). ${PAUSED}. ${AT_REST}`);
+  t.true(pending.settled);
+  t.is(pending.reply!.text, 'Failed: stubborn-command was stopped by stop-all after 0.5 s at (0, 64, 0)');
+  t.is(s.arbiter.holder(), null);
+  t.deepEqual(s.stoppable(), []);
+});
+
+test.serial('E-040: ToolFactory.stopAll returns the calls it stopped, how long each had run and whether it was waiting for the lease; wait-for-event is not among them', async (t) => {
+  const clock = useClock(t);
+  const s = await stopServe(t, fakeBot());
+  const first = track(s.call('move-to-position', { x: 40, y: 64, z: 0 }));
+  await clock.tickAsync(1000);
+  const second = track(s.call('move-to-position', { x: -40, y: 64, z: 0 }));
+  const waiting = track(s.call('wait-for-event', { types: ['never'], timeoutMs: 3000 }));
+  await clock.tickAsync(1000);
+
+  t.deepEqual(s.factory.stopAll('stop-all').map(({ name, ms, queued }) => ({ name, ms, queued })), [
+    { name: 'move-to-position', ms: 2000, queued: false },
+    { name: 'move-to-position', ms: 1000, queued: true }
+  ]);
+  await clock.tickAsync(2500);
+  t.true(first.settled && second.settled && waiting.settled);
+  t.is(first.reply!.text, 'Failed: move-to-position was stopped by stop-all after 2.0 s at (0, 64, 0)');
+  t.is(second.reply!.text, 'Failed: move-to-position was stopped by stop-all after 1.0 s at (0, 64, 0)');
+  t.false(waiting.reply!.text.includes('stop-all'), waiting.reply!.text);
+});
+
+test.serial('E-040, I8: a body command a death stopped lets go of the body but waits for the respawn; while it is in flight stop-all does not report success', async (t) => {
+  const clock = useClock(t);
+  const bot = fakeBot();
+  const s = await stopServe(t, bot, { extra: stubborn });
+  const pending = track(s.call('stubborn-command'));
+  await clock.tickAsync(500);
+  bot.emit('death');
+  await clock.tickAsync(DEATH_SETTLE_MS + 100);
+  t.is(s.arbiter.holder(), null, 'the lease is released after DEATH_SETTLE_MS');
+  t.deepEqual(s.stoppable(), ['stubborn-command'], 'but the call waits for the respawn (RESPAWN_WAIT_MS)');
+
+  const stop = s.stopAll();
+  await clock.tickAsync(STOP_SETTLE_MS + 100);
+
+  t.true(stop.settled);
+  t.false(pending.settled, 'still no respawn');
+  t.deepEqual(stop.atReply.stoppable, ['stubborn-command']);
+  t.true(stop.reply!.isError, `I8: no success while a body call is in flight: ${stop.reply!.text}`);
+  t.true(stop.reply!.text.includes('stubborn-command'), `the reply names it: ${stop.reply!.text}`);
+
+  bot.emit('spawn');
+  await clock.tickAsync(100);
+  t.true(pending.settled);
+  t.true(pending.reply!.text.startsWith('Failed: The bot died during stubborn-command'), 'the death reply as before (E-018)');
+});
+
+test.serial('E-040: stop-all with nothing running says "Nothing was running" and still stops the pathfinder, the controls and digging', async (t) => {
+  const clock = useClock(t);
+  const bot = fakeBot();
+  const s = await stopServe(t, bot);
+
+  const stop = track(s.call('stop-all'));
+  await clock.tickAsync(100);
+
+  t.false(stop.reply!.isError);
+  t.is(stop.reply!.text, `Nothing was running. ${PAUSED}. ${AT_REST}`);
+  t.true(stop.reply!.text.startsWith('Nothing was running'));
+  t.true(bot.pathfinder.stop.calledOnce, 'nobody held the body, so stop-all stops it (G4)');
+  t.true(bot.pathfinder.setGoal.calledOnceWith(null));
+  t.true(bot.clearControlStates.calledOnce);
+  t.true(bot.stopDigging.calledOnce);
+  t.deepEqual(s.commandEvents(), []);
+});
+
+test.serial('E-040, G4: a holder stop-all cannot stop keeps the body, stop-all leaves it alone and returns an error that names it after 2.5 s', async (t) => {
+  const clock = useClock(t);
+  const bot = fakeBot();
+  const s = await stopServe(t, bot);
+  // Not a tool call: nothing in the in-flight table stands for it.
+  const held = await s.arbiter.acquire({ holder: 'manual dig-block', priority: PRIORITY.MANUAL });
+  t.true(held.ok);
+
+  const stop = track(s.call('stop-all'));
+  await clock.tickAsync(STOP_SETTLE_MS - 100);
+  t.false(stop.settled, 'it waits up to STOP_SETTLE_MS');
+  await clock.tickAsync(200);
+
+  t.true(stop.settled);
+  t.true(stop.reply!.isError);
+  t.is(stop.reply!.text, `Failed: Nothing was running; still held by manual dig-block. ${PAUSED}. ${AT_REST}`);
+  t.false(bot.pathfinder.stop.called, 'the holder\'s body is not stopped (G4)');
+  t.false(bot.clearControlStates.called);
+  t.false(bot.stopDigging.called);
+  t.is(s.arbiter.holder()?.holder, 'manual dig-block');
+  if (held.ok) held.lease.release();
+});
+
+test.serial('E-040, I8: stop-all interrupts the running instinct action; during the pause hunger and a hit get no request and no lease; get-policy shows the seconds left; the end writes an event and the instinct asks again', async (t) => {
+  const clock = useClock(t);
+  const bot = instinctBot({ food: 10 });
+  const s = await stopServe(t, bot);
+  s.decide.resolves(answer('eat', 0.9));
+  s.instinct.tick();
+  await clock.tickAsync(600);
+  t.is(s.arbiter.holder()?.holder, 'instinct eat');
+  t.true(bot.consume.calledOnce, 'eating');
+  t.true(s.decide.calledOnce);
+
+  const stop = track(s.call('stop-all'));
+  await clock.tickAsync(100);
+  t.false(stop.reply!.isError, stop.reply!.text);
+  t.is(stop.reply!.text,
+    `Stopped: instinct action eat (interrupted). ${PAUSED}. The bot is at (0, 64, 0), health 20, food 10; hostile mobs within 16 blocks: none`);
+  t.is(s.arbiter.holder(), null);
+  t.true(bot.deactivateItem.called, 'the meal was cut short');
+  const events = s.instinctEvents();
+  t.true(events.includes('instinct paused for 10 s by stop-all (urgent dangers are still handled)'), events.join('\n'));
+  t.true(events.some(event => event.startsWith('eat → interrupted: stopped by stop-all')), events.join('\n'));
+  t.is(s.instinct.status().running, null);
+
+  // A zombie hits the bot every second, and the bot is still hungry: neither is asked about, nor takes the body.
+  bot.entities = { 9: { id: 9, name: 'zombie', type: 'hostile', position: new Vec3(2.5, 64, 0.5), height: 1.95, isValid: true } };
+  for (let second = 1; second <= 8; second++) {
+    s.instinct.noteDamage({ attackerId: 9, type: 'mob', time: Date.now() });
+    s.instinct.tick();
+    await clock.tickAsync(1000);
+    t.is(s.arbiter.holder(), null, `I8: no lease during the pause (${second} s)`);
+    if (second === 3) {
+      const policy = await s.call('get-policy');
+      t.is(policy.text.match(PAUSE_LINE)?.[1], '7', `${10000 - 3100} ms left: 7 more s\n${policy.text}`);
+      const lines = policy.text.split('\n');
+      const instinctLine = lines.findIndex(line => line.startsWith('Instinct: '));
+      t.true(instinctLine >= 0, policy.text);
+      t.regex(lines[instinctLine + 1], PAUSE_LINE, `right after the Instinct line\n${policy.text}`);
+    }
+  }
+  t.true(s.decide.calledOnce, 'I8: no decision request during the pause for hunger or a hit');
+
+  bot.entities = {};
+  await clock.tickAsync(2000);
+  t.true(s.instinctEvents().includes('instinct watching again after the stop-all pause'));
+  t.is(s.instinct.status().pausedMs, 0);
+  t.notRegex((await s.call('get-policy')).text, PAUSE_LINE);
+  s.instinct.tick();
+  await clock.tickAsync(0);
+  t.is(s.decide.callCount, 2, 'after the pause the hunger is asked about again');
+  t.deepEqual((s.decide.lastCall.args[0] as { danger: string[] }).danger, ['food 10 (below 14); has bread']);
+});
+
+test.serial('E-040, I8: an answer to a request sent before the pause (about hunger) arrives during it and is not acted on: no lease', async (t) => {
+  const clock = useClock(t);
+  const bot = instinctBot({ food: 10 });
+  const s = await stopServe(t, bot);
+  let answerNow: (result: DecisionResult) => void = () => {};
+  s.decide.callsFake(() => new Promise<DecisionResult>(resolve => { answerNow = resolve; }));
+  s.instinct.tick();
+  t.true(s.decide.calledOnce, 'the hunger is asked about');
+
+  const stop = track(s.call('stop-all'));
+  await clock.tickAsync(100);
+  t.is(stop.reply!.text, `Nothing was running. ${PAUSED}. The bot is at (0, 64, 0), health 20, food 10; hostile mobs within 16 blocks: none`);
+  answerNow(answer('eat', 0.9, 0.9));
+  await clock.tickAsync(1000);
+
+  t.is(s.arbiter.holder(), null, 'I8: no lease for the hunger during the pause');
+  t.is(s.instinct.status().running, null);
+  t.false(bot.consume.called);
+  s.instinct.tick();
+  t.true(s.decide.calledOnce, 'and no new request for it');
+});
+
+test.serial('E-040, I8: in lava during the pause the instinct asks as usual (lava only, not the hunger); an action it starts while stop-all waits keeps the body, and the reply names it without an error', async (t) => {
+  const clock = useClock(t);
+  const bot = instinctBot({ food: 10 });
+  const s = await stopServe(t, bot, { extra: stubborn });
+  // The game loop: the engine evaluates every 50 ms, also while stop-all waits for the stubborn command (2 s).
+  const ticker = setInterval(() => bot.emit('physicsTick'), 50);
+  t.teardown(() => clearInterval(ticker));
+  s.decide.resolves(answer('leave_lava', 0.9, 0.9));
+  track(s.call('stubborn-command'));
+  await clock.tickAsync(1000);
+  t.is(s.arbiter.holder()?.holder, 'manual stubborn-command');
+  const asked = s.decide.callCount;
+
+  bot.lava.on = true;
+  const stop = track(s.call('stop-all'));
+  await clock.tickAsync(DEATH_SETTLE_MS + 200);
+
+  t.true(stop.settled);
+  t.false(stop.reply!.isError, stop.reply!.text);
+  t.is(stop.reply!.text,
+    `Stopped: stubborn-command (stopped after 1.0s). ${PAUSED}; instinct action leave_lava started for standing in lava (health 20) during the pause. ` +
+    'The bot is at (0, 64, 0), health 20, food 10; hostile mobs within 16 blocks: none');
+  // Asked at once (the pause made the lava a new danger), and again every 1.5 s while it lasts.
+  const during = s.decide.getCalls().slice(asked).map(call => (call.args[0] as { danger: string[] }).danger);
+  t.true(during.length >= 1);
+  t.true(during.every(danger => danger.length === 1 && danger[0] === 'standing in lava (health 20)'), `the hunger is left out during the pause: ${JSON.stringify(during)}`);
+  // The I8 exception: this action holds the body, and stop-all did not stop it.
+  t.deepEqual(s.arbiter.holder(), { holder: 'instinct leave_lava', priority: PRIORITY.URGENT_INSTINCT });
+  t.like(s.instinct.status().running, { action: 'leave_lava', duringPause: true });
+  t.deepEqual(s.stoppable(), []);
+  await clock.tickAsync(200);
+  t.is(s.instinct.status().running?.action, 'leave_lava', 'still running after the reply');
+  t.true(bot.setControlState.calledWith('jump', true));
+});
+
+test.serial('E-040, I8: stop-all interrupts a leave_lava that is running; still in lava, the instinct starts it again during the pause, and the reply names both without an error', async (t) => {
+  const clock = useClock(t);
+  const bot = instinctBot();
+  bot.lava.on = true;
+  const s = await stopServe(t, bot);
+  const ticker = setInterval(() => bot.emit('physicsTick'), 50);
+  t.teardown(() => clearInterval(ticker));
+  s.decide.resolves(answer('leave_lava', 0.9, 0.9));
+  await clock.tickAsync(300);
+  t.is(s.arbiter.holder()?.holder, 'instinct leave_lava');
+  t.like(s.instinct.status().running, { action: 'leave_lava', duringPause: false });
+
+  const stop = s.stopAll();
+  await clock.tickAsync(300);
+
+  t.true(stop.settled);
+  t.false(stop.reply!.isError, stop.reply!.text);
+  t.is(stop.reply!.text,
+    `Stopped: instinct action leave_lava (interrupted). ${PAUSED}; instinct action leave_lava started for standing in lava (health 20) during the pause. ${AT_REST}`);
+  t.true(s.instinctEvents().some(event => event.startsWith('leave_lava → interrupted: stopped by stop-all')), s.instinctEvents().join('\n'));
+  // The I8 exception, and nothing else.
+  t.deepEqual(stop.atReply, { stoppable: [], holder: 'instinct leave_lava' });
+  t.like(s.instinct.status().running, { action: 'leave_lava', duringPause: true });
+});
+
+test.serial('E-040, I8: a body command called while stop-all waits, queued behind the leave_lava started during the pause, makes stop-all an error', async (t) => {
+  const clock = useClock(t);
+  const bot = instinctBot();
+  const s = await stopServe(t, bot, { extra: stubborn });
+  const ticker = setInterval(() => bot.emit('physicsTick'), 50);
+  t.teardown(() => clearInterval(ticker));
+  s.decide.resolves(answer('leave_lava', 0.9, 0.9));
+  track(s.call('stubborn-command'));
+  await clock.tickAsync(1000);
+
+  bot.lava.on = true;
+  const stop = s.stopAll();
+  await clock.tickAsync(500);
+  t.is(s.arbiter.holder()?.holder, 'instinct leave_lava');
+  // G1: a manual command waits behind an urgent instinct action.
+  const late = track(s.call('move-to-position', { x: 40, y: 64, z: 0 }));
+  await clock.tickAsync(STOP_SETTLE_MS);
+
+  t.true(stop.settled);
+  t.false(late.settled);
+  t.deepEqual(stop.atReply.stoppable, ['move-to-position'], 'queued when stop-all replied');
+  t.true(stop.reply!.isError, `I8: no success while a body call is in the queue: ${stop.reply!.text}`);
+  t.true(stop.reply!.text.includes('; instinct action leave_lava started for standing in lava (health 20) during the pause. '), stop.reply!.text);
+  t.true(stop.reply!.text.split('. ')[0].includes('move-to-position'), `the first sentence names the queued command: ${stop.reply!.text}`);
+  t.is(s.arbiter.holder()?.holder, 'instinct leave_lava', 'the exception keeps the body');
+
+  s.factory.stopAll('stop-all');
+  await clock.tickAsync(100);
+  t.true(late.settled);
+});
+
+test.serial('E-040: with pauseInstinctS 0 (no pause) an instinct action for another cue that takes the body again while stop-all waits makes it an error that names it', async (t) => {
+  const clock = useClock(t);
+  const bot = instinctBot({ food: 10 });
+  const s = await stopServe(t, bot, { extra: stubborn });
+  const ticker = setInterval(() => bot.emit('physicsTick'), 50);
+  t.teardown(() => clearInterval(ticker));
+  // Hungry, and the model calls it urgent, so eating takes over from the AI player's command.
+  s.decide.resolves(answer('eat', 0.9, 0.9));
+  track(s.call('stubborn-command'));
+  await clock.tickAsync(1000);
+  t.is(s.arbiter.holder()?.holder, 'instinct eat');
+
+  const stop = track(s.call('stop-all', { pauseInstinctS: 0 }));
+  await clock.tickAsync(STOP_SETTLE_MS - 100);
+  t.false(stop.settled, 'an instinct action outside a pause is not the exception: stop-all waits for the body to be free');
+  t.is(s.arbiter.holder()?.holder, 'instinct eat');
+  await clock.tickAsync(200);
+
+  t.true(stop.settled);
+  t.true(stop.reply!.isError, stop.reply!.text);
+  t.is(stop.reply!.text,
+    'Failed: Stopped: stubborn-command (stopped after 1.0s), instinct action eat (interrupted); still held by instinct eat. ' +
+    'The bot is at (0, 64, 0), health 20, food 10; hostile mobs within 16 blocks: none');
+  t.like(s.instinct.status().running, { action: 'eat', duringPause: false });
+  t.is(s.instinct.status().pausedMs, 0);
+});
+
+test.serial('E-040: with pauseInstinctS 0 an instinct action that holds the body after the stopped command let go is waited for; once it lets go within 2.5 s stop-all succeeds and stops the body', async (t) => {
+  const clock = useClock(t);
+  const bot = instinctBot({ food: 10 });
+  // The second meal takes 1.7 s and fills the bot up, so the instinct has nothing more to ask about.
+  bot.consume.onSecondCall().callsFake(() => new Promise<void>(resolve => setTimeout(() => {
+    bot.food = 20;
+    resolve();
+  }, 1700)));
+  const s = await stopServe(t, bot, { extra: stubborn });
+  // Who held the body each time it was stopped.
+  const stops: (string | null)[] = [];
+  bot.stopDigging.callsFake(() => { stops.push(s.arbiter.holder()?.holder ?? null); });
+  const ticker = setInterval(() => bot.emit('physicsTick'), 50);
+  t.teardown(() => clearInterval(ticker));
+  s.decide.resolves(answer('eat', 0.9, 0.9));
+  track(s.call('stubborn-command'));
+  await clock.tickAsync(1000);
+  t.is(s.arbiter.holder()?.holder, 'instinct eat');
+
+  const stop = track(s.call('stop-all', { pauseInstinctS: 0 }));
+  await clock.tickAsync(DEATH_SETTLE_MS + 100);
+  t.deepEqual(s.stoppable(), [], 'the stopped command has replied');
+  t.is(s.arbiter.holder()?.holder, 'instinct eat', 'the instinct took the body again and still has it');
+  t.like(s.instinct.status().running, { action: 'eat', duringPause: false });
+  t.false(stop.settled, 'an instinct action outside a pause is not the exception: stop-all waits on');
+  stops.length = 0;
+  bot.clearControlStates.resetHistory();
+  bot.pathfinder.stop.resetHistory();
+  await clock.tickAsync(STOP_SETTLE_MS - DEATH_SETTLE_MS);
+
+  t.true(stop.settled);
+  t.false(stop.reply!.isError, stop.reply!.text);
+  t.is(stop.reply!.text,
+    'Stopped: stubborn-command (stopped after 1.0s), instinct action eat (interrupted). The bot is at (0, 64, 0), health 20, food 20; hostile mobs within 16 blocks: none');
+  t.is(bot.consume.callCount, 2);
+  t.is(s.instinct.status().running, null, 'the meal is over');
+  // I8: nobody holds the body, and stop-all stopped it once nobody held it (G4).
+  t.is(s.arbiter.holder(), null);
+  t.deepEqual(s.stoppable(), []);
+  t.is(stops.at(-1), null, `the last stop came with nobody holding the body: ${JSON.stringify(stops)}`);
+  t.true(bot.pathfinder.stop.called);
+  t.is(bot.pathfinder.setGoal.lastCall.args[0], null);
+  t.true(bot.clearControlStates.called);
+});
+
+test.serial('E-040: pauseInstinctS 0 ends an earlier pause; 301, -1 and 2.5 are rejected and stop nothing; a pause is at most 300 s', async (t) => {
+  const clock = useClock(t);
+  const bot = fakeBot();
+  const s = await stopServe(t, bot);
+
+  const long = track(s.call('stop-all', { pauseInstinctS: 30 }));
+  await clock.tickAsync(100);
+  t.true(long.reply!.text.includes('The instinct is paused for 30 s (lava, drowning, low air and swelling creepers are still handled)'), long.reply!.text);
+  t.is(s.instinct.status().pausedMs, 29900);
+  t.is((await s.call('get-policy')).text.match(PAUSE_LINE)?.[1], '30');
+
+  const none = track(s.call('stop-all', { pauseInstinctS: 0 }));
+  await clock.tickAsync(100);
+  t.false(none.reply!.isError);
+  t.is(none.reply!.text, `Nothing was running. ${AT_REST}`, 'no pause, so no pause sentence');
+  t.is(s.instinct.status().pausedMs, 0);
+  t.deepEqual(s.instinctEvents(), [
+    'instinct paused for 30 s by stop-all (urgent dangers are still handled)',
+    'instinct watching again after the stop-all pause'
+  ]);
+  t.notRegex((await s.call('get-policy')).text, PAUSE_LINE);
+
+  // Rejected by the argument check, before anything is stopped.
+  t.true((await s.tasks.start('idle', {})).ok);
+  const move = track(s.call('move-to-position', { x: 40, y: 64, z: 0 }));
+  await clock.tickAsync(1000);
+  for (const pauseInstinctS of [301, -1, 2.5]) {
+    const refused = await s.call('stop-all', { pauseInstinctS });
+    t.true(refused.isError, `${pauseInstinctS}: ${refused.text}`);
+    t.true(refused.text.includes('pauseInstinctS'), refused.text);
+  }
+  t.false(move.settled, 'the move is not stopped');
+  t.is(s.arbiter.holder()?.holder, 'manual move-to-position');
+  t.is(s.tasks.currentTask()?.status, 'paused', 'the task is not cancelled');
+  t.is(s.instinct.status().pausedMs, 0, 'and the instinct is not paused');
+  t.is(s.instinctEvents().length, 2);
+
+  // I8: at most 300 s, whatever the caller asks.
+  s.instinct.pauseFor(400000, 'stop-all');
+  t.is(s.instinct.status().pausedMs, MAX_PAUSE_MS);
+  t.is(s.instinctEvents().at(-1), 'instinct paused for 300 s by stop-all (urgent dangers are still handled)');
+  await clock.tickAsync(MAX_PAUSE_MS - 1);
+  t.is(s.instinct.status().pausedMs, 1);
+  await clock.tickAsync(1);
+  t.is(s.instinct.status().pausedMs, 0);
+  t.is(s.instinctEvents().at(-1), 'instinct watching again after the stop-all pause');
+
+  // The move ran out of time meanwhile; the task it paused is still there.
+  t.true(move.settled);
+  const stop = track(s.call('stop-all', { pauseInstinctS: 300 }));
+  await clock.tickAsync(100);
+  t.false(stop.reply!.isError, stop.reply!.text);
+  t.is(stop.reply!.text,
+    `Stopped: task t1 idle (cancelled). The instinct is paused for 300 s (lava, drowning, low air and swelling creepers are still handled). ${AT_REST}`);
+});
+
+test.serial('E-040, I8: the pause lives in the instinct engine only, so it ends when the bot joins again (a new engine)', async (t) => {
+  const clock = useClock(t);
+  const events = new EventStore();
+  const autopilot = new Autopilot({ events, decisions: { getKey: () => undefined } });
+  autopilot.bind(fakeBot() as never);
+  autopilot.instinct.pauseFor(60000, 'stop-all');
+  t.is(autopilot.instinct.status().pausedMs, 60000);
+  const old = autopilot.instinct;
+
+  autopilot.unbind('disconnected');
+  autopilot.bind(fakeBot() as never);
+  t.not(autopilot.instinct, old, 'joining again makes a new engine');
+  t.is(old.status().pausedMs, 0, 'the old engine\'s pause has ended');
+  t.is(autopilot.instinct.status().pausedMs, 0, 'and the new engine is not paused');
+  await clock.tickAsync(60000);
+  t.is(old.status().pausedMs, 0);
+  autopilot.unbind('test over');
+});
+
+test.serial('E-040: collect-block stopped by stop-all cancels its gather task (stopped by stop-all); its reply and stop-all\'s list say so', async (t) => {
+  const clock = useClock(t);
+  const world = createFakeWorld({ '6,64,0': 'oak_log' });
+  const logId = minecraftData('1.20.4').blocksByName.oak_log.id;
+  world.bot.findBlocks.callsFake(({ matching }: { matching: number }) => (matching === logId ? [new Vec3(6, 64, 0)] : []));
+  world.bot.canSeeBlock = () => false;
+  const pending: ((error: Error) => void)[] = [];
+  world.bot.pathfinder.goto = sinon.stub().callsFake(() => new Promise((_, reject) => pending.push(reject)));
+  world.bot.pathfinder.stop = sinon.stub().callsFake(() => { for (const reject of pending.splice(0)) reject(new Error(STOPPED)); });
+  Object.assign(world.bot, { health: 20, food: 20 });
+  const s = await stopServe(t, world.bot);
+
+  const collect = track(s.call('collect-block', { blockType: 'oak_log' }));
+  await clock.tickAsync(1000);
+  t.like(s.tasks.currentTask(), { id: 't1', behavior: 'gather', status: 'running' });
+
+  const stop = track(s.call('stop-all'));
+  await clock.tickAsync(100);
+
+  t.true(stop.settled);
+  t.false(stop.reply!.isError, stop.reply!.text);
+  t.is(stop.reply!.text, `Stopped: task t1 gather (cancelled), collect-block (stopped after 1.0s). ${PAUSED}. ${AT_REST}`);
+  t.true(collect.settled && collect.reply!.isError);
+  t.is(collect.reply!.text, 'Failed: collect-block was stopped by stop-all after 1.0 s at (0, 64, 0)');
+  t.like(ended(s.tasks, 't1'), { status: 'cancelled', result: 'stopped by stop-all' });
+  t.deepEqual(s.commandEvents(), ['collect-block was stopped by stop-all after 1.0 s at (0, 64, 0)']);
+  t.deepEqual(s.stoppable(), [], 'I8: no collect-block in flight');
+  t.is(s.arbiter.holder(), null);
+});
+
+test.serial('E-040: lead-animal stopped by stop-all cancels its lead task (stopped by stop-all)', async (t) => {
+  const clock = useClock(t);
+  const bot = fakeBot();
+  bot.entities = { 2: { id: 2, name: 'cow', type: 'animal', position: new Vec3(2.5, 64, 0.5), height: 1.4, isValid: true } };
+  bot.inventory.items = () => [{ name: 'wheat', count: 5, type: 900 }];
+  const s = await stopServe(t, bot);
+
+  const lead = track(s.call('lead-animal', { entityId: 2, x: 20, y: 64, z: 0 }));
+  await clock.tickAsync(1000);
+  t.like(s.tasks.currentTask(), { id: 't1', behavior: 'lead', status: 'running' });
+
+  const stop = track(s.call('stop-all'));
+  await clock.tickAsync(100);
+
+  t.false(stop.reply!.isError, stop.reply!.text);
+  t.true(stop.reply!.text.startsWith('Stopped: task t1 lead (cancelled), lead-animal (stopped after 1.0s). '), stop.reply!.text);
+  t.is(lead.reply!.text, 'Failed: lead-animal was stopped by stop-all after 1.0 s at (0, 64, 0)');
+  t.like(ended(s.tasks, 't1'), { status: 'cancelled', result: 'stopped by stop-all' });
+  t.deepEqual(s.stoppable(), []);
+  t.is(s.arbiter.holder(), null);
+});
+
+test.serial('E-040: without a ready Autopilot stop-all stops only the commands and the body: no pause, no instinct sentence', async (t) => {
+  const clock = useClock(t);
+  const bot = fakeBot();
+  // Not ready means no bot is bound, so there is no task either (Autopilot.unbind cancels it).
+  const s = await stopServe(t, bot, { ready: false });
+  const move = track(s.call('move-to-position', { x: 40, y: 64, z: 0 }));
+  await clock.tickAsync(1000);
+
+  const stop = track(s.call('stop-all'));
+  await clock.tickAsync(100);
+
+  t.false(stop.reply!.isError, stop.reply!.text);
+  t.is(stop.reply!.text, `Stopped: move-to-position (stopped after 1.0s). ${AT_REST}`);
+  t.true(move.settled && move.reply!.isError);
+  t.is(move.reply!.text, 'Failed: move-to-position was stopped by stop-all after 1.0 s at (0, 64, 0)');
+  t.true(bot.pathfinder.stop.called);
+  t.true(bot.clearControlStates.called);
+  t.deepEqual(s.stoppable(), []);
+  t.is(s.instinct.status().pausedMs, 0);
+  t.deepEqual(s.instinctEvents(), []);
+});
+
+test.serial('E-040, E-027 unchanged: a call the MCP client cancels stops only that call; the instinct is not paused and the task it paused is not cancelled', async (t) => {
+  const clock = useClock(t);
+  const bot = fakeBot();
+  const s = await stopServe(t, bot);
+  t.true((await s.tasks.start('idle', {})).ok);
+  const controller = new AbortController();
+  track(s.call('move-to-position', { x: 40, y: 64, z: 0 }, controller.signal));
+  await clock.tickAsync(1000);
+  // Another command waits behind it.
+  const other = track(s.call('move-to-position', { x: -40, y: 64, z: 0 }));
+  await clock.tickAsync(0);
+  t.deepEqual(s.factory.inFlight().map(call => call.queued), [false, true]);
+
+  controller.abort();
+  await clock.tickAsync(2500);
+
+  t.deepEqual(s.commandEvents(), ['move-to-position was cancelled by the MCP client after 1.0 s; the bot stopped at (0, 64, 0)']);
+  // The other command is not stopped: it has the body now and is walking.
+  t.false(other.settled);
+  t.is(s.arbiter.holder()?.holder, 'manual move-to-position');
+  t.is(bot.pathfinder.goto.callCount, 2);
+  t.deepEqual(s.factory.inFlight().map(call => ({ name: call.name, queued: call.queued })), [{ name: 'move-to-position', queued: false }]);
+  t.is(s.instinct.status().pausedMs, 0);
+  t.deepEqual(s.instinctEvents(), []);
+  t.is(s.tasks.currentTask()?.status, 'paused', 'still paused by the manual command, not cancelled');
+
+  s.factory.stopAll('stop-all');
+  await clock.tickAsync(100);
+  t.true(other.settled);
+  await cancelLeftOver(clock, s.tasks);
 });

@@ -2,7 +2,7 @@
 
 [English](README.md) | **简体中文**
 
-这是一个由大语言模型（例如 Claude）通过 [Model Context Protocol](https://modelcontextprotocol.io)（MCP）操控的 Minecraft 机器人。机器人基于 [Mineflayer](https://github.com/PrismarineJS/mineflayer)，LLM 通过 66 个 MCP 工具观察世界并在其中行动。
+这是一个由大语言模型（例如 Claude）通过 [Model Context Protocol](https://modelcontextprotocol.io)（MCP）操控的 Minecraft 机器人。机器人基于 [Mineflayer](https://github.com/PrismarineJS/mineflayer)，LLM 通过 67 个 MCP 工具观察世界并在其中行动。
 
 这个分支的特点是 **Autopilot**：用后台任务处理长时间的工作，再加上一个约一秒内对危险作出反应的**本能**。本能由一个快速的*决策模型*和执行所选动作的代码配合完成。没有它，LLM 就得自己及时注意到每一只苦力怕。
 
@@ -25,8 +25,8 @@
 
 ## 做了哪些改变
 
-### 1. 更多工具，像玩家一样看世界（23 → 66 个工具）
-- **移动：**跟随或逃离某个实体、停止、保存路点。
+### 1. 更多工具，像玩家一样看世界（23 → 67 个工具）
+- **移动：**跟随或逃离某个实体、停止、急停、保存路点。
 - **建造与采集：**采集指定数量的方块、清空或填充一个区域、挖隧道、查看和使用容器。
 - **交互：**右键方块和实体、与村民交易、睡觉和起床、骑乘和下来、攻击。
 - **感知：**
@@ -44,8 +44,8 @@
 - **聊天分拣：**决策模型对聊天分类，只有发给机器人的消息才会以 `chat_request` 事件唤醒 LLM。除非 LLM 允许，任何人都不能通过聊天指挥机器人。
 
 ### 3. 在游戏里实测，而不只是纸面
-- 1440 个单元测试。
-- 实机测试：在真实服务器上逐一运行全部 66 个工具。
+- 1460 个单元测试。
+- 实机测试：在真实服务器上逐一运行全部 67 个工具。
 - 情景测试：比较有无 Autopilot 时机器人的表现，包括僵尸潮、空手被僵尸追赶、苦力怕、饥饿、着火、溺水、有意潜水、岩浆岸边和聊天。
 - 普通难度下的 10 天生存测试：机器人度过了全部十个夜晚，没有死亡，并建起一座 7×7 的房子，带门、八扇玻璃窗、床、箱子、工作台、熔炉和火把。
 - 困难难度下的 5 天生存测试，从空背包开始：机器人度过了全部五个夜晚，没有死亡；夜里睡在挖出的封闭坑里的床上，最后穿着铁甲，还剩 14 份熟食。
@@ -249,7 +249,7 @@ API key 只从环境变量 `OPENROUTER_API_KEY` 读取，不要把它写进仓�
 
 ---
 
-## 工具（66 个）
+## 工具（67 个）
 
 移动或使用 bot 身体的命令在 bot 死亡时会停止，回复说明 bot 死在哪里、因为什么、在哪里复活。寻路器能绕开岩浆岸边时就绕开，也不再往岩浆上搭方块走过去。
 
@@ -272,6 +272,7 @@ API key 只从环境变量 `OPENROUTER_API_KEY` 读取，不要把它写进仓�
 - `look-at`：看向指定坐标
 - `jump`：跳
 - `stop-pathfinding`：停止移动，并取消当前任务
+- `stop-all`：急停。停下所有移动或使用 bot 身体的命令（包括排队等待的）以及 `collect-block`、`lead-animal`，取消当前任务，打断本能正在做的动作，并停下寻路器、按键和挖掘。之后本能暂停 `pauseInstinctS` 秒（默认 10，最多 300；0 表示不暂停，并结束之前的暂停），期间只处理岩浆、溺水、低氧和正在膨胀的苦力怕；`get-policy` 显示暂停还剩多久。查询类工具和 `wait-for-event` 不受影响。回复列出停下了什么以及 bot 的状态，例如 `Stopped: task t5 gather (cancelled), move-to-position (stopped after 12.3s), instinct action flee (interrupted). The instinct is paused for 10 s (lava, drowning, low air and swelling creepers are still handled). The bot is at (x, y, z), health H, food F; hostile mobs within 16 blocks: …`，什么都没在运行时以 `Nothing was running` 开头；每个被停下的命令回复 `<name> was stopped by stop-all after N s at (x, y, z)`。暂停期间为上述危险新开始的本能动作保留身体，回复里会写明。2.5 秒后身体仍被别的持有者占着时，回复是错误，并写明 `still held by <持有者>`；到那时仍有移动或使用身体的命令、`collect-block` 或 `lead-animal` 没有回复时，回复也是错误
 - `follow-entity`：持续跟随玩家或生物（以任务运行）
 - `flee-from`：逃离某个实体到安全距离（以任务运行）
 - `fly-to`：飞到指定坐标（创造模式）
@@ -413,7 +414,7 @@ API key 只从环境变量 `OPENROUTER_API_KEY` 读取，不要把它写进仓�
 ## 测试
 
 ```bash
-npm test             # 1440 个单元测试
+npm test             # 1460 个单元测试
 npm run lint
 npm run test:live -- <局域网端口>                                 # 对世界做只读检查
 npm run test:live:world -- <局域网端口> --allow-world-changes      # 在开启作弊的一次性世界中运行每个工具

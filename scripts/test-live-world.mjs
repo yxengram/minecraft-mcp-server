@@ -260,6 +260,41 @@ try {
     await call('move-to-position', { x: cx, y: y0, z: cz, range: 0, timeoutMs: 20000 });
   });
 
+  await step('stop-all stops a move, the task it paused and the instinct at once, and frees the body (M19 E-040)', async () => {
+    await call('move-to-position', { x: cx - 8, y: y0, z: cz - 8, range: 0, timeoutMs: 20000 });
+    const logs = [[cx + 6, cz - 6], [cx - 6, cz + 6]];
+    for (const [x, z] of logs) await cmd(`/setblock ${x} ${y0} ${z} oak_log`);
+    await sleep(500);
+    try {
+      const id = await startTask('gather', { blockType: 'oak_log', count: 2 });
+      // Not awaited: the move takes the body from the task and is still walking when stop-all comes.
+      const moving = client.callTool({ name: 'move-to-position', arguments: { x: cx + 8, y: y0, z: cz + 8, range: 0 } }, undefined, { timeout: 60000 });
+      await sleep(1000);
+      const stopped = await call('stop-all');
+      // Read at once, well inside the 10 s pause, so a slow walk below cannot outlast it.
+      const policy = await call('get-policy');
+      expect(/^Instinct paused by stop-all for \d+ more s: only lava, drowning, low air and swelling creepers are handled$/m.test(policy),
+        `get-policy does not show the pause:\n${policy}`);
+      expectIncludes(stopped, `task ${id} gather (cancelled)`, 'stop-all reply');
+      expectIncludes(stopped, 'move-to-position (stopped after ', 'stop-all reply');
+      expectIncludes(stopped, 'The instinct is paused for 10 s (lava, drowning, low air and swelling creepers are still handled)', 'stop-all reply');
+      const moved = await moving;
+      expect(moved.isError, `the move stopped by stop-all did not return an error: ${responseText(moved)}`);
+      expectIncludes(responseText(moved), 'move-to-position was stopped by stop-all after ', 'the stopped move');
+      expectIncludes(await call('list-tasks'), `${id} gather [cancelled]`, 'list-tasks after stop-all');
+      // Right away: the body is free, so this is not Busy (call() fails on an error reply) and waits for nobody.
+      const again = await call('move-to-position', { x: cx - 7, y: y0, z: cz - 7, range: 0, timeoutMs: 20000 });
+      expect(!again.includes('Waited'), `the move after stop-all waited for the body:\n${again}`);
+    } finally {
+      // End the pause, so the later steps have the instinct as usual.
+      await call('stop-all', { pauseInstinctS: 0 });
+      for (const [x, z] of logs) await cmd(`/setblock ${x} ${y0} ${z} air`);
+      await cmd('/kill @e[type=item,distance=..32]');
+    }
+    expect(!/^Instinct paused by/m.test(await call('get-policy')), 'the pause did not end with pauseInstinctS 0');
+    await call('move-to-position', { x: cx, y: y0, z: cz, range: 0, timeoutMs: 20000 });
+  });
+
   await step('waypoints', async () => {
     expectIncludes(await call('set-waypoint', { name: 'Arena', x: cx, y: y0, z: cz, note: 'center' }), "Saved waypoint 'arena'", 'set-waypoint');
     expectIncludes(await call('list-waypoints'), '- arena:', 'list-waypoints');
