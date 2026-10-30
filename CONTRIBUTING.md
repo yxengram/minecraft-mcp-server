@@ -115,3 +115,30 @@ Once you're happy with your changes:
 1. Push your feature branch to your fork
 2. Create a Pull Request from your fork to the `extra-tools` branch of [yxengram/minecraft-mcp-server](https://github.com/yxengram/minecraft-mcp-server)
 3. Others can test your changes by pointing their config to your fork/branch
+
+## Releasing
+
+Only the owner of [yxengram/minecraft-mcp-server](https://github.com/yxengram/minecraft-mcp-server) releases. Contributors and agents never push a `v` tag, approve the `release` environment, publish to npm or create a GitHub Release; they may run `npm pack` and `npm publish --dry-run` in a throwaway clone, and start a dry run only when the owner agrees.
+
+`.github/workflows/release.yml` does the work when a `v` tag is pushed:
+
+- `verify` checks that the tag without its `v` equals the version in `package.json` and in `mcpb/manifest.json`, that `CHANGELOG.md` has a section for that version, and that the tagged commit is on `extra-tools`; a failed check names itself. It then runs the CI checks (lint, type check, unit tests, build), packs the package with its `npm-shrinkwrap.json`, installs it from that shrinkwrap and in an empty project and runs the smoke test on both, builds the `.mcpb` and runs the smoke test on it unpacked, uploads the `.tgz`, the `.mcpb` and the CHANGELOG section, and runs `npm publish --dry-run`.
+- `publish` waits for your approval of the `release` environment. It then publishes the very `.tgz` that `verify` tested, with `npm publish --access public --provenance` (no new build), and creates the GitHub Release for the tag with the `.tgz` and the `.mcpb`, the CHANGELOG section as its notes. It fails, before publishing, if that Release already exists.
+
+### Once, before the first release
+
+1. Make the repository public: npm provenance does not support private repositories.
+2. Set up npm: the `@yxengram` scope (your npm user or an organization) and publishing from CI. Prefer Trusted Publishing, which needs no long-lived token: in the package's settings on npmjs.com, add GitHub Actions as a trusted publisher with the repository `yxengram/minecraft-mcp-server`, the workflow `release.yml` and the environment `release`. If npm accepts that only once the package exists, either store a granular access token limited to this package as the `NPM_TOKEN` secret of the `release` environment, so that only the approved job can read it (the publish step passes it as `NODE_AUTH_TOKEN`), and delete it after the first release, or publish the first version once by hand. To publish by hand, push the tag (step 3 of Each release), wait until `verify` has passed, download the `release` artifact of that run (`gh run download <run-id> -n release`) and run `npm publish <its .tgz> --access public`. Never run `npm publish` in a clone: that packs a new build without `npm-shrinkwrap.json`, not the file `verify` tested. npm never takes the same version twice, so then reject the `release` environment for that run, and create that Release by hand as described at the end.
+3. Create the `release` environment (Settings → Environments) and make yourself its required reviewer, before the first tag: GitHub creates an environment that a job names but that does not exist yet, without any protection. Allowing only `v*` tags to deploy to it is a good idea as well.
+
+### Each release
+
+1. On `extra-tools`, through a pull request as usual, update:
+   - the version in `package.json`, in the root of `package-lock.json`, in `mcpb/manifest.json` and in the npx examples of `README.md` and `README.zh-CN.md`; `npm test` fails while one of them differs;
+   - `CHANGELOG.md`: rename `## [Unreleased]` to `## [X.Y.Z] - YYYY-MM-DD` (that section becomes the Release notes), and add a new, empty `## [Unreleased]` above it if you like.
+2. If you like, a dry run: `gh workflow run release.yml --ref <branch>` runs `verify` only, never `publish`. Without a tag, it checks the manifest and the CHANGELOG against the version in `package.json` and skips the branch check, so it fails while `CHANGELOG.md` has no section for that version. GitHub offers a manual run only once the workflow file is on the default branch (`extra-tools`); `--ref` can then name another branch.
+3. Tag the release commit on `extra-tools` and push the tag to this repository: `git tag vX.Y.Z <commit>`, then `git push <remote> vX.Y.Z`. Tags without the `v`, like upstream's `1.0.0` to `2.0.4`, do not start the workflow.
+4. When `verify` has passed, look over its run and approve the `release` environment.
+5. Afterwards, check that the npm page of the package shows provenance (not for a version you published by hand, which has none), that the Release has the `.tgz` and the `.mcpb`, that the README's download link (Releases/latest) gives that `.mcpb`, and that `npx -y @yxengram/minecraft-mcp-autopilot@X.Y.Z --version` prints `X.Y.Z`.
+
+A published version can be unpublished only within 72 hours; after that, `npm deprecate` it instead. If `npm publish` succeeded but creating the Release failed, running the job again stops at `npm publish`: create the Release by hand from the files of the run (the `release` artifact) with `gh release create vX.Y.Z <tgz> <mcpb> --verify-tag --notes-file release-notes.md`.

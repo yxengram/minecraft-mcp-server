@@ -10,7 +10,7 @@
 |---|---|
 | 设计版本 | v0.3（2026-10-16）：按用户对未决问题的答复修订，变更见 docs/PLAN.md。**v0.4（2026-10-18，用户已确认）**：本能改由决策模型承担、代码只做“小脑”，见 I 节；已在 M8～M10 实现（M8、M9 代码，M10 按 v0.4 改写 A～D 节与 G7，见 PLAN M10），之后各里程碑的改动写在 F 节与 F2 节 |
 | 目标版本 | Autopilot v1：阶段一到四（任务与行为、反射与策略、决策模型、情景测试）；v0.4（M8～M10）：本能由决策模型承担，代码只做“小脑”（I 节） |
-| 当前阶段 | M1～M10 全部完成；M1～M9 实现并通过实机验收（M1～M3 2026-10-16，M4～M7 2026-10-17～18，M8～M9 2026-10-18～19）；M10 完成：文档收尾与 10 天生存测试（2026-10-19）；M11、M12 修复两次生存测试中发现的工具问题并通过实机验收（2026-10-19，E-013、E-014）；M13 新增与村民交易的工具并通过实机验收（2026-10-20，F-043、F-044、E-015）；M14 改进本能在近死时的选择（dig_in、chased 线索、动作结果等事实）并通过实机验收（2026-10-20，E-016）；M15 修复下界传送门实测中发现的工具问题（use-item、挖掘时间、传送门、猪灵等）并通过实机验收（2026-10-22，E-017）；M16 让寻路器远离岩浆、本能识别在岩浆里、身体类命令在死亡时停止，并通过实机验收（2026-10-22，E-018）；M17 修复任务式生存测试中的寻路与本能问题（建筑旁的脚手架、被围住时的移动、紧急线索的决策对冲）并通过实机验收（2026-10-22，E-019）；M18 新增远处地面高度与带动物走的工具（ground-height、lead-animal，新行为 lead）并通过实机验收（2026-10-24，F-045、F-046、E-020；实地测试中发现的问题见 H 节）；M19 已规划（2026-10-26，F-047～F-059、E-021～E-047）：发布前的阻塞问题、首次体验与安全，26 个步骤，需要批准的项见 PLAN Q16～Q33（2026-10-29 已全部答复）；M19 部分实现：不需要批准的第 1、2（第一部分）、5、6、8、21（部分）步与附加的 E-048、E-049 已完成（2026-10-26～29，见 PLAN M19 的“状态与证据”），其余步骤等待实施指令 |
+| 当前阶段 | M1～M10 全部完成；M1～M9 实现并通过实机验收（M1～M3 2026-10-16，M4～M7 2026-10-17～18，M8～M9 2026-10-18～19）；M10 完成：文档收尾与 10 天生存测试（2026-10-19）；M11、M12 修复两次生存测试中发现的工具问题并通过实机验收（2026-10-19，E-013、E-014）；M13 新增与村民交易的工具并通过实机验收（2026-10-20，F-043、F-044、E-015）；M14 改进本能在近死时的选择（dig_in、chased 线索、动作结果等事实）并通过实机验收（2026-10-20，E-016）；M15 修复下界传送门实测中发现的工具问题（use-item、挖掘时间、传送门、猪灵等）并通过实机验收（2026-10-22，E-017）；M16 让寻路器远离岩浆、本能识别在岩浆里、身体类命令在死亡时停止，并通过实机验收（2026-10-22，E-018）；M17 修复任务式生存测试中的寻路与本能问题（建筑旁的脚手架、被围住时的移动、紧急线索的决策对冲）并通过实机验收（2026-10-22，E-019）；M18 新增远处地面高度与带动物走的工具（ground-height、lead-animal，新行为 lead）并通过实机验收（2026-10-24，F-045、F-046、E-020；实地测试中发现的问题见 H 节）；M19 已规划（2026-10-26，F-047～F-059、E-021～E-047）：发布前的阻塞问题、首次体验与安全，26 个步骤，需要批准的项见 PLAN Q16～Q33（2026-10-29 已全部答复）；M19 的 26 个步骤都已实现（2026-10-26～31，每步一个本地提交，见 PLAN M19 各步的记录）；M19 还不能算整体验收：要所有者做的实机检查（MCPB 在 macOS 与 Windows 上的安装、换一个 LAN 世界的路标、客户端里的工具标题与服务器说明、新建世界的离线加入等）、推送后的 CI 与 release.yml 的 dry-run 都还没做 |
 | 状态标记 | **已确认**：用户已同意，或已用一手资料/实机核实。**暂定**：设计者提出的合理默认值，可在实现时调整，需记录。**待验证**：依赖实测结果，验证前不能当作事实 |
 | 与现有代码的关系 | 新增文件的契约在 F 节，对现有文件的改动在「F2. 现有文件的计划改动」；设计阶段的占位副本（`blueprint/`）已全部替换为代码并在 M6 删除 |
 
@@ -333,7 +333,7 @@ src/main.ts（现有，改动）--创建并注册--> src/autopilot/autopilot.ts�
         └── live-arena.mjs            新增：实机测试共享的场地与诊断辅助
 ```
 
-（M19 另计划新增 `.github/workflows/release.yml`（F-059）。`.github/workflows/build.yml`、`.github/dependabot.yml`、`.github/pull_request_template.md` 已在 E-025、E-026 中修改，`.github/workflows/build.yml` 又在 E-047 中加入 MCPB 扩展的构建、冒烟测试与上传。）
+（M19 新增 `.github/workflows/release.yml`（F-059）：发布流程，verify 与 publish 两个任务。`.github/workflows/build.yml`、`.github/dependabot.yml`、`.github/pull_request_template.md` 已在 E-025、E-026 中修改，`.github/workflows/build.yml` 又在 E-047 中加入 MCPB 扩展的构建、冒烟测试与上传。）
 
 ### 运行或工具生成物
 
@@ -356,7 +356,7 @@ src/main.ts（现有，改动）--创建并注册--> src/autopilot/autopilot.ts�
 
 ## F. 文件契约（新增文件）
 
-每个新增的代码、测试和脚本文件一个条目。M1～M18 的条目都已实现（其中 F-012、F-013、F-025 在 M9 删除）；M19 的条目中状态为 placeholder 的（F-059）还没有实现。状态 verified 表示对应的单元测试与实机验收已实际完成（证据见 PLAN 的进展记录）。M1～M6 条目的验收末尾原来写着规划阶段的“（计划，未执行）”，现已改为指向实际执行的记录（M9 删除的 F-012、F-013、F-025 改为说明删除）。
+每个新增的代码、测试和脚本文件一个条目。M1～M18 的条目都已实现（其中 F-012、F-013、F-025 在 M9 删除）；M19 的条目都已实现，其中 F-059 为 implemented-unverified（release.yml 的 dry-run 要先推送，见 F-059）。状态 verified 表示对应的单元测试与实机验收已实际完成（证据见 PLAN 的进展记录）。M1～M6 条目的验收末尾原来写着规划阶段的“（计划，未执行）”，现已改为指向实际执行的记录（M9 删除的 F-012、F-013、F-025 改为说明删除）。
 
 
 ### F1-a 组装、仲裁与任务
@@ -1219,7 +1219,8 @@ src/main.ts（现有，改动）--创建并注册--> src/autopilot/autopilot.ts�
   - E-044：中英文 README 的工具总数标题等于 F-055 的 TOOL_NAMES.length。
   - E-046：包名带 scope；publishConfig.access 为 public；中英文 README 的 npx 示例中的包名与 package.json 一致，且不含 “sk-or-”。
   - E-047：MCPB manifest 的检查。
-- **依赖**：ava；node:fs。读仓库根目录的 package.json、package-lock.json、tsconfig.build.json、CHANGELOG.md 与 src/。
+  - F-059：`.github/workflows/release.yml` 按行读取（不新增 YAML 解析器）：每个 action 都是 F-059 依赖中的四个之一，固定到 40 位提交 SHA，行尾注释写版本，同一个 action 只有一个 SHA；触发只有 push 的 v* 标签（没有 branches）与 workflow_dispatch；顶层与 verify 的权限只有 contents: read，verify 用 Node 22.x；verify 的 checkout 用 fetch-depth: 0，在解开的包里运行 `npm ci --omit=dev --ignore-scripts`，`--compare-lock` 只有一处，比较的目录就是包含那个 npm-shrinkwrap.json 的解开的包，`npm publish --dry-run <tgz>` 的对象是打好的 tarball；publish 任务 needs verify、environment release，它的 if 同时要求 push 事件与 refs/tags/v 开头、不含 ||（手动运行即使选了标签也不发布），整个文件没有 continue-on-error，权限恰好是 id-token: write 与 contents: write，Node 24.x，npm publish 之前核对 npm --version 不低于 11.5.1；真正的 npm publish 只有 publish 任务里的一行（`npm publish <tgz> --access public --provenance`），verify 只有 --dry-run；publish 任务下载 verify 上传的文件，不 checkout、不 npm ci、不 install、不 pack、不 build，用 `gh release create <标签> <tgz> <mcpb> … --notes-file <这一节>` 建立 Release，其中的 tgz 与 npm publish 的是同一个，文件里没有 gh release delete、edit、upload 或 --clobber（已有的 Release 不被覆盖）。
+- **依赖**：ava；node:fs。读仓库根目录的 package.json、package-lock.json、tsconfig.build.json、CHANGELOG.md、README.md、README.zh-CN.md、mcpb/manifest.json、.github/workflows/release.yml 与 src/。
 - **验收**：npm test 通过。实现时手动试一次：把 files 加上 "src"，或把 mineflayer 改回 ^4.39.0，对应的测试都失败。
 
 ### F-051 · `scripts/test-smoke.mjs`
@@ -1376,18 +1377,18 @@ src/main.ts（现有，改动）--创建并注册--> src/autopilot/autopilot.ts�
 
 ### F-059 · `.github/workflows/release.yml`
 
-- **模块**：M-REL 发布与分发（M19 新增）　**里程碑**：M19　**状态**：placeholder
+- **模块**：M-REL 发布与分发（M19 新增）　**里程碑**：M19　**状态**：implemented-unverified（2026-10-31：文件已写好；tests/release.test.ts 的结构检查通过，js-yaml 能解析；把检查一步抽出来在临时 git 仓库里跑过各种失败情形。GitHub 是否接受这个 workflow、workflow_dispatch 的 dry-run 都还没做：要先推送到默认分支，并且 dry-run 要在 CHANGELOG 已有 ## [3.0.0] 一节的分支上跑，见 PLAN）
 - **职责**：发布流程。代理只做 dry-run；推送标签与批准发布只由所有者做。
   - **触发**：push 标签 v*（上游的 1.0.0～2.0.4 没有 v 前缀，不会触发）；workflow_dispatch 手动运行时只做 dry-run。GitHub 只在默认分支（github 远端现在是 extra-tools）上已有这个文件时才允许 workflow_dispatch，所以第一次 dry-run 要等文件合并到默认分支之后，可以用 --ref 指向其他分支。
   - **verify 任务**（ubuntu-latest，Node 22.x，checkout 的 fetch-depth 为 0，权限 contents: read）：（1）先核对四项，有一项不符就失败并写明是哪一项：标签去掉 v 后等于 package.json 的 version；也等于 mcpb/manifest.json 的 version；CHANGELOG.md（D-006）有这一版的一节；标签指向的提交在发布分支上（`git merge-base --is-ancestor`；发布分支为 extra-tools，Q17，2026-10-29）。手动运行时没有标签：用 package.json 的版本核对 manifest 与 CHANGELOG，跳过分支一项。（2）依次运行 npm ci、lint、typecheck、test、build、`npm shrinkwrap`（只在 CI 的临时检出里，它把 package-lock.json 改名为 npm-shrinkwrap.json）、`npm pack`；把包解开后在其中运行 `npm ci --omit=dev --ignore-scripts`，按包里的 npm-shrinkwrap.json 核对 E-025 列出的依赖版本并跑冒烟测试；另把包装进没有 lockfile 的空目录，对装好的 bin 跑冒烟测试（F-051），这里不比较版本（从本地 tarball 安装时 npm 不按 shrinkwrap 装，2026-10-31 所有者决定，见 F-051）；跑 build:mcpb（F-058），解开后再跑一次冒烟测试。（3）上传 .tgz 与 .mcpb 作为产物，并运行 `npm publish --dry-run <tgz>`。dry-run 到此结束。
-  - **publish 任务**：只在标签触发时运行；needs verify；`environment: release`（所有者在 GitHub 上设为必须由本人批准）；权限 id-token: write、contents: write。使用 Node 24.x，先核对 `npm --version` 不低于 11.5.1（npm 文档：Trusted Publishing 需要 npm CLI ≥ 11.5.1、Node ≥ 22.14.0），不够就失败。下载 verify 的产物，运行 `npm publish <tgz> --access public --provenance`，发布的就是测过的那个 tarball，不重新构建。然后用 runner 自带的 gh 运行 `gh release create <标签> <tgz> <mcpb> --notes-file <从 CHANGELOG 取出的这一节>`；已有同名 Release 时失败，不覆盖。
-  - **认证**：优先用 npm Trusted Publishing（OIDC，没有长期 token）。第一次发布时如果 npm 要求包已经存在，所有者可以存一个 NPM_TOKEN 机密（granular 类型、只限这个包、发布后删除），或者手动发布一次。
+  - **publish 任务**：只在标签触发时运行；needs verify；`environment: release`（所有者在 GitHub 上设为必须由本人批准）；权限 id-token: write、contents: write。使用 Node 24.x，先核对 `npm --version` 不低于 11.5.1（npm 文档：Trusted Publishing 需要 npm CLI ≥ 11.5.1、Node ≥ 22.14.0），不够就失败。下载 verify 的产物，运行 `npm publish <tgz> --access public --provenance`，发布的就是测过的那个 tarball，不重新构建。然后用 runner 自带的 gh 运行 `gh release create <标签> <tgz> <mcpb> --notes-file <从 CHANGELOG 取出的这一节>`；已有同名 Release 时失败，不覆盖。**实施时的补充（2026-10-31）**：npm publish 之前先用 `gh release view` 确认同名 Release 不存在（存在或无法确认时失败，什么都不发布）；`gh release create` 加 `--verify-tag`，不会新建标签；verify 把从 CHANGELOG 取出的一节写成 release-notes.md，与 .tgz、.mcpb 一起放在名为 release 的产物里（保留 30 天，等审批最长 30 天），publish 任务不 checkout；这一节为空时核对 (1) 也失败。
+  - **认证**：优先用 npm Trusted Publishing（OIDC，没有长期 token）。第一次发布时如果 npm 要求包已经存在，所有者可以存一个 NPM_TOKEN 机密（granular 类型、只限这个包、发布后删除），或者手动发布一次（发布 verify 产物里测过的那个 .tgz，不在克隆里重新打包，否则包里没有 npm-shrinkwrap.json；手动发布的版本没有 provenance）。
   - **同一提交的文档**（release-workflow 没有单独的 E 行）：CONTRIBUTING.md 加 “Releasing” 一节，写明只有所有者做的步骤：把仓库设为公开（npm provenance 不支持私有仓库）；建立 npm scope 与发布认证；建立 release environment 并设自己为审批人；更新 CHANGELOG 与版本号；推送 v 标签；在 environment 中批准。README 的 MCPB 下载链接由 E-047 写，本文件不改 README。
 - **不负责**：不推送标签，不批准，不改仓库的可见性；不跑实机测试与情景测试（需要游戏世界）；不在 CI 中运行 Minecraft 服务器（推迟：要下载服务器 jar 并接受 EULA，由所有者决定）；不提交到 Claude 扩展目录（推迟到公开发布并实测安装之后）。
 - **依赖**：actions/checkout、actions/setup-node、actions/upload-artifact、actions/download-artifact，都固定到提交 SHA；不用第三方 action；runner 自带的 gh；npm 仓库（OIDC）。不新增 npm 依赖。
 - **状态与副作用**：外部副作用：npm 公开发布（72 小时后不能撤回，只能 deprecate）与 GitHub Release，只在所有者推送 v 标签并在 release environment 中批准后才发生；占用 CI 分钟数。
 - **关键约束**：代理不推送标签、不批准 environment、不运行真正的 npm publish、不建立 Release；发布的 tarball 与 verify 测过的是同一个文件。
-- **验收**：代理可做的检查：GitHub 能解析这个 workflow（不为此新增 actionlint 依赖）；文件合并到默认分支之后（推送与合并先征得所有者同意），用 workflow_dispatch 跑一次 dry-run，确认 verify 全部通过、`npm publish --dry-run` 列出的文件与 E-024 一致、产物里有 .tgz 与 .mcpb；在一个临时分支上让 manifest 的 version 与 package.json 不同，再手动运行一次，verify 失败并写明原因。打测试标签必须先征得所有者同意。所有者的步骤：把仓库设为公开，配置 release environment 与 npm 发布认证，推送第一个标签；之后核对 npm 包页面显示 provenance，Release 中有两个文件，README 中 E-047 写的 Releases/latest 下载链接能打开并指向这个 .mcpb，`npx -y <包名>@<版本> --version` 输出该版本。已批准：Q18（2026-10-29）；上面所有者的步骤仍只由所有者做。
+- **验收**：代理可做的检查：GitHub 能解析这个 workflow（不为此新增 actionlint 依赖）；文件合并到默认分支之后（推送与合并先征得所有者同意），用 workflow_dispatch 在 CHANGELOG.md 已有 “## [<package.json 的版本>] - <日期>” 一节的分支上跑一次 dry-run（只有 Unreleased 一节时，核对 (1) 按契约以 CHANGELOG 一项失败，后面的步骤都不运行），确认 verify 全部通过、`npm publish --dry-run` 列出的文件与 E-024 一致、产物里有 .tgz 与 .mcpb；在一个临时分支上让 manifest 的 version 与 package.json 不同，再手动运行一次，verify 失败并写明原因。打测试标签必须先征得所有者同意。所有者的步骤：把仓库设为公开，配置 release environment 与 npm 发布认证，推送第一个标签；之后核对 npm 包页面显示 provenance，Release 中有两个文件，README 中 E-047 写的 Releases/latest 下载链接能打开并指向这个 .mcpb，`npx -y <包名>@<版本> --version` 输出该版本。已批准：Q18（2026-10-29）；上面所有者的步骤仍只由所有者做。
 
 ## F2. 现有文件的计划改动
 

@@ -1,0 +1,266 @@
+name: Release
+
+# F-059. A pushed v tag (v3.0.0) runs verify and then, once the owner has approved the release environment, publish.
+# Upstream's tags 1.0.0 to 2.0.4 have no v, so they never match. A manual run is a dry run: verify only. Only the owner
+# pushes tags and approves; see Releasing in CONTRIBUTING.md.
+run-name: ${{ github.event_name == 'push' && format('Release {0}', github.ref_name) || format('Release dry run on {0}', github.ref_name) }}
+
+on:
+  push:
+    tags: [ 'v*' ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# bash -eo pipefail: a failing command fails its step, also inside a pipe.
+defaults:
+  run:
+    shell: bash
+
+# Actions are pinned to commit SHAs, with the version in a comment; dependabot's github-actions entry updates both.
+jobs:
+  verify:
+    name: Verify the release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+    # fetch-depth 0 fetches every branch and tag, for the branch check. No credentials stay in .git/config while the
+    # dependencies' code runs.
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        fetch-depth: 0
+        persist-credentials: false
+
+    # No dependency cache: a release runs rarely, and nothing restored from another run goes into the package.
+    - name: Setup Node.js
+      uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+      with:
+        node-version: '22.x'
+
+    # (1) Every check runs, each failure is one error that names its check, and the step fails after all of them. A
+    # manual run has no tag: it checks the manifest and the CHANGELOG against package.json and skips the branch. The
+    # tests check package-lock.json and the READMEs against package.json. The CHANGELOG section becomes the notes of
+    # the GitHub Release, so it is written to the release files here.
+    - name: Check the tag, the versions, the CHANGELOG and the branch
+      run: |
+        failed=0
+        fail() { echo "::error title=Release check failed::$1"; failed=1; }
+
+        package_version=$(node -p "require('./package.json').version")
+        manifest_version=$(node -p "require('./mcpb/manifest.json').version")
+        if [ "$GITHUB_EVENT_NAME" = push ]; then
+          version="${GITHUB_REF_NAME#v}"
+          echo "Tag $GITHUB_REF_NAME, version $version"
+          [ "$version" = "$package_version" ] || fail "Tag: $GITHUB_REF_NAME does not match package.json, whose version is $package_version (its tag is v$package_version)"
+        else
+          version="$package_version"
+          echo "Manual run, a dry run: no tag, so the manifest and the CHANGELOG are checked against package.json ($version) and the branch check is skipped"
+        fi
+
+        [ "$manifest_version" = "$version" ] || fail "Manifest: mcpb/manifest.json has version $manifest_version, not $version"
+
+        # The section runs from "## [<version>]" (with or without " - <date>") to the next "## " heading.
+        mkdir -p "$RUNNER_TEMP/release"
+        notes="$RUNNER_TEMP/release/release-notes.md"
+        status=0
+        awk -v heading="## [$version]" '
+          /^## / { if (found) exit; found = ($0 == heading || index($0, heading " ") == 1); if (found) seen = 1; next }
+          found { print }
+          END { exit seen ? 0 : 3 }
+        ' CHANGELOG.md > "$notes" || status=$?
+        if [ "$status" -eq 3 ]; then
+          fail "CHANGELOG: CHANGELOG.md has no section '## [$version]' (rename '## [Unreleased]' to '## [$version] - <date>' first)"
+        elif [ "$status" -ne 0 ]; then
+          fail "CHANGELOG: CHANGELOG.md could not be read (awk exited with $status)"
+        elif ! grep -q '[^[:space:]]' "$notes"; then
+          fail "CHANGELOG: the section '## [$version]' of CHANGELOG.md is empty"
+        fi
+
+        if [ "$GITHUB_EVENT_NAME" = push ]; then
+          branch=extra-tools
+          if ! commit=$(git rev-parse --verify --quiet "refs/tags/$GITHUB_REF_NAME^{commit}"); then
+            fail "Branch: the tag $GITHUB_REF_NAME is not in the checkout"
+          elif ! git rev-parse --verify --quiet "refs/remotes/origin/$branch" > /dev/null; then
+            fail "Branch: the release branch $branch is not in the checkout"
+          elif ! git merge-base --is-ancestor "$commit" "refs/remotes/origin/$branch"; then
+            fail "Branch: the tag $GITHUB_REF_NAME points to $commit, which is not on the release branch $branch"
+          else
+            echo "The tagged commit $commit is on $branch"
+          fi
+        fi
+
+        [ "$failed" -eq 0 ] || exit 1
+        echo "Version $version: all checks passed"
+
+    # (2) The checks of CI (E-026), then the package steps of build.yml.
+    - name: Install dependencies
+      run: npm ci
+
+    - name: Lint
+      run: npm run lint
+
+    - name: TypeCheck
+      run: npx tsc --noEmit
+
+    - name: Test
+      run: npm test
+
+    - name: Build
+      run: npm run build
+
+    # npm shrinkwrap renames package-lock.json in this checkout only (E-025). --ignore-scripts: Build has already made
+    # dist/, and the output of prepare would end up in the JSON on stdout. The .tgz lands with the release files, and
+    # it is the file that every later step tests and that publish publishes.
+    - name: Pack
+      run: |
+        npm shrinkwrap
+        mkdir -p "$RUNNER_TEMP/release"
+        npm pack --json --ignore-scripts --pack-destination "$RUNNER_TEMP/release" > "$RUNNER_TEMP/pack.json"
+        echo "PACKAGE_TGZ=$RUNNER_TEMP/release/$(node -p "require(process.env.RUNNER_TEMP + '/pack.json')[0].filename")" >> "$GITHUB_ENV"
+        echo "PACKAGE_NAME=$(node -p "require('./package.json').name")" >> "$GITHUB_ENV"
+
+    - name: Check the package contents
+      run: node scripts/test-smoke.mjs --pack-report "$RUNNER_TEMP/pack.json"
+
+    # As a user installing from the registry gets it: npm ci inside the unpacked package, from its own
+    # npm-shrinkwrap.json (from a local tarball npm would not follow the shrinkwrap; see build.yml and F-051).
+    - name: Install the package from its shrinkwrap
+      run: |
+        mkdir "$RUNNER_TEMP/pinned"
+        tar -xzf "$PACKAGE_TGZ" -C "$RUNNER_TEMP/pinned"
+        cd "$RUNNER_TEMP/pinned/package"
+        npm ci --omit=dev --ignore-scripts --no-audit --no-fund
+
+    - name: Compare the installed versions with the lockfile
+      run: node scripts/test-smoke.mjs --compare-lock "$RUNNER_TEMP/pinned/package" "$RUNNER_TEMP/pinned/package/npm-shrinkwrap.json"
+
+    - name: Smoke test the package installed from its shrinkwrap
+      run: npm run test:smoke -- "$RUNNER_TEMP/pinned/package/dist/main.js"
+
+    # An empty project without a lockfile: npm resolves the dependencies itself here, so this checks that the newest
+    # versions the ranges allow still start. No version comparison here (F-051).
+    - name: Install the package
+      run: |
+        mkdir "$RUNNER_TEMP/install"
+        cd "$RUNNER_TEMP/install"
+        npm init -y
+        npm install --no-audit --no-fund "$PACKAGE_TGZ"
+
+    - name: Smoke test the installed package
+      run: npm run test:smoke -- "$RUNNER_TEMP/install/node_modules/$PACKAGE_NAME/dist/main.js"
+
+    # The MCPB extension (F-058). npm shrinkwrap in Pack has renamed package-lock.json, and build:mcpb takes
+    # npm-shrinkwrap.json first, so the extension installs the tree tested above.
+    - name: Build the MCPB extension
+      run: |
+        npm run build:mcpb
+        echo "MCPB_FILE=$PWD/build/$(node -p "const { name, version } = require('./mcpb/manifest.json'); name + '-' + version").mcpb" >> "$GITHUB_ENV"
+
+    # As Claude Desktop runs it: dist/main.js of the unpacked extension, with the node_modules inside it.
+    - name: Smoke test the unpacked extension
+      run: |
+        npx mcpb unpack "$MCPB_FILE" "$RUNNER_TEMP/mcpb"
+        npm run test:smoke -- "$RUNNER_TEMP/mcpb/dist/main.js"
+
+    # (3) The release files: the .tgz, the .mcpb and the notes from the CHANGELOG. An approval can wait up to 30 days,
+    # so they are kept as long.
+    - name: Collect the release files
+      run: |
+        cp "$MCPB_FILE" "$RUNNER_TEMP/release/"
+        ls -l "$RUNNER_TEMP/release"
+
+    - name: Upload the release files
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+      with:
+        name: release
+        path: ${{ runner.temp }}/release
+        if-no-files-found: error
+        retention-days: 30
+
+    # npm lists what it would publish and uploads nothing. A dry run ends here.
+    - name: Publish dry run
+      run: npm publish --dry-run "$PACKAGE_TGZ"
+
+  publish:
+    name: Publish to npm and create the GitHub Release
+    needs: verify
+    # Only a pushed v tag publishes; a manual run never does, also one started on a tag.
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    # The owner sets this environment to wait for their own approval (CONTRIBUTING.md, Releasing).
+    environment: release
+    permissions:
+      id-token: write
+      contents: write
+
+    # No checkout and no build: this job publishes the files that verify tested.
+    steps:
+    - name: Setup Node.js
+      uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+      with:
+        node-version: '24.x'
+        registry-url: 'https://registry.npmjs.org'
+
+    # npm's documentation: Trusted Publishing needs npm 11.5.1 or later and Node 22.14.0 or later.
+    - name: Check the npm version
+      run: |
+        npm_version=$(npm --version)
+        if ! printf '%s\n' 11.5.1 "$npm_version" | sort -V -C; then
+          echo "::error title=npm too old::npm $npm_version is older than 11.5.1, which Trusted Publishing needs"
+          exit 1
+        fi
+        echo "npm $npm_version, Node $(node --version)"
+
+    - name: Download the release files
+      uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+      with:
+        name: release
+        path: ${{ runner.temp }}/release
+
+    - name: Find the release files
+      run: |
+        release="$RUNNER_TEMP/release"
+        find "$release" -type f -exec ls -l {} +
+        for pattern in '*.tgz' '*.mcpb' 'release-notes.md'; do
+          count=$(find "$release" -type f -name "$pattern" | wc -l)
+          if [ "$count" -ne 1 ]; then
+            echo "::error title=Release files::expected one $pattern among the files that verify uploaded, found $count"
+            exit 1
+          fi
+        done
+        echo "PACKAGE_TGZ=$(find "$release" -type f -name '*.tgz')" >> "$GITHUB_ENV"
+        echo "MCPB_FILE=$(find "$release" -type f -name '*.mcpb')" >> "$GITHUB_ENV"
+        echo "RELEASE_NOTES=$(find "$release" -type f -name 'release-notes.md')" >> "$GITHUB_ENV"
+
+    # Before npm publish, which cannot be undone: an existing Release is never overwritten. gh is the runner's own and
+    # needs the repository named, since there is no checkout.
+    - name: Check that the GitHub Release does not exist yet
+      env:
+        GH_TOKEN: ${{ github.token }}
+        GH_REPO: ${{ github.repository }}
+      run: |
+        if output=$(gh release view "$GITHUB_REF_NAME" --json tagName 2>&1); then
+          echo "::error title=Release exists::the GitHub Release $GITHUB_REF_NAME already exists; it is not overwritten, and nothing was published"
+          exit 1
+        elif [[ "$output" != *"release not found"* ]]; then
+          echo "::error title=Release check::could not check whether the GitHub Release $GITHUB_REF_NAME exists: $output"
+          exit 1
+        fi
+
+    # The tarball that verify packed and tested, not a new build. Trusted Publishing (OIDC) needs no token. If npm
+    # refuses the first publish without one, the owner can store a granular NPM_TOKEN secret limited to this package
+    # and delete it afterwards (CONTRIBUTING.md); without the secret NODE_AUTH_TOKEN is empty.
+    - name: Publish to npm
+      env:
+        NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      run: npm publish "$PACKAGE_TGZ" --access public --provenance
+
+    # --verify-tag: gh never creates the tag; it must be the one that was pushed.
+    - name: Create the GitHub Release
+      env:
+        GH_TOKEN: ${{ github.token }}
+        GH_REPO: ${{ github.repository }}
+      run: gh release create "$GITHUB_REF_NAME" "$PACKAGE_TGZ" "$MCPB_FILE" --verify-tag --notes-file "$RELEASE_NOTES"

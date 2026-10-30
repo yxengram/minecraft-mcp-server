@@ -369,3 +369,138 @@ test('E-047: mcpb/ and scripts/ stay out of the npm package, and the build scrip
   t.deepEqual(files.filter(entry => /^(mcpb|scripts|build)(\/|$)/.test(entry)), []);
   t.is(scripts?.['build:mcpb'], 'node scripts/build-mcpb.mjs');
 });
+
+// ---------------------------------------------------------------------------------------------------------------
+// F-059 (Q18): .github/workflows/release.yml publishes only from a pushed v tag, after verify and the owner's approval
+// of the release environment, and publishes the tarball that verify tested instead of building again; a manual run is
+// a dry run. Every action is one of the four F-059 names, pinned to a commit SHA with its version in a trailing
+// comment. No YAML parser is a dependency, so the file is read as lines in GitHub's usual layout: two spaces per
+// level, the steps listed at the level of "steps:".
+// ---------------------------------------------------------------------------------------------------------------
+
+const RELEASE_WORKFLOW = '.github/workflows/release.yml';
+const RELEASE_ACTIONS = ['actions/checkout', 'actions/setup-node', 'actions/upload-artifact', 'actions/download-artifact'];
+// A shell variable as a quoted argument ("$NAME" or "${NAME}"); the test does not care what the workflow calls it.
+const SHELL_VARIABLE = String.raw`"\$\{?(\w+)\}?"`;
+
+function workflowLines(): string[] {
+  return fs.readFileSync(new URL(`../${RELEASE_WORKFLOW}`, import.meta.url), 'utf8').split(/\r?\n/);
+}
+
+function indentOf(line: string): number {
+  return line.length - line.trimStart().length;
+}
+
+/** The lines inside the mapping `key:` that starts `indent` spaces in, without blank lines and comments. */
+function yamlBlock(lines: string[], key: string, indent: number): string[] {
+  const head = `${' '.repeat(indent)}${key}:`;
+  const start = lines.findIndex(line => line === head || line.startsWith(`${head} `));
+  const inside: string[] = [];
+  if (start < 0) return inside;
+  for (const line of lines.slice(start + 1)) {
+    if (line.trim() === '' || line.trim().startsWith('#')) continue;
+    if (indentOf(line) <= indent) break;
+    inside.push(line);
+  }
+  return inside;
+}
+
+function yamlKeys(lines: string[], indent: number): string[] {
+  return lines.filter(line => indentOf(line) === indent).map(line => line.trim().match(/^([\w-]+):/)?.[1])
+    .filter((key): key is string => key !== undefined);
+}
+
+function trimmed(lines: string[]): string[] {
+  return lines.map(line => line.trim());
+}
+
+function nodeVersion(block: string[], major: number): boolean {
+  return trimmed(block).some(line => new RegExp(`^node-version:\\s*(['"]?)${major}\\.x\\1$`).test(line));
+}
+
+test('F-059: every action in release.yml is one of the four F-059 names, pinned to a commit SHA with its version', (t) => {
+  const uses = workflowLines().map(line => line.match(/^\s*(?:- )?uses:\s*(.*)$/)?.[1])
+    .filter((value): value is string => value !== undefined);
+  t.true(uses.length > 0, `${RELEASE_WORKFLOW} uses no action`);
+  t.deepEqual(uses.filter(value => !/^[\w.-]+\/[\w.-]+@[0-9a-f]{40} # v\d+\.\d+\.\d+$/.test(value)), [],
+    'pin each action to a full commit SHA, with its version in a trailing comment');
+  const actions = [...new Set(uses.map(value => value.split('@')[0]))];
+  t.deepEqual(actions.sort(), [...RELEASE_ACTIONS].sort(), 'only actions/checkout, setup-node, upload-artifact and download-artifact');
+  const pinned = actions.filter(action => new Set(uses.filter(value => value.startsWith(`${action}@`))).size > 1);
+  t.deepEqual(pinned, [], 'an action used twice has the same pin both times');
+});
+
+test('F-059: only a pushed v tag or a manual run starts release.yml, and the workflow reads the repository only', (t) => {
+  const lines = workflowLines();
+  const on = yamlBlock(lines, 'on', 0);
+  t.deepEqual(yamlKeys(on, 2), ['push', 'workflow_dispatch']);
+  const push = trimmed(yamlBlock(on, 'push', 2));
+  t.is(push.length, 1, 'push has only tags (no branches)');
+  t.regex(push[0] ?? '', /^tags:\s*\[\s*(['"])v\*\1\s*\]$/, 'upstream\'s tags without the v must not match');
+  t.deepEqual(trimmed(yamlBlock(lines, 'permissions', 0)), ['contents: read']);
+  const verify = yamlBlock(yamlBlock(lines, 'jobs', 0), 'verify', 2);
+  t.deepEqual(trimmed(yamlBlock(verify, 'permissions', 4)), ['contents: read']);
+  t.true(nodeVersion(verify, 22), 'verify runs on Node 22.x');
+});
+
+test('F-059: verify installs the unpacked package from its own shrinkwrap and dry-runs the packed tarball', (t) => {
+  const verify = yamlBlock(yamlBlock(workflowLines(), 'jobs', 0), 'verify', 2);
+  t.true(trimmed(verify).includes('fetch-depth: 0'), 'the branch check needs every branch in the checkout');
+  t.true(verify.some(line => /\bnpm ci --omit=dev --ignore-scripts\b/.test(line)),
+    'the unpacked package is installed with npm ci from its own shrinkwrap');
+  const compare = verify.filter(line => line.includes('--compare-lock'));
+  t.is(compare.length, 1);
+  t.regex(compare[0] ?? '', /--compare-lock "([^"]+)" "\1\/npm-shrinkwrap\.json"/,
+    'the versions are compared in the unpacked package, against its own npm-shrinkwrap.json');
+  t.true(verify.some(line => new RegExp(`npm publish --dry-run ${SHELL_VARIABLE}$`).test(line.trim())),
+    'verify dry-runs the packed tarball, not a new pack of the checkout');
+});
+
+test('F-059: the publish job runs only for a pushed v tag, after verify and the release environment', (t) => {
+  const lines = workflowLines();
+  const jobs = yamlBlock(lines, 'jobs', 0);
+  t.deepEqual(yamlKeys(jobs, 2), ['verify', 'publish']);
+  const publish = yamlBlock(jobs, 'publish', 2);
+  const settings = trimmed(publish.filter(line => indentOf(line) === 4));
+  t.true(settings.includes('needs: verify'), 'publish needs verify');
+  t.true(settings.includes('environment: release'), 'the owner approves the release environment');
+  const conditions = settings.filter(line => line.startsWith('if:'));
+  t.is(conditions.length, 1, 'publish has one if:');
+  const condition = conditions[0] ?? '';
+  t.true(condition.includes("github.event_name == 'push'"), 'a manual run, also one started on a tag, never publishes');
+  t.true(condition.includes("startsWith(github.ref, 'refs/tags/v')"), 'only a v tag publishes');
+  t.false(condition.includes('||'), 'no other way into publish');
+  const code = lines.filter(line => !line.trim().startsWith('#'));
+  t.false(code.some(line => /\bcontinue-on-error\b/.test(line)), 'a failed verify step or job must stop publish');
+  t.deepEqual(trimmed(yamlBlock(publish, 'permissions', 4)).sort(), ['contents: write', 'id-token: write']);
+  t.true(nodeVersion(publish, 24), 'publish runs on Node 24.x');
+  const gate = publish.findIndex(line => /\bnpm --version\b/.test(line));
+  const publishing = publish.findIndex(line => /\bnpm publish\b/.test(line) && !line.includes('--dry-run'));
+  t.true(gate >= 0 && publish.some(line => line.includes('11.5.1')), 'publish fails unless npm is 11.5.1 or later');
+  t.true(gate < publishing, 'the npm version is checked before npm publish');
+});
+
+test('F-059: only the publish job runs npm publish for real, on the downloaded tarball, without building again', (t) => {
+  const lines = workflowLines();
+  const jobs = yamlBlock(lines, 'jobs', 0);
+  const verify = yamlBlock(jobs, 'verify', 2);
+  const publish = yamlBlock(jobs, 'publish', 2);
+  const real = (block: string[]) => block.filter(line => /\bnpm publish\b/.test(line) && !line.includes('--dry-run'));
+  const code = lines.filter(line => !line.trim().startsWith('#'));
+  t.deepEqual(real(verify), [], 'verify only runs npm publish --dry-run');
+  t.deepEqual(real(code), real(publish), 'npm publish outside the publish job');
+  t.is(real(publish).length, 1);
+  const tarball = real(publish)[0]?.match(new RegExp(`npm publish ${SHELL_VARIABLE} --access public --provenance$`))?.[1];
+  t.truthy(tarball, 'publish runs npm publish <tgz> --access public --provenance');
+  t.true(publish.some(line => /uses: actions\/download-artifact@/.test(line)), 'publish takes the files that verify uploaded');
+  t.true(verify.some(line => /uses: actions\/upload-artifact@/.test(line)), 'verify uploads the files it tested');
+  t.deepEqual(publish.filter(line => /\bnpm (ci|install|pack|run build)\b|uses: actions\/checkout@/.test(line)), [],
+    'publish neither checks out nor builds: it publishes the tested tarball');
+  const tag = String.raw`(?:"\$\{?GITHUB_REF_NAME\}?"|"?\$\{\{ github\.ref_name \}\}"?)`;
+  const release = new RegExp(`gh release create ${tag} ${SHELL_VARIABLE} ${SHELL_VARIABLE} (?:--[\\w-]+ )*--notes-file ${SHELL_VARIABLE}`);
+  const created = publish.map(line => line.match(release)).filter((match): match is RegExpMatchArray => match !== null);
+  t.is(created.length, 1, 'publish creates the Release for the tag with the .tgz and the .mcpb and the CHANGELOG section as notes');
+  t.is(created[0]?.[1], tarball ?? '', 'the Release carries the tarball that npm publish published');
+  t.not(created[0]?.[2], tarball, 'the Release carries the .mcpb as well');
+  t.false(code.some(line => /\bgh release (delete|edit|upload)\b|--clobber\b/.test(line)), 'an existing Release is never overwritten');
+});
