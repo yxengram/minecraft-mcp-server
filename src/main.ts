@@ -62,6 +62,9 @@ async function main() {
   const eventStore = new EventStore();
   const waypointStore = new WaypointStore(config.waypointFile ?? defaultWaypointFile(), config.host);
   const autopilot = new Autopilot({ events: eventStore, waypoints: waypointStore, decisionModel: config.decisionModel, log });
+  // The key is checked once now and again on every join (E-036); the result goes to stderr and an instinct event,
+  // and get-policy shows it before the bot joins. Not awaited: connecting does not wait for OpenRouter.
+  void autopilot.checkDecisionModel();
 
   // Public chat to read-chat and chat events, whispers to whisper events; only listed speakers reach the triage (E-035).
   const chat = chatCallbacks(messageStore, eventStore, (speaker, text, whisper) => autopilot.handleChat(speaker, text, whisper));
@@ -98,7 +101,7 @@ async function main() {
   registerEntityTools(factory, getBot, getAutopilot);
   registerChatTools(factory, getBot, messageStore, { allowCommands: config.allowCommands });
   registerFlightTools(factory, getBot);
-  registerGameStateTools(factory, getBot);
+  registerGameStateTools(factory, getBot, getAutopilot);
   registerCraftingTools(factory, getBot);
   registerFurnaceTools(factory, getBot);
   registerEventTools(factory, eventStore, getBot);

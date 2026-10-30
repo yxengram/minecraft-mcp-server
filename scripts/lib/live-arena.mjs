@@ -46,6 +46,8 @@ export function responseText(result) {
  * `serverEnv` adds environment variables for the server (the stdio transport only passes a whitelist).
  * The server always gets --allow-commands: the live tests build the arena with server commands sent through send-chat
  * (E-033).
+ * The server's stderr is read from the start and every line is kept (`stderrLines()`), so the scripts can check what
+ * it logged (E-036); a pipe nobody reads fills up and stalls a long run. The lines are not printed.
  */
 export function createArena({ port, botName, helperName, clientName, serverArgs = [], serverEnv = {} }) {
   const waypointDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-live-world-'));
@@ -61,9 +63,19 @@ export function createArena({ port, botName, helperName, clientName, serverArgs 
       '--allow-commands',
       ...serverArgs
     ],
-    stderr: 'ignore',
+    stderr: 'pipe',
     env: { ...getDefaultEnvironment(), ...Object.fromEntries(Object.entries(serverEnv).filter(([, value]) => value)) }
   });
+  // The SDK hands out this stream before the server starts, so nothing it writes is missed.
+  const stderr = [];
+  let partialLine = '';
+  transport.stderr?.on('data', chunk => {
+    const lines = (partialLine + chunk.toString()).split(/\r?\n/);
+    partialLine = lines.pop();
+    stderr.push(...lines);
+  });
+  /** Every complete line the server has written to stderr so far, plus an unfinished last one. */
+  const stderrLines = () => (partialLine ? [...stderr, partialLine] : [...stderr]);
 
   const covered = new Set();
   const results = [];
@@ -280,6 +292,6 @@ export function createArena({ port, botName, helperName, clientName, serverArgs 
   return {
     arena, client, covered, results,
     call, expect, expectIncludes, waitFor, cmd, position, inventoryCount, waitForCount, block, placeAndVerify,
-    distanceTo, printDiagnostics, step, connect, setup, cleanup, close
+    distanceTo, printDiagnostics, step, connect, setup, cleanup, close, stderrLines
   };
 }

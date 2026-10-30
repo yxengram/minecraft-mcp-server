@@ -6,6 +6,8 @@ import { formatStat } from '../format.js';
 import { describeItem } from './item-utils.js';
 import { describeEntity, findNearbyEntities, formatPosition } from './entity-utils.js';
 import { isWaterLike } from './terrain-utils.js';
+import type { Autopilot } from '../autopilot/autopilot.js';
+import { instinctState } from './policy-tools.js';
 
 const ARMOR_SLOTS = ['head', 'torso', 'legs', 'feet', 'off-hand'] as const;
 
@@ -120,7 +122,8 @@ function summarizeInventory(bot: mineflayer.Bot): string {
     .join(', ');
 }
 
-export function registerGameStateTools(factory: ToolFactory, getBot: () => mineflayer.Bot): void {
+/** getAutopilot (passed by src/main.ts) adds the instinct's state to get-observation, as get-policy shows it (E-036). */
+export function registerGameStateTools(factory: ToolFactory, getBot: () => mineflayer.Bot, getAutopilot?: () => Autopilot): void {
   factory.registerTool(
     "detect-gamemode",
     "Detect the gamemode on game",
@@ -133,7 +136,7 @@ export function registerGameStateTools(factory: ToolFactory, getBot: () => minef
 
   factory.registerTool(
     "get-observation",
-    "Get a one-call snapshot of the bot's situation: vitals, position, time, weather, held item, equipment, inventory summary, and nearby entities",
+    "Get a one-call snapshot of the bot's situation: vitals, position, time, weather, held item, equipment, inventory summary, whether the instinct is online, and nearby entities",
     {
       radius: z.coerce.number().finite().positive().optional().describe("Radius for nearby entities (default: 16)"),
       maxEntities: z.coerce.number().int().min(0).max(50).optional().describe("Maximum number of nearby entities to list (default: 10)")
@@ -153,6 +156,7 @@ export function registerGameStateTools(factory: ToolFactory, getBot: () => minef
         `Equipment: ${describeEquipment(bot)}`,
         `Inventory: ${summarizeInventory(bot)}`
       ];
+      if (getAutopilot) lines.push(`Instinct: ${instinctState(getAutopilot())}`);
 
       const nearby = findNearbyEntities(bot, { maxDistance: radius });
       if (nearby.length === 0) {

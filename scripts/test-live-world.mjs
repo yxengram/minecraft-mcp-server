@@ -7,7 +7,9 @@
 // It builds a floating stone arena at y=240 above the bot (removed again at the end), gives itself items, summons entities, changes
 // time and game mode, kicks the bot once (the next call joins again), and kills the bot at the end to test death/respawn events. A second
 // in-process bot (MCPHelper) acts as another player for chat, whisper and follow tests.
-// With OPENROUTER_API_KEY set, the decision model is used as well; without it, the no-key behavior is checked.
+// With the real OPENROUTER_API_KEY the decision model is used as well; without a key the no-key behavior is checked, and
+// LIVE_FAKE_KEY=1 says that this round's OPENROUTER_API_KEY is a made-up literal: the key check (E-036) must then show
+// OpenRouter's refusal everywhere. So there are three rounds: no key, a made-up key with LIVE_FAKE_KEY=1, the real key.
 
 import { Vec3 } from 'vec3';
 import { createArena, parseLiveArgs, responseText, SetupFailed, sleep } from './lib/live-arena.mjs';
@@ -16,6 +18,15 @@ const { port } = parseLiveArgs('This test');
 const BOT_NAME = 'MCPWorldTest';
 const HELPER_NAME = 'MCPHelper';
 const hasDecisionKey = Boolean(process.env.OPENROUTER_API_KEY);
+const fakeKey = process.env.LIVE_FAKE_KEY === '1';
+if (fakeKey && !hasDecisionKey) {
+  console.error('LIVE_FAKE_KEY=1 needs a made-up OPENROUTER_API_KEY for this round');
+  process.exit(2);
+}
+const keyMode = !hasDecisionKey ? 'none' : fakeKey ? 'fake' : 'real';
+// E-036: the health each round must show, in the same words on stderr, in the events, get-policy and get-observation.
+const OFFLINE_REASON = { none: 'no OPENROUTER_API_KEY', fake: 'OpenRouter rejected the API key (HTTP 401)' }[keyMode];
+const KEY_CHECK_WAIT_MS = 15000;
 
 const session = createArena({
   port,
@@ -26,7 +37,7 @@ const session = createArena({
 });
 const {
   client, covered, results, call, expect, expectIncludes, waitFor, cmd, position, inventoryCount, waitForCount, block,
-  placeAndVerify, distanceTo, step
+  placeAndVerify, distanceTo, step, stderrLines
 } = session;
 
 async function startTask(behavior, params) {
@@ -64,15 +75,50 @@ try {
     expectIncludes(await call('list-inventory'), 'empty', 'list-inventory');
   });
 
-  await step('decisions: list-decision-models', async () => {
+  await step(`decisions: the key check (${{ none: 'no key', fake: 'a made-up key', real: 'the real key' }[keyMode]}) and list-decision-models`, async () => {
+    // The check runs at startup and again on the join, in the background: wait for its result, at most 15 s. A check
+    // that ended without an answer says "key not checked yet (<reason>)" while the join's check may still be running,
+    // so any "not checked yet" is waited out; whatever is left after 15 s is what the checks below report.
+    let policy = '';
+    const deadline = Date.now() + KEY_CHECK_WAIT_MS;
+    while (Date.now() < deadline) {
+      policy = await call('get-policy');
+      if (!/^Decision model: .*key not checked yet\b/m.test(policy)) break;
+      await sleep(500);
+    }
+    const lineOf = (text, start) => text.split('\n').find(line => line.startsWith(start)) ?? `<no "${start}" line>`;
+    const decisionLine = lineOf(policy, 'Decision model: ');
+    const instinctLine = lineOf(policy, 'Instinct: ');
+    const observed = lineOf(await call('get-observation'), 'Instinct: ');
+    const events = await call('get-events', { types: ['instinct'], limit: 100 });
+    const logged = stderrLines();
+    expect(decisionLine.startsWith(hasDecisionKey ? 'Decision model: enabled' : 'Decision model: disabled'), `get-policy decision status: ${decisionLine}`);
+    if (keyMode === 'real') {
+      expect(/, key checked at \d\d:\d\d UTC; /.test(decisionLine), `get-policy with the real key: ${decisionLine}`);
+      expect(/^Instinct: online \(key checked at \d\d:\d\d UTC\); /.test(instinctLine), `get-policy with the real key: ${instinctLine}`);
+      expectIncludes(events, '[instinct] decision model online (', 'the instinct event of the key check');
+      expect(logged.some(line => line.includes('[info] Decision model online (')), 'stderr has no "Decision model online" line');
+    } else {
+      const state = `OFFLINE (${OFFLINE_REASON}): the bot does not react to dangers by itself`;
+      expectIncludes(decisionLine, `OFFLINE (${OFFLINE_REASON})`, 'get-policy decision status');
+      expect(instinctLine.startsWith(`Instinct: ${state}; `), `get-policy: expected "Instinct: ${state}; ...", got: ${instinctLine}`);
+      expectIncludes(events, `[instinct] decision model offline: ${OFFLINE_REASON}; dangers are left to you`, 'the instinct event of the key check');
+      const warning = `[warn] Decision model OFFLINE: ${OFFLINE_REASON}. The bot will not react to dangers by itself`;
+      expect(logged.some(line => line.includes(warning)), `stderr has no line with "${warning}"`);
+    }
+    // One state, shown the same way: get-policy only adds the calls of the last minute.
+    const policyState = instinctLine.replace(/; \d+ call\(s\) in the last minute$/, '');
+    expect(observed === policyState, `get-observation and get-policy show different states:\n${observed}\n${instinctLine}`);
+
     const text = await call('list-decision-models');
     if (hasDecisionKey) {
+      // The catalog does not check the key (E-036 step 0), so a made-up key still gets the list.
       expect(/\d+ decision model\(s\); in use: /.test(text), `list-decision-models with a key:\n${text}`);
       expect(/^- \S+/m.test(text), `list-decision-models lists no model:\n${text}`);
     } else {
       expectIncludes(text, 'Not configured', 'list-decision-models without a key');
+      expectIncludes(text, 'Without a key the instinct is offline: the bot does not react to dangers by itself', 'list-decision-models without a key');
     }
-    expectIncludes(await call('get-policy'), hasDecisionKey ? 'Decision model: enabled' : 'Decision model: disabled', 'get-policy decision status');
   });
 
   await step('policy: get-policy and set-policy', async () => {
@@ -811,6 +857,11 @@ try {
 
   const notCovered = tools.map(tool => tool.name).filter(name => !covered.has(name));
   results.push({ name: 'coverage', ok: notCovered.length === 0, error: `not exercised: ${notCovered.join(', ')}` });
+  // I4: the key is in no line the server wrote to stderr during the whole run (only the count is printed, never a line).
+  if (hasDecisionKey) {
+    const leaks = stderrLines().filter(line => line.includes(process.env.OPENROUTER_API_KEY)).length;
+    results.push({ name: 'stderr without the key', ok: leaks === 0, error: `${leaks} stderr line(s) contain the key` });
+  }
 
   const failed = results.filter(result => !result.ok);
   console.log(`\nExercised ${covered.size} of ${tools.length} tools`);

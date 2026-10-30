@@ -1,8 +1,42 @@
 // Contract: docs/BLUEPRINT.md F-018: get-policy, set-policy (M3) and list-decision-models (M4). Never prints the API key (I4).
+// E-036: the decision model's health from the key check, shown the same way here, in get-observation, in the instinct
+// events and on stderr.
 import { ToolFactory } from '../tool-factory.js';
 import type { Autopilot } from '../autopilot/autopilot.js';
 import type { EventStore } from '../event-store.js';
+import type { DecisionHealth } from '../decisions/openrouter-client.js';
 import { chatUpdateSchema, combatUpdateSchema, decisionsUpdateSchema, describePolicy, instinctUpdateSchema } from '../autopilot/policy.js';
+
+/** "HH:MM UTC" for the time of a check or of the last decision that succeeded. */
+function checkedAt(at: number | undefined): string {
+  return at === undefined ? 'an unknown time' : `${new Date(at).toISOString().slice(11, 16)} UTC`;
+}
+
+/** The key's state for the Decision model line of get-policy. */
+function keyState(health: DecisionHealth): string {
+  if (health.state === 'offline') return `OFFLINE (${health.reason})`;
+  if (health.state === 'online') return `key checked at ${checkedAt(health.at)}`;
+  return `key not checked yet${health.reason ? ` (${health.reason})` : ''}`;
+}
+
+/**
+ * What the instinct can do now (E-036), for the Instinct line of get-policy and get-observation alike. An OFFLINE health
+ * comes first, then the policy switches, then a failed last request; otherwise online or not checked yet. Before the
+ * bot has joined there is no instinct engine, and so no last request to report.
+ */
+export function instinctState(autopilot: Autopilot): string {
+  const health = autopilot.decisions.health();
+  if (health.state === 'offline') return `OFFLINE (${health.reason}): the bot does not react to dangers by itself`;
+  const policy = autopilot.policy.get();
+  if (!policy.instinct.enabled) return 'turned off in the policy';
+  if (!policy.decisions.enabled) {
+    return 'offline (decisions are turned off in the policy); dangers are only reported as instinct events, the bot does not act on them';
+  }
+  const offline = autopilot.isReady() ? autopilot.instinct.status().offline : null;
+  if (offline) return `offline at the last request (${offline}); dangers are left to you`;
+  if (health.state === 'online') return `online (key checked at ${checkedAt(health.at)})`;
+  return `not checked yet${health.reason ? ` (${health.reason})` : ''}`;
+}
 
 export function registerPolicyTools(factory: ToolFactory, getAutopilot: () => Autopilot, events: EventStore): void {
   factory.registerTool(
@@ -13,20 +47,15 @@ export function registerPolicyTools(factory: ToolFactory, getAutopilot: () => Au
       const autopilot = getAutopilot();
       const lines = [describePolicy(autopilot.policy.get())];
       const status = autopilot.decisions.status();
+      // Shown before the bot joins too: the server checks the key when it starts.
+      const key = keyState(autopilot.decisions.health());
       lines.push('', !status.configured
-        ? 'Decision model: disabled (no OPENROUTER_API_KEY); chat is sorted by rules: whispers and messages naming the bot are reported'
-        : `Decision model: ${status.enabled ? 'enabled' : 'turned off in the policy'}, ${status.model}; ${status.callsLastHour} call(s) in the last hour`);
+        ? `Decision model: disabled, ${key}; chat is sorted by rules: whispers and messages naming the bot are reported`
+        : `Decision model: ${status.enabled ? 'enabled' : 'turned off in the policy'}, ${status.model}, ${key}; ${status.callsLastHour} call(s) in the last hour`);
       if (autopilot.isReady()) {
         const instinct = autopilot.instinct.status();
         lines.push('');
-        const online = !instinct.enabled
-          ? 'turned off in the policy'
-          : !status.configured
-            ? 'offline (no OPENROUTER_API_KEY); dangers are only reported as instinct events, the bot does not act on them'
-            : !status.enabled
-              ? 'offline (decisions are turned off in the policy); dangers are only reported as instinct events, the bot does not act on them'
-            : instinct.offline ? `offline at the last request (${instinct.offline}); dangers are left to you` : 'online';
-        lines.push(`Instinct: ${online}; ${status.instinctCallsLastMinute} call(s) in the last minute`);
+        lines.push(`Instinct: ${instinctState(autopilot)}; ${status.instinctCallsLastMinute} call(s) in the last minute`);
         lines.push(instinct.running ? `Instinct action running now: ${instinct.running.action} (${(instinct.running.ms / 1000).toFixed(1)}s; ${instinct.running.reason})` : 'No instinct action is running');
         if (instinct.lastDecision) lines.push(`Last instinct decision: ${instinct.lastDecision}`);
         const { ticks, averageMs, maxMs } = instinct.timing;
@@ -70,7 +99,7 @@ export function registerPolicyTools(factory: ToolFactory, getAutopilot: () => Au
       const catalog = await autopilot.decisions.listModels();
       if (!catalog.ok) {
         return catalog.error === 'disabled'
-          ? factory.createResponse(`Not configured: ${catalog.message}. Without a key, chat is sorted by rules and everything else works as usual`)
+          ? factory.createResponse(`Not configured: ${catalog.message}. Without a key the instinct is offline: the bot does not react to dangers by itself; chat is sorted by rules`)
           : factory.createErrorResponse(`Could not read the catalog (${catalog.error}): ${catalog.message}`);
       }
       const current = autopilot.policy.get().decisions.model;

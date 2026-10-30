@@ -7,7 +7,10 @@ export interface ServerConfig {
   port: number;
   username: string;
   waypointFile?: string;
-  /** Decision model id for chat triage and chat commands (BLUEPRINT E-006); the API key comes only from OPENROUTER_API_KEY. */
+  /**
+   * Decision model id for the instinct, chat triage and chat commands (BLUEPRINT E-006, E-036); the API key comes only
+   * from OPENROUTER_API_KEY.
+   */
   decisionModel?: string;
   /**
    * send-chat may run server commands besides /msg, /tell, /w, /me, /teammsg and /tm (BLUEPRINT E-033). Only this
@@ -116,7 +119,7 @@ export function parseConfig(argv: string[] = hideBin(process.argv)): ServerConfi
     })
     .option('decision-model', {
       type: 'string',
-      description: 'OpenRouter decision model id used to sort chat (needs OPENROUTER_API_KEY in the environment)'
+      description: 'OpenRouter decision model id for the instinct (how the bot reacts to dangers by itself) and for sorting chat (needs OPENROUTER_API_KEY in the environment)'
     })
     .option('allow-commands', {
       type: 'boolean',

@@ -4,8 +4,13 @@ import type { Policy } from '../autopilot/policy.js';
 
 export const DECISIONS_URL = 'https://openrouter.ai/api/alpha/decisions';
 export const MODELS_URL = 'https://openrouter.ai/api/v1/models?output_modalities=decisions';
+/** Answers 401 for a key OpenRouter does not know and 200 for a real one; the catalog answers 200 to any key (E-036 step 0). */
+export const KEY_URL = 'https://openrouter.ai/api/v1/key';
 export const DEFAULT_TIMEOUT_MS = 1500;
 const CATALOG_TIMEOUT_MS = 10000;
+// Per request of checkAccess (the key, then the catalog), so a whole check ends within 10 s.
+const CHECK_TIMEOUT_MS = 5000;
+export const NO_KEY_REASON = 'no OPENROUTER_API_KEY';
 const MAX_QUESTIONS = 128;
 const MINUTE_MS = 60_000;
 const HOUR_MS = 3_600_000;
@@ -53,6 +58,18 @@ export interface ClientStatus {
 /** Which per-minute limit a call counts against: decisions.maxCallsPerMinute or instinct.maxCallsPerMinute. */
 export type DecisionBudget = 'decisions' | 'instinct';
 
+/**
+ * Whether the decision model can be used (E-036): online after a passed check or a decision that succeeded (`at` is
+ * then that time), offline when the key is missing or refused or the model is not in the catalog, unchecked before
+ * the first check or when a check could not tell. `reason` is a fixed sentence with at most a status code, never a
+ * response body (I4).
+ */
+export interface DecisionHealth {
+  state: 'online' | 'offline' | 'unchecked';
+  reason?: string;
+  at?: number;
+}
+
 type FetchLike = (url: string, init: { method: string; headers: Record<string, string>; body?: string; signal: AbortSignal }) => Promise<{
   ok: boolean;
   status: number;
@@ -66,6 +83,8 @@ export interface OpenRouterClientOptions {
   fetch?: FetchLike;
   now?: () => number;
   timeoutMs?: number;
+  /** Called when the health's state or reason changes; a newer `at` alone is no change. */
+  onHealthChange?: (health: DecisionHealth, previous: DecisionHealth) => void;
 }
 
 function isProbability(value: unknown): value is number {
@@ -110,11 +129,43 @@ function parseAnswer(question: DecisionQuestion, raw: unknown): DecisionAnswer |
   return { type: 'score', score: answer.score, confidence: confidenceOf(answer), probabilities: answer.probabilities };
 }
 
+/** The models of a catalog body, or null when it has no data list; throws when the body is not JSON. */
+function parseCatalog(body: string): DecisionModelInfo[] | null {
+  const data = (JSON.parse(body) as { data?: unknown } | null)?.data;
+  if (!Array.isArray(data)) return null;
+  return data
+    .filter((entry): entry is Record<string, unknown> => Boolean(entry) && typeof entry === 'object' && typeof (entry as { id?: unknown }).id === 'string')
+    .map(entry => ({
+      id: entry.id as string,
+      canonicalSlug: typeof entry.canonical_slug === 'string' ? entry.canonical_slug : undefined,
+      name: typeof entry.name === 'string' ? entry.name : undefined,
+      contextLength: typeof entry.context_length === 'number' ? entry.context_length : undefined,
+      promptPrice: typeof (entry.pricing as { prompt?: unknown } | undefined)?.prompt === 'string' ? (entry.pricing as { prompt: string }).prompt : undefined
+    }));
+}
+
+/** The health a refused check request means: a fixed sentence with the status code (E-036), never the body (I4). */
+function refusedHealth(status: number, what: string): DecisionHealth {
+  if (status === 401 || status === 403) return { state: 'offline', reason: `OpenRouter rejected the API key (HTTP ${status})` };
+  if (status === 402) return { state: 'offline', reason: `the OpenRouter account has no credit (HTTP ${status})` };
+  return { state: 'unchecked', reason: `OpenRouter could not ${what} (HTTP ${status})` };
+}
+
+type CheckReply = { ok: boolean; status: number; body: string } | 'timeout' | 'network';
+
+function unreachedHealth(reply: 'timeout' | 'network'): DecisionHealth {
+  return { state: 'unchecked', reason: reply === 'timeout' ? `no answer from OpenRouter within ${CHECK_TIMEOUT_MS / 1000} s` : 'could not reach OpenRouter' };
+}
+
 export class OpenRouterClient {
   private calls: number[] = [];
   private instinctCalls: number[] = [];
   private readonly fetch: FetchLike;
   private readonly now: () => number;
+  private healthState: DecisionHealth = { state: 'unchecked' };
+  private checking: Promise<DecisionHealth> | null = null;
+  // Decisions that succeeded; a check that ends after one of them has older evidence and is not applied.
+  private successes = 0;
 
   constructor(private readonly options: OpenRouterClientOptions) {
     this.fetch = options.fetch ?? ((url, init) => fetch(url, init));
@@ -135,6 +186,25 @@ export class OpenRouterClient {
 
   isConfigured(): boolean {
     return this.key() !== undefined;
+  }
+
+  /** The current health (E-036). Without a key it is OFFLINE even before the first check, since none is needed. */
+  health(): DecisionHealth {
+    if (!this.isConfigured()) return { state: 'offline', reason: NO_KEY_REASON };
+    return { ...this.healthState };
+  }
+
+  private setHealth(next: DecisionHealth): DecisionHealth {
+    const previous = this.healthState;
+    this.healthState = next;
+    if (next.state !== previous.state || next.reason !== previous.reason) {
+      try {
+        this.options.onHealthChange?.({ ...next }, previous);
+      } catch {
+        // Showing the change must never break a decision or a check.
+      }
+    }
+    return { ...next };
   }
 
   status(): ClientStatus {
@@ -220,6 +290,9 @@ export class OpenRouterClient {
       if (!answer) return fail('invalid_response', `no valid answer for question '${name}'`);
       answers[name] = answer;
     }
+    // An answer is proof that the key and the model work (E-036); failures leave the health alone until E-037.
+    this.successes++;
+    this.setHealth({ state: 'online', at: this.now() });
     return {
       ok: true,
       answers,
@@ -230,12 +303,75 @@ export class OpenRouterClient {
   }
 
   /**
-   * Opens the connection to OpenRouter ahead of the first decision (DNS, TLS): a process's first request costs about
-   * 0.35 s more, which a lit creeper's 1.5 s fuse cannot spare (M9). A free catalog GET; failures are ignored.
+   * Checks that the decision model can be used and stores the result as the health (E-036): first the key, with
+   * GET /api/v1/key, which describes the key instead of asking a model (the catalog answers 200 to any key, so it
+   * cannot tell), then that decisions.model is in the catalog, by id or canonical_slug. No decision request is sent.
+   * Replaces M9's warmUp and, like it, opens the connection (DNS, TLS) before the first decision: a process's first
+   * request costs about 0.35 s more, which a lit creeper's 1.5 s fuse cannot spare. Without a key the health becomes
+   * OFFLINE at once, with no request; with decisions turned off in the policy nothing is sent and the health stays as
+   * it is. The check is not a decision, so no per-minute limit counts it. Never throws; a check that is still under way
+   * is shared.
    */
-  warmUp(): void {
-    if (!this.isConfigured() || !this.options.getPolicy().decisions.enabled) return;
-    void this.listModels().catch(() => {});
+  checkAccess(): Promise<DecisionHealth> {
+    if (!this.isConfigured()) return Promise.resolve(this.setHealth({ state: 'offline', reason: NO_KEY_REASON, at: this.now() }));
+    if (!this.options.getPolicy().decisions.enabled) return Promise.resolve(this.health());
+    this.checking ??= this.runCheck().finally(() => {
+      this.checking = null;
+    });
+    return this.checking;
+  }
+
+  private async runCheck(): Promise<DecisionHealth> {
+    const successes = this.successes;
+    // A decision that succeeded while the check ran is newer evidence than the check's own result.
+    const apply = (health: DecisionHealth): DecisionHealth => this.successes !== successes
+      ? this.health()
+      : this.setHealth({ state: health.state, reason: health.reason === undefined ? undefined : this.scrub(health.reason), at: this.now() });
+    try {
+      const key = this.key();
+      if (!key) return this.setHealth({ state: 'offline', reason: NO_KEY_REASON, at: this.now() });
+      // Only the status counts. The body describes the key's account (label, limits, usage): it is never parsed or kept.
+      const access = await this.checkRequest(KEY_URL, key, false);
+      if (typeof access === 'string') return apply(unreachedHealth(access));
+      if (!access.ok) return apply(refusedHealth(access.status, 'check the key'));
+      const catalog = await this.checkRequest(MODELS_URL, key, true);
+      if (typeof catalog === 'string') return apply(unreachedHealth(catalog));
+      if (!catalog.ok) return apply(refusedHealth(catalog.status, 'list the decision models'));
+      let models: DecisionModelInfo[] | null;
+      try {
+        models = parseCatalog(catalog.body);
+      } catch {
+        models = null;
+      }
+      if (!models) return apply({ state: 'unchecked', reason: 'the decision model catalog could not be read' });
+      const model = this.options.getPolicy().decisions.model;
+      if (!models.some(entry => entry.id === model || entry.canonicalSlug === model)) {
+        return apply({ state: 'offline', reason: `model ${model} is not in the decision model catalog` });
+      }
+      return apply({ state: 'online' });
+    } catch {
+      return apply({ state: 'unchecked', reason: 'the check failed' });
+    }
+  }
+
+  /** One GET of the check. Raced against its timer like decide(), so a request that ignores the abort still ends. */
+  private async checkRequest(url: string, key: string, keepBody: boolean): Promise<CheckReply> {
+    const controller = new AbortController();
+    const deadline = timeoutAfter(CHECK_TIMEOUT_MS, controller);
+    try {
+      const request = (async () => {
+        const response = await this.fetch(url, { method: 'GET', headers: { Authorization: `Bearer ${key}` }, signal: controller.signal });
+        // Read to the end either way, so the connection can be reused by the first decision.
+        const body = await response.text();
+        return { ok: response.ok, status: response.status, body: keepBody ? body : '' };
+      })();
+      request.catch(() => {});
+      return await Promise.race([request, deadline.promise]);
+    } catch {
+      return controller.signal.aborted ? 'timeout' : 'network';
+    } finally {
+      deadline.cancel();
+    }
   }
 
   /** The live catalog of decision models. Without a key it is not queried (F-018: say that no key is configured). */
@@ -248,17 +384,8 @@ export class OpenRouterClient {
       const response = await this.fetch(MODELS_URL, { method: 'GET', headers: { Authorization: `Bearer ${key}` }, signal: controller.signal });
       const body = await response.text();
       if (!response.ok) return { ok: false, error: 'http_error', message: `HTTP ${response.status}: ${this.scrub(body, ERROR_BODY_CHARS)}` };
-      const data = (JSON.parse(body) as { data?: unknown } | null)?.data;
-      if (!Array.isArray(data)) return { ok: false, error: 'invalid_response', message: 'the catalog has no data list' };
-      const models = data
-        .filter((entry): entry is Record<string, unknown> => Boolean(entry) && typeof entry === 'object' && typeof (entry as { id?: unknown }).id === 'string')
-        .map(entry => ({
-          id: entry.id as string,
-          canonicalSlug: typeof entry.canonical_slug === 'string' ? entry.canonical_slug : undefined,
-          name: typeof entry.name === 'string' ? entry.name : undefined,
-          contextLength: typeof entry.context_length === 'number' ? entry.context_length : undefined,
-          promptPrice: typeof (entry.pricing as { prompt?: unknown } | undefined)?.prompt === 'string' ? (entry.pricing as { prompt: string }).prompt : undefined
-        }));
+      const models = parseCatalog(body);
+      if (!models) return { ok: false, error: 'invalid_response', message: 'the catalog has no data list' };
       return { ok: true, models };
     } catch (error) {
       if (controller.signal.aborted) return { ok: false, error: 'timeout', message: `no catalog within ${CATALOG_TIMEOUT_MS / 1000} s` };

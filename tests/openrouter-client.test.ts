@@ -12,7 +12,7 @@
 // FAKE_KEY below is an obviously fake string made up for these tests, not a real OpenRouter key (AGENTS.md 机密).
 import test, { ExecutionContext } from 'ava';
 import sinon from 'sinon';
-import { DecisionErrorKind, DecisionQuestion, DecisionResult, OpenRouterClient } from '../src/decisions/openrouter-client.js';
+import { DecisionErrorKind, DecisionHealth, DecisionQuestion, DecisionResult, OpenRouterClient } from '../src/decisions/openrouter-client.js';
 import { DEFAULT_DECISION_MODEL, PolicyStore } from '../src/autopilot/policy.js';
 
 // The public 'sk-or-v1-' prefix is shared by every OpenRouter key, so only the part after it counts as the secret.
@@ -100,11 +100,14 @@ interface Setup {
 
 /** Every option that could reach the outside world is injected: no default fetch, no process.env. */
 function makeClient(
-  { key, impl, store = new PolicyStore(), now = () => Date.now(), timeoutMs }:
-  { key: string | undefined; impl: FetchImpl; store?: PolicyStore; now?: () => number; timeoutMs?: number }
+  { key, impl, store = new PolicyStore(), now = () => Date.now(), timeoutMs, onHealthChange }:
+  {
+    key: string | undefined; impl: FetchImpl; store?: PolicyStore; now?: () => number; timeoutMs?: number;
+    onHealthChange?: (health: DecisionHealth, previous: DecisionHealth) => void;
+  }
 ): Setup {
   const fetch = sinon.spy(impl);
-  const client = new OpenRouterClient({ getPolicy: () => store.get(), getKey: () => key, fetch, now, timeoutMs });
+  const client = new OpenRouterClient({ getPolicy: () => store.get(), getKey: () => key, fetch, now, timeoutMs, onHealthChange });
   return { client, fetch, store };
 }
 
@@ -601,4 +604,280 @@ test('listModels reports a rejected fetch and a non-JSON catalog without the key
   const second = await html.client.listModels();
   t.false(second.ok);
   if (!second.ok) t.is(second.error, 'invalid_response');
+});
+
+// ---- E-036: checkAccess and the health ---------------------------------------------------------------------------
+// Expected from the E-036 row and BLUEPRINT C (step 0, measured 2026-10-30): the catalog answers 200 to any key, so the
+// key is checked with GET https://openrouter.ai/api/v1/key (401 for an unknown key), then decisions.model must be in
+// the catalog by id or canonical_slug. health {state, reason, at}: (a) no key -> OFFLINE (no OPENROUTER_API_KEY) without
+// a request; (b) 401/403 -> OFFLINE (OpenRouter rejected the API key (HTTP 401)), 402 -> OFFLINE (the OpenRouter account
+// has no credit (HTTP 402)); (c) model not in the catalog -> OFFLINE (model <id> is not in the decision model catalog);
+// (d) network error, timeout, other status -> not checked yet, with a reason; (e) all pass -> online, at = now; any
+// decision that succeeds sets online and updates at. Reasons are fixed sentences plus the status code, never a body
+// (I4); the /key body is account data and appears nowhere. onHealthChange is called when the health changes. The
+// check is not a decision: it counts against no per-minute window. Only while there is a key and decisions.enabled.
+
+const KEY_ENDPOINT = 'https://openrouter.ai/api/v1/key';
+// Account fields as GET /api/v1/key returns them for a real key (C 节: label, limit, limit_remaining, usage, ...);
+// made-up values that must never show up anywhere.
+const KEY_INFO = { data: { label: 'sentinel-label-7d1e', limit: 4242.5, limit_remaining: 4141.5, usage: 101, is_free_tier: false } };
+const CHECK_CATALOG = {
+  data: [
+    { id: 'example/other-model', canonical_slug: 'example/other-model-20260101', name: 'Other', context_length: 4096, pricing: { prompt: '0.0000001' } },
+    { id: DEFAULT_DECISION_MODEL, canonical_slug: DEFAULT_DECISION_MODEL, name: 'Default', context_length: 32768, pricing: { prompt: '0.00000002' } }
+  ]
+};
+
+type Reply = () => FakeResponse | Promise<FakeResponse>;
+
+/** Answers by URL, never by call order: the key check, the catalog and decision requests each get their own reply. */
+function routes({ key = () => jsonResponse(KEY_INFO), catalog = () => jsonResponse(CHECK_CATALOG), decision = () => jsonResponse(sampleResponse()) }:
+  { key?: Reply; catalog?: Reply; decision?: Reply } = {}): FetchImpl {
+  return async url => {
+    if (url === KEY_ENDPOINT) return key();
+    if (url.startsWith(`${MODELS_ENDPOINT}?`)) return catalog();
+    if (url === DECISIONS_ENDPOINT) return decision();
+    throw new Error(`unexpected request to ${url}`);
+  };
+}
+
+function urlsOf(fetch: Setup['fetch']): string[] {
+  return fetch.getCalls().map(call => {
+    const url = new URL(call.args[0]);
+    return `${url.origin}${url.pathname}`;
+  });
+}
+
+/** A client with a health log: every onHealthChange call, in order. */
+function checkedClient(options: Omit<Parameters<typeof makeClient>[0], 'onHealthChange'>) {
+  const changes: DecisionHealth[] = [];
+  const setup = makeClient({ ...options, onHealthChange: health => changes.push(health) });
+  return { ...setup, changes };
+}
+
+test('E-036: without a key checkAccess sends nothing and the health is OFFLINE, naming OPENROUTER_API_KEY', async t => {
+  for (const key of [undefined, '', '   ']) {
+    const { client, fetch, changes } = checkedClient({ key, impl: routes() });
+    const health = await client.checkAccess();
+    t.is(fetch.callCount, 0, `key ${JSON.stringify(key)} must not send a request`);
+    t.like(health, { state: 'offline', reason: 'no OPENROUTER_API_KEY' });
+    t.like(client.health(), { state: 'offline', reason: 'no OPENROUTER_API_KEY' });
+    t.is(changes.length, 1);
+    t.like(changes[0], { state: 'offline', reason: 'no OPENROUTER_API_KEY' });
+  }
+});
+
+test('E-036: without a key the health is OFFLINE (no OPENROUTER_API_KEY) at once, before any await', t => {
+  const { client, fetch, changes } = checkedClient({ key: undefined, impl: routes() });
+  void client.checkAccess();
+  t.deepEqual(changes.map(change => [change.state, change.reason]), [['offline', 'no OPENROUTER_API_KEY']], 'reported synchronously, before any await');
+  t.true(fetch.notCalled);
+});
+
+test.serial('E-036: a key that passes is checked with GET /api/v1/key and then the catalog; online, at the time of the check', async t => {
+  const clock = useClock(t);
+  const { client, fetch, changes } = checkedClient({ key: FAKE_KEY, impl: routes() });
+  t.like(client.health(), { state: 'unchecked' }, 'before the first check');
+  await clock.tickAsync(1000);
+
+  const health = await client.checkAccess();
+
+  t.deepEqual(urlsOf(fetch), [KEY_ENDPOINT, MODELS_ENDPOINT], 'the key first, then the catalog');
+  for (const call of fetch.getCalls()) {
+    t.is(call.args[1].method, 'GET');
+    t.is(header(call.args[1], 'Authorization'), `Bearer ${FAKE_KEY}`);
+  }
+  t.is(new URL(fetch.secondCall.args[0]).searchParams.get('output_modalities'), 'decisions');
+  t.like(health, { state: 'online', at: 1.7e12 + 1000 });
+  t.is(health.reason, undefined);
+  t.like(client.health(), { state: 'online', at: 1.7e12 + 1000 });
+  t.deepEqual(changes.map(change => change.state), ['online']);
+});
+
+test('E-036: the /key reply is account data: no field of it appears in the health or the change reports', async t => {
+  const { client, changes } = checkedClient({ key: FAKE_KEY, impl: routes() });
+  const health = await client.checkAccess();
+  t.is(health.state, 'online');
+  const shown = JSON.stringify([health, client.health(), changes, client.status()]);
+  for (const value of ['sentinel-label-7d1e', '4242.5', '4141.5', 'label', 'limit', 'is_free_tier']) {
+    t.false(shown.includes(value), `${value} must not be kept: ${shown}`);
+  }
+});
+
+test('E-036: the model matches by canonical_slug as well as by id', async t => {
+  const store = new PolicyStore();
+  t.true(store.update({ decisions: { model: 'example/other-model-20260101' } }, 'llm').ok);
+  const bySlug = makeClient({ key: FAKE_KEY, impl: routes(), store });
+  t.is((await bySlug.client.checkAccess()).state, 'online', 'the pinned id of example/other-model');
+
+  const idStore = new PolicyStore();
+  t.true(idStore.update({ decisions: { model: 'example/other-model' } }, 'llm').ok);
+  const byId = makeClient({ key: FAKE_KEY, impl: routes(), store: idStore });
+  t.is((await byId.client.checkAccess()).state, 'online', 'the id of example/other-model, whose canonical_slug differs');
+});
+
+test('E-036: a model that is not in the catalog is OFFLINE (model <id> is not in the decision model catalog)', async t => {
+  const store = new PolicyStore();
+  t.true(store.update({ decisions: { model: 'example/missing-20260404' } }, 'llm').ok);
+  const { client } = makeClient({ key: FAKE_KEY, impl: routes(), store });
+  const missing = await client.checkAccess();
+  t.like(missing, { state: 'offline', reason: 'model example/missing-20260404 is not in the decision model catalog' });
+  t.is(typeof missing.at, 'number');
+  const empty = makeClient({ key: FAKE_KEY, impl: routes({ catalog: () => jsonResponse({ data: [] }) }) });
+  t.like(await empty.client.checkAccess(), { state: 'offline', reason: `model ${DEFAULT_DECISION_MODEL} is not in the decision model catalog` });
+});
+
+test('E-036 / I4: a 401 whose body echoes the key is OFFLINE (OpenRouter rejected the API key (HTTP 401)), with no key anywhere', async t => {
+  const echo = () => textResponse(JSON.stringify({ error: { message: `User not found for Bearer ${FAKE_KEY}`, code: 401 } }), 401);
+  const { client, fetch, changes } = checkedClient({ key: FAKE_KEY, impl: routes({ key: echo }) });
+
+  const health = await client.checkAccess();
+
+  t.like(health, { state: 'offline', reason: 'OpenRouter rejected the API key (HTTP 401)' });
+  t.deepEqual(urlsOf(fetch), [KEY_ENDPOINT], 'a refused key is not followed by the catalog');
+  t.deepEqual(changes.map(change => change.reason), ['OpenRouter rejected the API key (HTTP 401)']);
+  assertNoKey(t, [health, client.health(), changes, client.status()]);
+  t.false(JSON.stringify([health, changes]).includes('User not found'), 'the body is never part of the reason');
+});
+
+test('E-036: 403 is a rejected key as well, and 402 an account without credit', async t => {
+  const cases: [number, string][] = [
+    [403, 'OpenRouter rejected the API key (HTTP 403)'],
+    [402, 'the OpenRouter account has no credit (HTTP 402)']
+  ];
+  for (const [status, reason] of cases) {
+    const { client } = makeClient({ key: FAKE_KEY, impl: routes({ key: () => textResponse(`denied ${FAKE_KEY}`, status) }) });
+    const health = await client.checkAccess();
+    t.like(health, { state: 'offline', reason });
+    assertNoKey(t, health);
+  }
+});
+
+test('E-036: another status, a network error or a catalog that cannot be read is "not checked yet" with a reason, never a body or the key', async t => {
+  const cases: [string, FetchImpl][] = [
+    ['the key check answers 500', routes({ key: () => textResponse(`<html>oops ${FAKE_KEY}</html>`, 500) })],
+    ['the key check answers 429', routes({ key: () => textResponse('slow down', 429) })],
+    ['the key check cannot connect', routes({ key: () => { throw new Error(`getaddrinfo ENOTFOUND openrouter.ai (Bearer ${FAKE_KEY})`); } })],
+    ['the catalog answers 503 after the key passed', routes({ catalog: () => textResponse(`unavailable ${FAKE_KEY}`, 503) })],
+    ['the catalog is not JSON', routes({ catalog: () => textResponse(`<html>${FAKE_KEY}</html>`) })],
+    ['the catalog has no data list', routes({ catalog: () => jsonResponse({ models: [] }) })],
+    ['the catalog request cannot connect', routes({ catalog: () => { throw new TypeError('fetch failed'); } })]
+  ];
+  for (const [label, impl] of cases) {
+    const { client, changes } = checkedClient({ key: FAKE_KEY, impl });
+    const health = await client.checkAccess();
+    t.is(health.state, 'unchecked', label);
+    t.truthy(health.reason, `${label}: the reason is given`);
+    t.notRegex(health.reason ?? '', /oops|slow down|unavailable|html|ENOTFOUND|fetch failed/, `${label}: a fixed sentence, not the body or the error text`);
+    t.is(changes.length, 1, `${label}: one change from the first "not checked yet" without a reason`);
+    assertNoKey(t, [health, changes]);
+  }
+  const status = makeClient({ key: FAKE_KEY, impl: routes({ key: () => textResponse('x', 500) }) });
+  t.regex((await status.client.checkAccess()).reason ?? '', /\bHTTP 500\b/, 'another status is named by its code');
+});
+
+test.serial('E-036: a key check that gets no answer gives up and is "not checked yet", within the live test\'s 15 s', async t => {
+  const clock = useClock(t);
+  const { client, fetch } = makeClient({ key: FAKE_KEY, impl: () => new Promise<FakeResponse>(() => undefined) });
+  let health: DecisionHealth | undefined;
+  void client.checkAccess().then(result => { health = result; });
+  await clock.tickAsync(15_000);
+  t.truthy(health, 'the check has ended');
+  t.is(health?.state, 'unchecked');
+  t.regex(health?.reason ?? '', /no answer/);
+  t.true(fetch.firstCall.args[1].signal.aborted, 'the request was aborted');
+});
+
+test('E-036: with decisions turned off in the policy checkAccess sends nothing and leaves the health as it was', async t => {
+  const { client, fetch, store, changes } = checkedClient({ key: FAKE_KEY, impl: routes() });
+  t.true(store.update({ decisions: { enabled: false } }, 'llm').ok);
+  const health = await client.checkAccess();
+  t.is(fetch.callCount, 0);
+  t.is(health.state, 'unchecked');
+  t.deepEqual(changes, []);
+});
+
+test('E-036: the check is not a decision: it counts against no per-minute window, and every decision is still allowed', async t => {
+  const store = new PolicyStore();
+  t.true(store.update({ decisions: { maxCallsPerMinute: 1 }, instinct: { maxCallsPerMinute: 1 } }, 'llm').ok);
+  const { client, fetch } = makeClient({ key: FAKE_KEY, impl: routes(), store });
+
+  await client.checkAccess();
+  await client.checkAccess();
+  t.like(client.status(), { callsLastMinute: 0, callsLastHour: 0, instinctCallsLastMinute: 0 });
+
+  t.true((await client.decide(STATE, QUESTIONS)).ok, 'the chat budget of 1 is still free');
+  t.true((await client.decide(STATE, QUESTIONS, { budget: 'instinct' })).ok, 'the instinct budget of 1 is still free');
+  t.is(urlsOf(fetch).filter(url => url === DECISIONS_ENDPOINT).length, 2);
+});
+
+test('E-036: a check that is under way is shared, not sent twice', async t => {
+  let release: (() => void) | undefined;
+  // Only the first key check waits to be released; later ones answer at once.
+  const slowKey: Reply = () => release ? jsonResponse(KEY_INFO) : new Promise(resolve => { release = () => resolve(jsonResponse(KEY_INFO)); });
+  const { client, fetch } = makeClient({ key: FAKE_KEY, impl: routes({ key: slowKey }) });
+  const first = client.checkAccess();
+  const second = client.checkAccess();
+  t.is(fetch.callCount, 1);
+  release?.();
+  t.deepEqual(await first, await second);
+  t.is((await first).state, 'online');
+  t.deepEqual(urlsOf(fetch), [KEY_ENDPOINT, MODELS_ENDPOINT]);
+  await client.checkAccess();
+  t.is(fetch.callCount, 4, 'a later check is a new one');
+});
+
+test.serial('E-036: a decision that succeeds sets the health online and moves at; only a change of state is reported', async t => {
+  const clock = useClock(t);
+  const { client, changes } = checkedClient({ key: FAKE_KEY, impl: routes() });
+
+  t.true((await client.decide(STATE, QUESTIONS)).ok);
+  t.like(client.health(), { state: 'online', at: 1.7e12 });
+  await clock.tickAsync(90_000);
+  t.true((await client.decide(STATE, QUESTIONS, { budget: 'instinct' })).ok);
+  t.like(client.health(), { state: 'online', at: 1.7e12 + 90_000 });
+  t.deepEqual(changes.map(change => change.state), ['online'], 'a newer at alone is no change');
+
+  const failing = checkedClient({ key: FAKE_KEY, impl: routes({ decision: () => textResponse('bad gateway', 502) }) });
+  t.false((await failing.client.decide(STATE, QUESTIONS)).ok);
+  t.is(failing.client.health().state, 'unchecked', 'a failed decision leaves the health alone (E-037 changes that)');
+  t.deepEqual(failing.changes, []);
+});
+
+test('E-036: a decision that succeeds after a refused key brings the health back online; the same result twice is one change', async t => {
+  let keyStatus = 401;
+  const { client, changes } = checkedClient({
+    key: FAKE_KEY,
+    impl: routes({ key: () => (keyStatus === 200 ? jsonResponse(KEY_INFO) : textResponse('nope', keyStatus)) })
+  });
+  await client.checkAccess();
+  await client.checkAccess();
+  t.deepEqual(changes.map(change => change.state), ['offline'], 'the same refusal twice is reported once');
+
+  t.true((await client.decide(STATE, QUESTIONS)).ok);
+  t.deepEqual(changes.map(change => change.state), ['offline', 'online']);
+  keyStatus = 200;
+  await client.checkAccess();
+  t.deepEqual(changes.map(change => change.state), ['offline', 'online'], 'still online: no change');
+});
+
+test('E-036: a check that ends after a decision succeeded does not overwrite that newer evidence', async t => {
+  let answerKey: ((response: FakeResponse) => void) | undefined;
+  const { client } = makeClient({
+    key: FAKE_KEY,
+    impl: routes({ key: () => new Promise<FakeResponse>(resolve => { answerKey = resolve; }) })
+  });
+  const check = client.checkAccess();
+  t.true((await client.decide(STATE, QUESTIONS)).ok);
+  answerKey?.(textResponse('stale', 401));
+  await check;
+  t.is(client.health().state, 'online');
+});
+
+test('E-036: a throwing onHealthChange does not break a check or a decision', async t => {
+  const { client } = makeClient({ key: FAKE_KEY, impl: routes(), onHealthChange: () => { throw new Error('display failed'); } });
+  t.is((await client.checkAccess()).state, 'online');
+  const off = makeClient({ key: FAKE_KEY, impl: routes({ key: () => textResponse('', 401) }), onHealthChange: () => { throw new Error('display failed'); } });
+  t.is((await off.client.checkAccess()).state, 'offline');
+  t.true((await off.client.decide(STATE, QUESTIONS)).ok);
 });

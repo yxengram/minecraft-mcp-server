@@ -1,5 +1,5 @@
 // Contract: docs/BLUEPRINT.md F-001 (arbiter, tasks, behaviors, policy, decisions, bind/unbind; the instinct since M8, E-011;
-// no reflexes since M9, E-012).
+// no reflexes since M9, E-012; the decision model key check and its health since M19, E-036).
 import type mineflayer from 'mineflayer';
 import { ActionArbiter, HolderInfo, PRIORITY } from './action-arbiter.js';
 import { TaskManager, TaskRecord, BehaviorDefinition } from './task-manager.js';
@@ -11,7 +11,7 @@ import { huntBehavior } from './behaviors/hunt.js';
 import { returnHomeBehavior } from './behaviors/return-home.js';
 import { leadBehavior } from './behaviors/lead.js';
 import { PolicyStore } from './policy.js';
-import { OpenRouterClient, OpenRouterClientOptions } from '../decisions/openrouter-client.js';
+import { DecisionHealth, OpenRouterClient, OpenRouterClientOptions } from '../decisions/openrouter-client.js';
 import { ChatCommand, ChatCommandOutcome, DecisionHooks, planChatCommand } from '../decisions/decision-hooks.js';
 import { findNearbyEntities } from '../tools/entity-utils.js';
 import minecraftData from 'minecraft-data';
@@ -53,7 +53,11 @@ export class Autopilot {
 
   constructor(private readonly options: AutopilotOptions) {
     this.policy = new PolicyStore({ decisionModel: options.decisionModel });
-    this.decisions = new OpenRouterClient({ getPolicy: () => this.policy.get(), ...options.decisions });
+    this.decisions = new OpenRouterClient({
+      getPolicy: () => this.policy.get(),
+      ...options.decisions,
+      onHealthChange: health => this.reportHealth(health)
+    });
     this.hooks = new DecisionHooks({
       decide: (state, questions) => this.decisions.decide(state, questions),
       canDecide: () => this.decisions.isConfigured() && this.policy.get().decisions.enabled,
@@ -134,8 +138,34 @@ export class Autopilot {
       log: this.options.log
     });
     this.instinctEngine.start();
-    // The first decision of a process is slower (connection setup); pay for that now, not during the first danger.
-    this.decisions.warmUp();
+    // Checks the key again on every join (E-036). It also opens the connection: the first decision of a process is
+    // slower (connection setup), so pay for that now, not during the first danger. Not awaited: bind and the ticks
+    // never wait for the network (I6).
+    void this.checkDecisionModel();
+  }
+
+  /**
+   * Checks the decision model key (E-036): once when the server starts (src/main.ts) and on every bind. With a key it
+   * asks OpenRouter only while decisions.enabled is on; without one the health just becomes OFFLINE. Never rejects.
+   */
+  checkDecisionModel(): Promise<DecisionHealth> {
+    return this.decisions.checkAccess();
+  }
+
+  /** Each change of the decision model's health is one stderr line and one instinct event (E-036). */
+  private reportHealth(health: DecisionHealth): void {
+    const model = this.policy.get().decisions.model;
+    if (health.state === 'offline') {
+      this.options.log?.('warn', `Decision model OFFLINE: ${health.reason}. The bot will not react to dangers by itself`);
+      this.options.events.addEvent('instinct', `decision model offline: ${health.reason}; dangers are left to you`);
+    } else if (health.state === 'online') {
+      this.options.log?.('info', `Decision model online (${model})`);
+      this.options.events.addEvent('instinct', `decision model online (${model})`);
+    } else {
+      const why = health.reason ? `: ${health.reason}` : '';
+      this.options.log?.('info', `Decision model not checked yet${why}; it is checked again when the bot joins`);
+      this.options.events.addEvent('instinct', `decision model not checked yet${why}; it is checked again when the bot joins`);
+    }
   }
 
   unbind(reason = 'disconnected'): void {

@@ -65,7 +65,7 @@ function setup({ bind = true, decisions, lavaAtFeet = false }: { bind?: boolean;
   const { factory, getTool } = createFactory();
   registerPolicyTools(factory, () => autopilot, events);
 
-  const call = async (name: 'get-policy' | 'set-policy', args: Record<string, unknown> = {}) => {
+  const call = async (name: 'get-policy' | 'set-policy' | 'list-decision-models', args: Record<string, unknown> = {}) => {
     const tool = getTool(name);
     if (!tool) throw new Error(`${name} is not registered`);
     const result = await tool.execute(args);
@@ -389,7 +389,11 @@ test.serial('policy tool output and policy events never contain the OpenRouter A
     if (previous === undefined) delete process.env.OPENROUTER_API_KEY;
     else process.env.OPENROUTER_API_KEY = previous;
   });
-  const { call, events } = setup();
+  // The key still comes from the environment; since E-036 bind checks it, so the check gets a fake 401 that echoes
+  // the key instead of reaching the network.
+  const fetch = sinon.stub().resolves({ ok: false, status: 401, text: async () => `{"error":{"message":"User not found: ${key}"}}` });
+  const { call, events, autopilot } = setup({ decisions: { fetch } });
+  await autopilot.checkDecisionModel();
 
   const outputs = [
     await call('get-policy'),
@@ -657,6 +661,26 @@ test('fix 10 (real MCP): set-policy with an empty group is an error; attackPlaye
 
 const NO_KEY = { getKey: () => undefined, fetch: sinon.stub().rejects(new Error('no network in tests')) };
 const FAKE_KEY = 'sk-or-v1-FAKE-policy-tools-instinct-0000';
+const KEY_CHECK_URL = 'https://openrouter.ai/api/v1/key';
+const CATALOG_URL = 'https://openrouter.ai/api/v1/models?output_modalities=decisions';
+
+/**
+ * A fetch that answers by URL, never by call order (E-036): the key check with `keyStatus` (a refusal echoes the key),
+ * the catalog with the default model, and decision requests with `answers` (rejected without them).
+ */
+function byUrl(answers?: Record<string, unknown>, { keyStatus = 200 }: { keyStatus?: number } = {}): sinon.SinonStub {
+  return sinon.stub().callsFake(async (url: string) => {
+    if (url === KEY_CHECK_URL) {
+      const ok = keyStatus < 300;
+      return { ok, status: keyStatus, text: async () => (ok ? '{"data":{"label":"x"}}' : `{"error":{"message":"User not found: ${FAKE_KEY}"}}`) };
+    }
+    if (url === CATALOG_URL) {
+      return { ok: true, status: 200, text: async () => JSON.stringify({ data: [{ id: DEFAULT_POLICY.decisions.model, canonical_slug: DEFAULT_POLICY.decisions.model, context_length: 4096, pricing: { prompt: '0.00000002' } }] }) };
+    }
+    if (url === DECISIONS_URL && answers) return { ok: true, status: 200, text: async () => JSON.stringify({ model: 'test/decider-1', answers }) };
+    throw new Error('no network in tests');
+  });
+}
 
 /** The get-policy status line for the instinct (the policy text itself has an "Instinct (...)" section header). */
 function instinctLine(text: string): string | undefined {
@@ -708,7 +732,8 @@ test('M8: get-policy without a decision key shows the instinct section and says 
 
   t.regex(text, /^Instinct \(/m, 'the policy text has an instinct section');
   const line = instinctLine(text) ?? '';
-  t.regex(line, /offline/, `status line: ${line}`);
+  // E-036: the no-key state is the health's OFFLINE, as everywhere else.
+  t.regex(line, /^Instinct: OFFLINE \(no OPENROUTER_API_KEY\): the bot does not react to dangers by itself; /, `status line: ${line}`);
   t.regex(line, /\b0 call\(s\) in the last minute/);
   t.true(text.split('\n').includes('No instinct action is running'));
   t.false(text.includes('Last instinct decision'), 'no decision has been made');
@@ -725,16 +750,39 @@ test('M8: get-policy before the bot joined shows the instinct settings but no in
   t.false(text.includes('No instinct action is running'));
 });
 
-test('M8: get-policy says the instinct is online with a key, and turned off after set-policy instinct.enabled false', async (t) => {
-  const fetch = sinon.stub().rejects(new Error('no network in tests'));
+// E-036 changed this M8 case: with a key the line no longer says online before the key has been checked.
+test('M8 / E-036: with a key get-policy says the instinct is not checked yet until a check passes, and turned off after set-policy instinct.enabled false', async (t) => {
+  // Every request waits until fail() and is then refused as if there were no network.
+  const waiting: (() => void)[] = [];
+  const fail = () => waiting.splice(0).forEach(reject => reject());
+  const fetch = sinon.stub().callsFake(() => new Promise((_resolve, reject) => { waiting.push(() => reject(new Error('no network in tests'))); }));
   const { call, autopilot } = setup({ decisions: { getKey: () => FAKE_KEY, fetch } });
   t.teardown(() => autopilot.unbind('test finished'));
 
-  t.regex(instinctLine((await call('get-policy')).text) ?? '', /^Instinct: online\b/);
+  t.regex(instinctLine((await call('get-policy')).text) ?? '', /^Instinct: not checked yet; /, 'while the check of the join is under way');
+  fail();
+  await autopilot.checkDecisionModel();
+  const failed = instinctLine((await call('get-policy')).text) ?? '';
+  t.regex(failed, /^Instinct: not checked yet \([^)]+\); /, `a check that could not reach OpenRouter gives its reason: ${failed}`);
+  t.notRegex(failed, /online/);
   const off = await call('set-policy', { instinct: { enabled: false } });
   t.false(off.isError, off.text);
   t.regex(instinctLine((await call('get-policy')).text) ?? '', /turned off/);
   t.is(decisionRequests(fetch), 0, 'nothing was asked: the bot stands safely in the open');
+});
+
+test.serial('E-036: after a key check that passes, get-policy says online (key checked at HH:MM UTC)', async (t) => {
+  // 1.7e12 ms is 2023-11-14 22:13:20 UTC.
+  const clock = sinon.useFakeTimers({ now: 1.7e12 });
+  t.teardown(() => clock.restore());
+  const fetch = byUrl();
+  const { call, autopilot } = setup({ decisions: { getKey: () => FAKE_KEY, fetch } });
+  t.teardown(() => autopilot.unbind('test finished'));
+
+  await autopilot.checkDecisionModel();
+
+  t.regex(instinctLine((await call('get-policy')).text) ?? '', /^Instinct: online \(key checked at 22:13 UTC\); 0 call\(s\) in the last minute$/);
+  t.is(decisionRequests(fetch), 0, 'the check is not a decision request');
 });
 
 test.serial('M8: after an instinct decision, get-policy counts the call and shows the last decision', async (t) => {
@@ -745,7 +793,8 @@ test.serial('M8: after an instinct decision, get-policy counts the call and show
     action: { type: 'choice', choice: 'ask_llm', confidence: 0.9, probabilities: { continue: 0.05, ask_llm: 0.9, none: 0.05 } },
     urgent: { type: 'noul', noul: 0.2 }
   };
-  const fetch = sinon.stub().resolves({ ok: true, status: 200, text: async () => JSON.stringify({ model: 'test/decider-1', answers }) });
+  // By URL (E-036): the key check of bind gets its own replies instead of the decision's.
+  const fetch = byUrl(answers);
   const { call, autopilot, bot, events } = setup({ decisions: { getKey: () => FAKE_KEY, fetch } });
   t.teardown(() => autopilot.unbind('test finished'));
 
@@ -756,7 +805,8 @@ test.serial('M8: after an instinct decision, get-policy counts the call and show
 
   t.is(decisionRequests(fetch), 1, 'one instinct request');
   const { text } = await call('get-policy');
-  t.regex(instinctLine(text) ?? '', /^Instinct: online; 1 call\(s\) in the last minute/);
+  // E-036: online carries the time of the check or of the last decision that succeeded (1.7e12 ms is 22:13 UTC).
+  t.regex(instinctLine(text) ?? '', /^Instinct: online \(key checked at 22:13 UTC\); 1 call\(s\) in the last minute/);
   t.true(text.split('\n').includes('No instinct action is running'), 'ask_llm runs no action');
   const last = text.split('\n').find(line => line.startsWith('Last instinct decision: ')) ?? '';
   t.regex(last, /on fire/, last);
@@ -817,4 +867,112 @@ test.serial('M8: get-policy shows the instinct action that is running', async (t
   t.regex(running, /lava/);
   t.false(text.split('\n').includes('No instinct action is running'));
   t.regex(text.split('\n').find(line => line.startsWith('Last instinct decision: ')) ?? '', /leave_lava/);
+});
+
+// ---------------------------------------------------------------------------------------------------------------
+// E-036: the decision model's health in get-policy, and list-decision-models without a key. Expected from the E-036
+// row: the Decision model line is always shown, keeps its enabled / disabled start and adds "key checked at HH:MM UTC",
+// "key not checked yet" or "OFFLINE (<reason>)", so the startup check shows before the bot joins; the Instinct line
+// shows OFFLINE (<reason>): the bot does not react to dangers by itself. Without a key list-decision-models still starts
+// with "Not configured" and says "Without a key the instinct is offline: the bot does not react to dangers by itself;
+// chat is sorted by rules"; with a key its list format is unchanged. The key appears in no output or event (I4).
+
+function decisionLine(text: string): string {
+  return text.split('\n').find(line => line.startsWith('Decision model: ')) ?? '<no Decision model line>';
+}
+
+test('E-036: without a key the Decision model line starts with disabled and says OFFLINE (no OPENROUTER_API_KEY), before and after the bot joins', async (t) => {
+  const { call, autopilot, bot } = setup({ bind: false, decisions: NO_KEY });
+  // As main.ts does when the server starts.
+  await autopilot.checkDecisionModel();
+
+  const before = (await call('get-policy')).text;
+  t.regex(decisionLine(before), /^Decision model: disabled\b/);
+  t.true(decisionLine(before).includes('OFFLINE (no OPENROUTER_API_KEY)'), decisionLine(before));
+  t.is(instinctLine(before), undefined, 'no Instinct line before the bot joins');
+
+  autopilot.bind(bot as never);
+  t.teardown(() => autopilot.unbind('test finished'));
+  const after = (await call('get-policy')).text;
+  t.is(decisionLine(after), decisionLine(before));
+  t.regex(instinctLine(after) ?? '', /^Instinct: OFFLINE \(no OPENROUTER_API_KEY\): the bot does not react to dangers by itself; /);
+});
+
+test.serial('E-036: with a key the Decision model line starts with enabled and shows key not checked yet, then key checked at HH:MM UTC', async (t) => {
+  // 1.7e12 ms is 2023-11-14 22:13:20 UTC.
+  const clock = sinon.useFakeTimers({ now: 1.7e12 });
+  t.teardown(() => clock.restore());
+  const model = DEFAULT_POLICY.decisions.model;
+  const { call, autopilot } = setup({ bind: false, decisions: { getKey: () => FAKE_KEY, fetch: byUrl() } });
+
+  t.is(decisionLine((await call('get-policy')).text), `Decision model: enabled, ${model}, key not checked yet; 0 call(s) in the last hour`);
+  await autopilot.checkDecisionModel();
+  t.is(decisionLine((await call('get-policy')).text), `Decision model: enabled, ${model}, key checked at 22:13 UTC; 0 call(s) in the last hour`);
+});
+
+test('E-036: with a key and decisions turned off the Decision model line keeps its start and still shows the key state', async (t) => {
+  const fetch = byUrl();
+  const { call, autopilot } = setup({ bind: false, decisions: { getKey: () => FAKE_KEY, fetch } });
+  t.true(autopilot.policy.update({ decisions: { enabled: false } }, 'llm').ok);
+
+  await autopilot.checkDecisionModel();
+
+  t.is(decisionLine((await call('get-policy')).text), `Decision model: turned off in the policy, ${DEFAULT_POLICY.decisions.model}, key not checked yet; 0 call(s) in the last hour`);
+  t.true(fetch.notCalled, 'decisions turned off send nothing, not even the key check');
+});
+
+test('E-036 / I4: a rejected key is OFFLINE (OpenRouter rejected the API key (HTTP 401)) on both lines, and no output or event has the key', async (t) => {
+  const fetch = byUrl(undefined, { keyStatus: 401 });
+  const { call, autopilot, events } = setup({ bind: false, decisions: { getKey: () => FAKE_KEY, fetch } });
+  await autopilot.checkDecisionModel();
+  const before = (await call('get-policy')).text;
+  t.regex(decisionLine(before), /^Decision model: enabled, \S+, OFFLINE \(OpenRouter rejected the API key \(HTTP 401\)\); /);
+
+  autopilot.bind(fakeBot() as never);
+  t.teardown(() => autopilot.unbind('test finished'));
+  await autopilot.checkDecisionModel();
+  const after = (await call('get-policy')).text;
+  t.regex(instinctLine(after) ?? '', /^Instinct: OFFLINE \(OpenRouter rejected the API key \(HTTP 401\)\): the bot does not react to dangers by itself; /);
+  // The catalog does not check the key (E-036 step 0), so the models are still listed.
+  const models = await call('list-decision-models');
+  t.false(models.isError, models.text);
+  t.regex(models.text, /^\d+ decision model\(s\); in use: /);
+
+  const secret = FAKE_KEY.slice('sk-or-v1-'.length);
+  for (const text of [before, after, models.text]) t.false(text.includes(secret), text);
+  for (const event of events.query({ limit: 500 }).events) t.false(event.message.includes(secret), event.message);
+  t.false(JSON.stringify(events.query({ limit: 500 }).events).includes('User not found'), 'the refusal body is not shown');
+});
+
+test('E-036: the instinct is OFFLINE first even when the policy has turned it off', async (t) => {
+  const { call, autopilot } = setup({ decisions: NO_KEY });
+  t.teardown(() => autopilot.unbind('test finished'));
+  t.false((await call('set-policy', { instinct: { enabled: false } })).isError);
+  t.regex(instinctLine((await call('get-policy')).text) ?? '', /^Instinct: OFFLINE \(no OPENROUTER_API_KEY\)/);
+});
+
+test('E-036: list-decision-models without a key starts with Not configured and says the instinct is offline', async (t) => {
+  const { call, autopilot } = setup({ decisions: NO_KEY });
+  t.teardown(() => autopilot.unbind('test finished'));
+
+  const { text, isError } = await call('list-decision-models');
+
+  t.false(isError);
+  t.true(text.startsWith('Not configured: '), text);
+  t.true(text.endsWith('Without a key the instinct is offline: the bot does not react to dangers by itself; chat is sorted by rules'), text);
+  t.true(NO_KEY.fetch.notCalled, 'no catalog request without a key');
+});
+
+test('E-036: with a key list-decision-models keeps its list format', async (t) => {
+  const model = DEFAULT_POLICY.decisions.model;
+  const { call, autopilot } = setup({ decisions: { getKey: () => FAKE_KEY, fetch: byUrl() } });
+  t.teardown(() => autopilot.unbind('test finished'));
+
+  const { text, isError } = await call('list-decision-models');
+
+  t.false(isError, text);
+  t.deepEqual(text.split('\n'), [
+    `1 decision model(s); in use: ${model}`,
+    `- ${model}, context 4096, $0.020 per million input tokens, (in use)`
+  ]);
 });

@@ -6,6 +6,7 @@ import { Autopilot, AutopilotNotReady } from '../src/autopilot/autopilot.js';
 import { PRIORITY } from '../src/autopilot/action-arbiter.js';
 import { EventStore } from '../src/event-store.js';
 import { DECISIONS_URL } from '../src/decisions/openrouter-client.js';
+import { DEFAULT_DECISION_MODEL } from '../src/autopilot/policy.js';
 
 // F-001: the M1 scope (arbiter, tasks, bind / unbind), plus the instinct wiring (M8, E-011) and, since M9 (E-012),
 // what the deleted reflex engine used to do here: the death and respawn handling now lives in the instinct engine.
@@ -391,4 +392,127 @@ test.serial('M8: with no decision key, low air under water takes the body from n
   t.deepEqual(after.filter(event => event.type === 'task_resumed'), []);
   t.deepEqual(world.bot.eventNames(), [], 'the instinct left no listener behind');
   t.throws(() => autopilot.instinct, { instanceOf: AutopilotNotReady });
+});
+
+// ---- E-036: the key check at startup and on every join, and how a change is reported (F-001, F-015) ----------------
+// Expected from the E-036 row: main.ts calls checkDecisionModel() once at startup and bind() calls it again, in place
+// of warmUp; it asks OpenRouter only with a key and decisions.enabled, and never holds up bind or the ticks (I6). Each
+// change of the health is one instinct event and one log line, OFFLINE as a warning in the row's words:
+// "Decision model OFFLINE: OpenRouter rejected the API key (HTTP 401). The bot will not react to dangers by itself" and
+// "decision model offline: OpenRouter rejected the API key (HTTP 401); dangers are left to you". The key is in neither (I4).
+
+const KEY_CHECK_URL = 'https://openrouter.ai/api/v1/key';
+const TEST_KEY = 'sk-or-v1-FAKE-autopilot-key-check-0000';
+
+/** A fetch that answers by URL: the key check with `keyStatus` (a refusal echoes the key), the catalog with the default model. */
+function keyCheckFetch(state: { keyStatus: number }) {
+  return sinon.spy(async (url: string) => {
+    if (url === KEY_CHECK_URL) {
+      const ok = state.keyStatus < 300;
+      return { ok, status: state.keyStatus, text: async () => (ok ? JSON.stringify({ data: { label: 'x' } }) : `{"error":{"message":"User not found: ${TEST_KEY}"}}`) };
+    }
+    if (url !== DECISIONS_URL) return { ok: true, status: 200, text: async () => JSON.stringify({ data: [{ id: DEFAULT_DECISION_MODEL }] }) };
+    throw new Error('no decision requests in this test');
+  });
+}
+
+function healthReports(events: EventStore, logged: sinon.SinonSpy) {
+  return {
+    events: () => events.query({ types: ['instinct'], limit: 100 }).events.map(event => event.message).filter(message => message.startsWith('decision model ')),
+    logs: () => logged.getCalls().map(call => call.args as [string, string]).filter(([, message]) => message.startsWith('Decision model '))
+  };
+}
+
+test.serial('E-036: a key check that has not answered holds up neither bind nor the ticks (I6)', async (t) => {
+  const clock = sinon.useFakeTimers({ now: 1.7e12 });
+  t.teardown(() => clock.restore());
+  const fetch = sinon.spy(() => new Promise<never>(() => undefined));
+  const autopilot = new Autopilot({ events: new EventStore(), decisions: { getKey: () => TEST_KEY, fetch } });
+  const world = eventBot();
+
+  autopilot.bind(world.bot as never);
+  t.teardown(() => autopilot.unbind('test finished'));
+
+  t.true(autopilot.isReady(), 'bound at once');
+  t.deepEqual(fetch.getCalls().map(call => (call.args as unknown[])[0]), [KEY_CHECK_URL], 'the check was sent by bind');
+  world.bot.emit('physicsTick');
+  world.bot.emit('physicsTick');
+  t.is(autopilot.instinct.status().timing.ticks, 2, 'the instinct runs while the check waits');
+  t.is(autopilot.decisions.health().state, 'unchecked');
+
+  // The check that never answers still ends, on its own timer.
+  await clock.tickAsync(5000);
+  t.is(autopilot.decisions.health().state, 'unchecked');
+  t.regex(autopilot.decisions.health().reason ?? '', /no answer/);
+});
+
+test('E-036: with decisions turned off in the policy the check sends nothing', async (t) => {
+  const fetch = keyCheckFetch({ keyStatus: 200 });
+  const log = sinon.spy();
+  const events = new EventStore();
+  const autopilot = new Autopilot({ events, log, decisions: { getKey: () => TEST_KEY, fetch } });
+  t.true(autopilot.policy.update({ decisions: { enabled: false } }, 'llm').ok);
+
+  await autopilot.checkDecisionModel();
+
+  t.true(fetch.notCalled);
+  const reports = healthReports(events, log);
+  t.deepEqual(reports.events(), []);
+  t.deepEqual(reports.logs(), []);
+});
+
+test('E-036: each change of the health is one instinct event and one log line, OFFLINE as a warning; the key is in neither', async (t) => {
+  const state = { keyStatus: 401 };
+  const fetch = keyCheckFetch(state);
+  const log = sinon.spy();
+  const events = new EventStore();
+  const autopilot = new Autopilot({ events, log, decisions: { getKey: () => TEST_KEY, fetch } });
+  const reports = healthReports(events, log);
+
+  // At startup (main.ts), before any bot.
+  await autopilot.checkDecisionModel();
+  t.deepEqual(reports.logs(), [['warn', 'Decision model OFFLINE: OpenRouter rejected the API key (HTTP 401). The bot will not react to dangers by itself']]);
+  t.deepEqual(reports.events(), ['decision model offline: OpenRouter rejected the API key (HTTP 401); dangers are left to you']);
+
+  // The join checks again; the same result is no change.
+  autopilot.bind(eventBot().bot as never);
+  t.teardown(() => autopilot.unbind('test finished'));
+  // Called while the join's check is under way, this waits for that check instead of sending another one.
+  await autopilot.checkDecisionModel();
+  t.is(fetch.getCalls().filter(call => (call.args as unknown[])[0] === KEY_CHECK_URL).length, 2, 'one at startup and one for the join');
+  t.is(reports.logs().length, 1);
+  t.is(reports.events().length, 1);
+
+  // A later join with a key that passes: one more line and event, not as a warning.
+  state.keyStatus = 200;
+  autopilot.bind(eventBot().bot as never);
+  await autopilot.checkDecisionModel();
+  t.is(autopilot.decisions.health().state, 'online');
+  t.is(reports.logs().length, 2);
+  t.is(reports.logs()[1][0], 'info');
+  t.regex(reports.logs()[1][1], /^Decision model online\b/);
+  t.is(reports.events().length, 2);
+  t.regex(reports.events()[1], /^decision model online\b/);
+
+  const everything = JSON.stringify([log.getCalls().map(call => call.args), events.query({ limit: 500 }).events]);
+  t.false(everything.includes('FAKE-autopilot-key-check'), 'I4: no part of the key in a log line or an event');
+  t.false(everything.includes('User not found'), 'nor the body of the refusal');
+});
+
+test('E-036: without a key neither the startup check nor a join sends anything; OFFLINE (no OPENROUTER_API_KEY) is reported once', async (t) => {
+  const fetch = sinon.spy(async () => { throw new Error('no network in tests'); });
+  const log = sinon.spy();
+  const events = new EventStore();
+  const autopilot = new Autopilot({ events, log, decisions: { getKey: () => undefined, fetch } });
+  const reports = healthReports(events, log);
+
+  await autopilot.checkDecisionModel();
+  autopilot.bind(eventBot().bot as never);
+  autopilot.bind(eventBot().bot as never);
+  t.teardown(() => autopilot.unbind('test finished'));
+  await autopilot.checkDecisionModel();
+
+  t.true(fetch.notCalled);
+  t.deepEqual(reports.logs(), [['warn', 'Decision model OFFLINE: no OPENROUTER_API_KEY. The bot will not react to dangers by itself']]);
+  t.deepEqual(reports.events(), ['decision model offline: no OPENROUTER_API_KEY; dangers are left to you']);
 });

@@ -30,7 +30,7 @@ The upstream project is a good, simple bridge: the LLM calls a tool, and the bot
 - **Building and mining:** collect a number of blocks, clear or fill a region, dig a tunnel, read and use containers.
 - **Interacting:** right-click blocks and entities, trade with villagers, sleep and wake, ride and dismount, attack.
 - **Perception:**
-  - `get-observation`: one-call snapshot of vitals, effects, armor, time, weather, equipment, inventory and nearby entities.
+  - `get-observation`: one-call snapshot of vitals, effects, armor, time, weather, equipment, inventory, whether the instinct is online, and nearby entities.
   - `get-events` and `wait-for-event`: everything a player would notice (damage and its source, hostile sounds, explosions, chat, deaths, pickups). The LLM can wait for something to happen instead of polling.
   - `scan-area`: terrain described in text.
   - `render-map`: a top-down map or cross-section as an image.
@@ -44,7 +44,7 @@ The upstream project is a good, simple bridge: the LLM calls a tool, and the bot
 - **Chat triage:** the decision model sorts chat. Only messages meant for the bot wake the LLM, as `chat_request` events. Nobody can command the bot by chat unless the LLM allows it.
 
 ### 3. Tested in the game, not only on paper
-- 1056 unit tests.
+- 1346 unit tests.
 - A live test that exercises all 66 tools against a real server.
 - A scenario test that compares the bot with and without the Autopilot: zombie waves, being chased by zombies with bare hands, creepers, hunger, fire, drowning, diving on purpose, a lava shore, chat.
 - A 10-day survival test on Normal difficulty. The bot survived all ten nights without dying and built a 7×7 house with a door, eight glass windows, a bed, a chest, a crafting table, a furnace and torches.
@@ -105,7 +105,16 @@ The full design, the contract of every file, and the evidence behind each choice
 - Node.js 22 or later, and Git
 - Minecraft Java Edition 26.1.2
 - An MCP client, for example [Claude Desktop](https://claude.ai/download)
-- Optional: an [OpenRouter](https://openrouter.ai) API key for the instinct and chat triage
+- Strongly recommended: an [OpenRouter](https://openrouter.ai) API key for the instinct and chat triage. Without one the instinct is offline: the bot does not react to dangers by itself (it does not dodge, flee or eat), and chat is sorted by rules
+
+### Get an OpenRouter key in 2 minutes
+1. Sign in at [openrouter.ai](https://openrouter.ai).
+2. Add credit to the account. A decision costs about $0.00002.
+3. Create an API key. A key can be given a credit limit.
+4. Put the key in `env` in the MCP client's config ([step 3](#3-add-the-server-to-your-mcp-client)).
+5. Restart the client completely: the server reads the key only when it starts.
+
+The server checks the key with OpenRouter when it starts and each time the bot joins the game. The result is a line on stderr, an `instinct` event, and the `Instinct:` line of `get-policy` and `get-observation`; see [The instinct is offline](#the-instinct-is-offline).
 
 ### 1. Build the server
 ```bash
@@ -144,7 +153,7 @@ For Claude Desktop, go to `Settings → Developer → Edit Config`, then add an 
 
 The example names the bot `ClaudeBot`; without `--username` it is `LLMBot`. The name appears in chat, and players use it to talk to the bot: chat triage goes by the bot's name to tell whether a message is meant for it (without a key, whispers and messages that name the bot are reported). Give the bot a name of its own; see [Accounts](#accounts).
 
-Leave out `env` to run without a decision model: everything else works, but the instinct is offline.
+Leave out `env` to run without a decision model: everything else works, but the instinct is offline and the bot does not react to dangers by itself.
 
 To let the LLM use server commands such as `/give`, `/fill` or `/tp`, add `"--allow-commands"` to `args`. Without it, `send-chat` sends plain chat and the chat commands `/msg`, `/tell`, `/w`, `/me`, `/teammsg` and `/tm`, and refuses every other command without sending anything, so chat that talks the LLM into a command cannot run one. Only the option turns this on: neither `set-policy` nor chat can.
 
@@ -213,14 +222,25 @@ Two other replies:
 When the connection drops or the bot is kicked, nothing happens until the next tool call, which connects again. A kick is a `kicked` event with the server's text. For online mode, a name clash, a version mismatch, the whitelist and bans, the explanation from the table follows after a colon, for example `You are not white-listed on this server!: <name> is not on the whitelist: run /whitelist add <name> on the server`. `Kicked by an operator` means someone ran `/kick`.
 
 ### The instinct is offline
-Without a working decision model the bot does not dodge, flee or eat by itself. While the instinct is offline, it reports each danger once as an `instinct` event, `instinct offline (<error>: <message>): <dangers>; the bot does not act on its own, decide what to do`, and the LLM has to act. Turned off in the policy, it reports nothing. The `Instinct:` line of `get-policy` says which case it is (each line goes on with `; <n> call(s) in the last minute`):
+Without a working decision model the bot does not dodge, flee or eat by itself. While the instinct is offline, it reports each danger once as an `instinct` event, `instinct offline (<error>: <message>): <dangers>; the bot does not act on its own, decide what to do`, and the LLM has to act. Turned off in the policy, it reports nothing.
 
-| `get-policy` says | What to do |
+The server checks the key when it starts and each time the bot joins: first the key itself, then that the decision model is in OpenRouter's catalog. Each change of the result is one line on stderr, for example `Decision model OFFLINE: OpenRouter rejected the API key (HTTP 401). The bot will not react to dangers by itself`, and one `instinct` event, for example `decision model offline: OpenRouter rejected the API key (HTTP 401); dangers are left to you`. The `Decision model:` line of `get-policy` shows the result even before the bot joins (`key checked at HH:MM UTC`, `key not checked yet` or `OFFLINE (<reason>)`).
+
+The `Instinct:` line says which case it is. `get-observation` has the same line; in `get-policy` it goes on with `; <n> call(s) in the last minute`:
+
+| The `Instinct:` line says | What to do |
 |---|---|
-| `Instinct: offline (no OPENROUTER_API_KEY); dangers are only reported as instinct events, the bot does not act on them` | The key did not reach the server. Put it in `env` in the client config ([step 3](#3-add-the-server-to-your-mcp-client)) and restart the client completely |
+| `Instinct: online (key checked at HH:MM UTC)` | Nothing: the key passed. The time is that of the last check or of the last decision that succeeded |
+| `Instinct: OFFLINE (no OPENROUTER_API_KEY): the bot does not react to dangers by itself` | The key did not reach the server. Put it in `env` in the client config ([step 3](#3-add-the-server-to-your-mcp-client)) and restart the client completely |
+| `Instinct: OFFLINE (OpenRouter rejected the API key (HTTP 401)): the bot does not react to dangers by itself` (or `HTTP 403`) | OpenRouter does not accept the key, for example because it was mistyped or deleted. Create a new key, put it in `env` and restart the client completely |
+| `Instinct: OFFLINE (the OpenRouter account has no credit (HTTP 402)): the bot does not react to dangers by itself` | Add credit to the OpenRouter account. The key is checked again the next time the bot joins |
+| `Instinct: OFFLINE (model <id> is not in the decision model catalog): the bot does not react to dangers by itself` | Pick a model from `list-decision-models`, put it in `args` as `--decision-model` and restart the client completely |
+| `Instinct: not checked yet`, or `not checked yet (<reason>)` | The check has not finished yet, or it could not reach OpenRouter (the reason says why). The instinct still asks the decision model; the key is checked again the next time the bot joins |
 | `Instinct: offline (decisions are turned off in the policy); dangers are only reported as instinct events, the bot does not act on them` | `set-policy { "decisions": { "enabled": true } }` |
 | `Instinct: turned off in the policy` | `set-policy { "instinct": { "enabled": true } }` |
-| `Instinct: offline at the last request (<error>: <message>); dangers are left to you` | The last request failed. `timeout`: no answer in time. `http_error`: the request failed or OpenRouter answered with an error; the message has the HTTP status and the reply, so check the key and the credit on your OpenRouter account. `rate_limited`: the instinct asked more than `instinct.maxCallsPerMinute` times in a minute. `invalid_response`: the model's answer was not valid JSON or did not answer every question; it usually passes on the next request, otherwise pick another model with `set-policy { "decisions": { "model": "..." } }`. The line says `online` again after the next request that succeeds |
+| `Instinct: offline at the last request (<error>: <message>); dangers are left to you` | The last request failed. `timeout`: no answer in time. `http_error`: the request failed or OpenRouter answered with an error; the message has the HTTP status and the reply, so check the key and the credit on your OpenRouter account. `rate_limited`: the instinct asked more than `instinct.maxCallsPerMinute` times in a minute. `invalid_response`: the model's answer was not valid JSON or did not answer every question; it usually passes on the next request, otherwise pick another model with `set-policy { "decisions": { "model": "..." } }`. The line says `online (key checked at HH:MM UTC)` again after the next request that succeeds |
+
+An `OFFLINE` comes first: the line shows it even when the instinct is also turned off in the policy.
 
 ---
 
@@ -365,7 +385,7 @@ Limits:
 The policy lives in memory only, and goes back to these defaults whenever the bot joins the game.
 
 ### Privacy and cost
-**What is sent:** with a key, chat messages from other players and a summary of the bot's situation go to OpenRouter and the model provider. The summary covers health, food, air, the dangers, the options, the current task and the LLM's intent. Without a key, nothing is sent.
+**What is sent:** with a key, chat messages from other players and a summary of the bot's situation go to OpenRouter and the model provider. The summary covers health, food, air, the dangers, the options, the current task and the LLM's intent. The key check, when the server starts and each time the bot joins, asks OpenRouter whether it accepts the key and reads its catalog of decision models; nothing about the game is sent with it. Without a key, nothing is sent.
 
 **Cost:** a call costs about $0.00002. The instinct is limited to 90 calls a minute and chat to 30. It only asks while a danger lasts.
 
@@ -374,7 +394,7 @@ The policy lives in memory only, and goes back to these defaults whenever the bo
 ## Testing
 
 ```bash
-npm test             # 1056 unit tests
+npm test             # 1346 unit tests
 npm run lint
 npm run test:live -- <LAN_PORT>                                 # read-only check against a world
 npm run test:live:world -- <LAN_PORT> --allow-world-changes      # every tool, in a throwaway world with cheats on
@@ -390,6 +410,8 @@ npm run test:scenarios -- <LAN_PORT> --allow-world-changes       # the Autopilot
 - It fails if a required scenario fails in the `instinct` configuration.
 - `creeper-ambush` is reported but not required, because the decision API's latency doesn't always beat the fuse.
 - Pass the key with `OPENROUTER_API_KEY="..."` in front of the command.
+
+`test:live:world` checks the key check in three rounds: without a key, with a made-up key (`LIVE_FAKE_KEY=1` together with a made-up `OPENROUTER_API_KEY`, which OpenRouter must refuse), and with the real key. Each round waits at most 15 s for the check, then expects the same state on stderr, in the `instinct` events, in `get-policy` and in `get-observation`.
 
 ## Project documents
 - [docs/BLUEPRINT.md](docs/BLUEPRINT.md): the design, the contract of every file, the cross-module rules and the safety invariants (in Chinese)
