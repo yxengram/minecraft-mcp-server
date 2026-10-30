@@ -26,8 +26,8 @@ export interface InstinctEngineOptions {
   tasks: Pick<TaskManager, 'currentTask' | 'hold' | 'describe' | 'resumesOnRelease'>;
   getPolicy: () => Policy;
   events: EventStore;
-  /** A decision request on the instinct's own budget (F-015). */
-  decide: (state: Record<string, unknown>, questions: Record<string, DecisionQuestion>) => Promise<DecisionResult>;
+  /** A decision request on the instinct's own budget (F-015); `second` marks the hedged second request (E-037). */
+  decide: (state: Record<string, unknown>, questions: Record<string, DecisionQuestion>, options?: { second?: boolean }) => Promise<DecisionResult>;
   /** Called first when the bot dies, before a running action lets go of the body (autopilot.ts cancels the task). */
   onDeath?: () => void;
   log?: (level: string, message: string) => void;
@@ -81,8 +81,9 @@ const CHASE_MS = 30_000;
 export const HEDGE_CUES: CueKind[] = CUE_URGENCY.slice(0, 5);
 // The M5 probe: median 0.64 s, slowest 1.07 s over 198 calls.
 export const HEDGE_MS = 800;
-// Failures another request may not have; rate_limited and disabled would fail the same way again.
-const HEDGE_AFTER: Set<string> = new Set(['timeout', 'http_error', 'invalid_response']);
+// Failures another request may not have (E-037). A refused key or credit (auth, no_credit), a 429 (throttled), a
+// pause (backoff), rate_limited and disabled would fail the same way again.
+const HEDGE_AFTER: Set<string> = new Set(['timeout', 'server_error', 'network', 'invalid_response']);
 
 type HedgedResult = DecisionResult & { second?: boolean };
 
@@ -410,8 +411,8 @@ export class InstinctEngine {
         this.attention.inEpisode() && this.attention.episode === episode;
       const launch = (isSecond: boolean) => {
         pending++;
-        this.options.decide(state, questions)
-          .catch((error): DecisionResult => ({ ok: false, error: 'http_error', message: `request failed: ${error}`, latencyMs: 0 }))
+        (isSecond ? this.options.decide(state, questions, { second: true }) : this.options.decide(state, questions))
+          .catch((error): DecisionResult => ({ ok: false, error: 'network', message: `request failed: ${error}`, latencyMs: 0 }))
           .then(result => {
             pending--;
             if (settled) return;

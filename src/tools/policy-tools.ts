@@ -1,10 +1,10 @@
 // Contract: docs/BLUEPRINT.md F-018: get-policy, set-policy (M3) and list-decision-models (M4). Never prints the API key (I4).
 // E-036: the decision model's health from the key check, shown the same way here, in get-observation, in the instinct
-// events and on stderr.
+// events and on stderr. E-037: a pause after a failure shows the same way, and the Spend line counts every request.
 import { ToolFactory } from '../tool-factory.js';
 import type { Autopilot } from '../autopilot/autopilot.js';
 import type { EventStore } from '../event-store.js';
-import type { DecisionHealth } from '../decisions/openrouter-client.js';
+import type { DecisionHealth, SpendStats } from '../decisions/openrouter-client.js';
 import { chatUpdateSchema, combatUpdateSchema, decisionsUpdateSchema, describePolicy, instinctUpdateSchema } from '../autopilot/policy.js';
 
 /** "HH:MM UTC" for the time of a check or of the last decision that succeeded. */
@@ -12,9 +12,33 @@ function checkedAt(at: number | undefined): string {
   return at === undefined ? 'an unknown time' : `${new Date(at).toISOString().slice(11, 16)} UTC`;
 }
 
+/** "OFFLINE (<reason>)", or during a pause (E-037) "OFFLINE for 7 more s (paused after HTTP 429)". */
+function offlineState(health: DecisionHealth): string {
+  return health.pausedMs !== undefined ? `OFFLINE for ${Math.ceil(health.pausedMs / 1000)} more s (${health.reason})` : `OFFLINE (${health.reason})`;
+}
+
+/** "$0.0081"; amounts under a hundredth of a cent get two more decimals, since one decision costs about $0.00002. */
+function dollars(amount: number): string {
+  return `$${amount > 0 && amount < 0.0001 ? amount.toFixed(6) : amount.toFixed(4)}`;
+}
+
+/**
+ * "Spend since the server started: 412 call(s) (instinct 380 incl. 12 second requests, chat 30, check 2), 3 failed;
+ * $0.0081 reported, about $0.0004 estimated for 20 call(s) without a cost" (E-037).
+ */
+export function spendLine(spend: SpendStats): string {
+  const uncosted = spend.withoutCost === 0
+    ? ''
+    : spend.estimatedCost === null
+      ? `, unknown for ${spend.withoutCost} call(s) without a cost`
+      : `, about ${dollars(spend.estimatedCost)} estimated for ${spend.withoutCost} call(s) without a cost`;
+  return `Spend since the server started: ${spend.calls} call(s) (instinct ${spend.instinct} incl. ${spend.secondRequests} second requests, ` +
+    `chat ${spend.chat}, check ${spend.check}), ${spend.failed} failed; ${dollars(spend.reportedCost)} reported${uncosted}`;
+}
+
 /** The key's state for the Decision model line of get-policy. */
 function keyState(health: DecisionHealth): string {
-  if (health.state === 'offline') return `OFFLINE (${health.reason})`;
+  if (health.state === 'offline') return offlineState(health);
   if (health.state === 'online') return `key checked at ${checkedAt(health.at)}`;
   return `key not checked yet${health.reason ? ` (${health.reason})` : ''}`;
 }
@@ -26,14 +50,16 @@ function keyState(health: DecisionHealth): string {
  */
 export function instinctState(autopilot: Autopilot): string {
   const health = autopilot.decisions.health();
-  if (health.state === 'offline') return `OFFLINE (${health.reason}): the bot does not react to dangers by itself`;
+  if (health.state === 'offline') return `${offlineState(health)}: the bot does not react to dangers by itself`;
   const policy = autopilot.policy.get();
   if (!policy.instinct.enabled) return 'turned off in the policy';
   if (!policy.decisions.enabled) {
     return 'offline (decisions are turned off in the policy); dangers are only reported as instinct events, the bot does not act on them';
   }
   const offline = autopilot.isReady() ? autopilot.instinct.status().offline : null;
-  if (offline) return `offline at the last request (${offline}); dangers are left to you`;
+  // A backoff was no request, and every 429 starts a pause, so a throttled last request is that pause (E-037): it shows
+  // as the health while it lasts, and the health from before it once it is over.
+  if (offline && !offline.startsWith('backoff:') && !offline.startsWith('throttled:')) return `offline at the last request (${offline}); dangers are left to you`;
   if (health.state === 'online') return `online (key checked at ${checkedAt(health.at)})`;
   return `not checked yet${health.reason ? ` (${health.reason})` : ''}`;
 }
@@ -52,6 +78,7 @@ export function registerPolicyTools(factory: ToolFactory, getAutopilot: () => Au
       lines.push('', !status.configured
         ? `Decision model: disabled, ${key}; chat is sorted by rules: whispers and messages naming the bot are reported`
         : `Decision model: ${status.enabled ? 'enabled' : 'turned off in the policy'}, ${status.model}, ${key}; ${status.callsLastHour} call(s) in the last hour`);
+      lines.push(spendLine(autopilot.decisions.spend()));
       if (autopilot.isReady()) {
         const instinct = autopilot.instinct.status();
         lines.push('');

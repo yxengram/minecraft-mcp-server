@@ -472,7 +472,10 @@ test.serial('an urgent cue with no answer after 800 ms gets one identical second
   await clock.tickAsync(1);
   t.is(decide.callCount, 2);
   t.is(calledAt[1] - start, HEDGE_MS);
-  t.deepEqual(decide.secondCall.args, decide.firstCall.args, 'the same state and questions');
+  t.deepEqual(decide.secondCall.args.slice(0, 2), decide.firstCall.args.slice(0, 2), 'the same state and questions');
+  // E-037: the second request says so, for the statistics; the first one does not.
+  t.deepEqual(decide.secondCall.args[2], { second: true });
+  t.not(decide.firstCall.args[2]?.second, true, 'the first request is not marked second');
 
   replies[1](answer('swim_to_air'));
   await clock.tickAsync(0);
@@ -513,15 +516,17 @@ test.serial('a fast failure sends the second request at once; only when both fai
   const { engine, messages } = startEngine(t, engineWorld({ underwater: true }), decide);
   engine.tick();
   await clock.tickAsync(100);
-  replies[0](failure('http_error', 'HTTP 502: bad gateway'));
+  // E-037: http_error became server_error (5xx).
+  replies[0](failure('server_error', 'HTTP 502: bad gateway'));
   await clock.tickAsync(0);
   t.is(decide.callCount, 2, 'right away, not at 800 ms');
+  t.deepEqual(decide.secondCall.args[2], { second: true });
   t.deepEqual(messages(), [], 'not offline while the second request is open');
   replies[1](failure('timeout', 'no answer within 1500 ms'));
   await clock.tickAsync(0);
   t.is(messages().length, 1);
-  t.regex(messages()[0], /^instinct offline \(http_error: HTTP 502: bad gateway\): under water/, 'the first failure is the reason');
-  t.is(engine.status().offline, 'http_error: HTTP 502: bad gateway');
+  t.regex(messages()[0], /^instinct offline \(server_error: HTTP 502: bad gateway\): under water/, 'the first failure is the reason');
+  t.is(engine.status().offline, 'server_error: HTTP 502: bad gateway');
   await clock.tickAsync(HEDGE_MS);
   t.is(decide.callCount, 2, 'the hedge timer does not fire after both failed');
 });
@@ -644,7 +649,7 @@ test.serial('a superseded request gets no hedge, neither at 800 ms nor after a f
   t.notDeepEqual(decide.secondCall.args[0], decide.firstCall.args[0]);
   await clock.tickAsync(HEDGE_MS / 2 + 1);
   t.is(decide.callCount, 2, 'the first request\'s timer does not hedge it any more');
-  replies[0](failure('http_error', 'HTTP 502'));
+  replies[0](failure('server_error', 'HTTP 502'));
   await clock.tickAsync(0);
   t.is(decide.callCount, 2, 'nor does its fast failure');
 });
@@ -659,4 +664,53 @@ test.serial('no hedge once the instinct is turned off while the request is open'
   engine.tick();
   await clock.tickAsync(HEDGE_MS);
   t.is(decide.callCount, 1);
+});
+
+// ---- E-037: which failures get the hedged second request ------------------------------------------------------------
+// Expected from the E-037 row: HEDGE_AFTER is timeout, server_error, network and invalid_response, so a refused key or
+// credit (auth, no_credit), a 429 (throttled) and a pause (backoff) get no second request; an exception thrown by decide
+// is recorded as network; the second request carries second: true.
+
+test.serial('E-037: a fast server_error, network or invalid_response failure gets the second request at once', async (t) => {
+  const clock = useClock(t);
+  for (const error of ['server_error', 'network', 'invalid_response', 'timeout']) {
+    const { decide, replies } = controlledDecide();
+    const { engine } = startEngine(t, engineWorld({ underwater: true }), decide);
+    engine.tick();
+    await clock.tickAsync(100);
+    replies[0](failure(error));
+    await clock.tickAsync(0);
+    t.is(decide.callCount, 2, `${error}: right away`);
+    t.deepEqual(decide.secondCall.args[2], { second: true });
+    engine.stop('next case');
+  }
+});
+
+test.serial('E-037: auth, no_credit, throttled and backoff get no second request, at once or at 800 ms', async (t) => {
+  const clock = useClock(t);
+  for (const error of ['auth', 'no_credit', 'throttled', 'backoff']) {
+    const refused = sinon.stub().callsFake(() => new Promise<DecisionResult>(resolve => setTimeout(() => resolve(failure(error, `fake ${error}`)), 100)));
+    const { engine, messages } = startEngine(t, engineWorld({ underwater: true }), refused);
+    engine.tick();
+    await clock.tickAsync(HEDGE_MS + 100);
+    t.is(refused.callCount, 1, `${error}: no second request`);
+    t.regex(messages()[0] ?? '', new RegExp(`^instinct offline \\(${error}: fake ${error}\\): under water`), `${error}: offline at once`);
+    t.is(engine.status().offline, `${error}: fake ${error}`);
+    engine.stop('next case');
+  }
+});
+
+test.serial('E-037: an exception thrown by decide is recorded as network, and gets the second request', async (t) => {
+  const clock = useClock(t);
+  const decide = sinon.stub();
+  decide.onFirstCall().rejects(new Error('socket hang up'));
+  decide.onSecondCall().rejects(new Error('socket hang up again'));
+  const { engine, arbiter, messages } = startEngine(t, engineWorld({ underwater: true }), decide);
+  engine.tick();
+  await clock.tickAsync(0);
+  t.is(decide.callCount, 2, 'network is worth a second request');
+  t.deepEqual(decide.secondCall.args[2], { second: true });
+  await clock.tickAsync(0);
+  t.regex(messages()[0] ?? '', /^instinct offline \(network: request failed: Error: socket hang up\): under water/);
+  t.is(arbiter.holder(), null, 'no decision, so the body is not taken (I5)');
 });

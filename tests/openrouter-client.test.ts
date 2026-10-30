@@ -5,8 +5,9 @@
 //   GET https://openrouter.ai/api/v1/models?output_modalities=decisions; default timeout 1500 ms, give up at once on
 //   timeout and never retry; no key -> 'disabled' without a request; only send while decisions.enabled; at most 128
 //   questions; over the policy rate limit -> 'rate_limited' without a request; typed errors disabled / rate_limited /
-//   timeout / http_error / invalid_response, never an unclassified exception; a success has an answer for every
-//   question and a failure never carries made-up answers.
+//   timeout / invalid_response and, since E-037 split http_error, auth / no_credit / throttled / bad_request /
+//   server_error / network / backoff, never an unclassified exception; a success has an answer for every question and
+//   a failure never carries made-up answers.
 // - F-014: decisions.maxCallsPerMinute defaults to 30 and decisions.model is the default model.
 // Nothing here touches the network or process.env: every client gets an injected key getter and fetch.
 // FAKE_KEY below is an obviously fake string made up for these tests, not a real OpenRouter key (AGENTS.md 机密).
@@ -14,6 +15,10 @@ import test, { ExecutionContext } from 'ava';
 import sinon from 'sinon';
 import { DecisionErrorKind, DecisionHealth, DecisionQuestion, DecisionResult, OpenRouterClient } from '../src/decisions/openrouter-client.js';
 import { DEFAULT_DECISION_MODEL, PolicyStore } from '../src/autopilot/policy.js';
+import { EventEmitter } from 'node:events';
+import { Autopilot } from '../src/autopilot/autopilot.js';
+import { EventStore } from '../src/event-store.js';
+import { instinctState } from '../src/tools/policy-tools.js';
 
 // The public 'sk-or-v1-' prefix is shared by every OpenRouter key, so only the part after it counts as the secret.
 const KEY_PREFIX = 'sk-or-v1-';
@@ -25,11 +30,13 @@ const CONTRACT_DEFAULT_TIMEOUT_MS = 1500;
 const CONTRACT_DEFAULT_RATE = 30;
 const MINUTE = 60_000;
 const HOUR = 3_600_000;
-const ERROR_KINDS: DecisionErrorKind[] = ['disabled', 'rate_limited', 'timeout', 'http_error', 'invalid_response'];
+const ERROR_KINDS: DecisionErrorKind[] = [
+  'disabled', 'rate_limited', 'timeout', 'invalid_response', 'auth', 'no_credit', 'throttled', 'bad_request', 'server_error', 'network', 'backoff'
+];
 
 // ---- fakes -------------------------------------------------------------------------------------------------------
 
-interface FakeResponse { ok: boolean; status: number; text(): Promise<string> }
+interface FakeResponse { ok: boolean; status: number; text(): Promise<string>; headers?: { get(name: string): string | null } }
 interface FetchInit { method: string; headers: Record<string, string>; body?: string; signal: AbortSignal }
 type FetchImpl = (url: string, init: FetchInit) => Promise<FakeResponse>;
 
@@ -283,19 +290,26 @@ test.serial('a fetch that never settles, even when aborted, still times out at t
 
 // ---- HTTP and response errors ------------------------------------------------------------------------------------
 
-test('HTTP 401 and 500 are http_error', async t => {
-  for (const status of [401, 500]) {
+// E-037 replaced "HTTP 401 and 500 are http_error": every status has its own kind.
+const STATUS_KINDS: [number, DecisionErrorKind][] = [
+  [400, 'bad_request'], [404, 'bad_request'], [422, 'bad_request'], [401, 'auth'], [403, 'auth'], [402, 'no_credit'],
+  [429, 'throttled'], [500, 'server_error'], [502, 'server_error'], [503, 'server_error']
+];
+
+test('E-037: 400, 401, 403, 402, 429 and 500 are bad_request, auth, auth, no_credit, throttled and server_error', async t => {
+  for (const [status, kind] of STATUS_KINDS) {
     const { client } = makeClient({ key: FAKE_KEY, impl: async () => jsonResponse({ error: { message: 'nope' } }, status) });
-    assertFailure(t, await client.decide(STATE, QUESTIONS), 'http_error');
+    const result = await client.decide(STATE, QUESTIONS);
+    assertFailure(t, result, kind);
+    if (!result.ok) t.regex(result.message, new RegExp(`^HTTP ${status}\\b`), 'the message names the status');
   }
 });
 
-test('a network failure is a typed error, not a thrown exception', async t => {
+test('a network failure is a typed error, not a thrown exception: network (E-037)', async t => {
   const { client } = makeClient({ key: FAKE_KEY, impl: async () => { throw new TypeError('fetch failed'); } });
   const result = await client.decide(STATE, QUESTIONS);
-  t.false(result.ok);
+  assertFailure(t, result, 'network');
   if (!result.ok) t.true(ERROR_KINDS.includes(result.error));
-  t.false('answers' in result);
 });
 
 test('a body that is not JSON is invalid_response', async t => {
@@ -496,16 +510,16 @@ test.serial('status reports enabled, model and the calls in the last minute and 
 
 // ---- I4: the key never leaves in a message -----------------------------------------------------------------------
 
-test('I4: the key is not in an http_error message when the server echoes it back', async t => {
+test('I4: the key is not in an HTTP error message when the server echoes it back', async t => {
   const bodies = [
     JSON.stringify({ error: { message: `Invalid key: Bearer ${FAKE_KEY}` } }),
     `${FAKE_KEY} was rejected; ${FAKE_KEY} again`
   ];
   for (const body of bodies) {
-    for (const status of [401, 500]) {
+    for (const [status, kind] of STATUS_KINDS) {
       const { client } = makeClient({ key: FAKE_KEY, impl: async () => textResponse(body, status) });
       const result = await client.decide(STATE, QUESTIONS);
-      assertFailure(t, result, 'http_error');
+      assertFailure(t, result, kind);
       assertNoKey(t, result);
     }
   }
@@ -577,12 +591,12 @@ test('listModels GETs the decision model catalog and parses id, name, context le
   assertNoKey(t, result);
 });
 
-test('listModels reports HTTP errors without the key', async t => {
-  for (const status of [401, 500]) {
+test('listModels reports HTTP errors without the key, classified as for decisions (E-037)', async t => {
+  for (const [status, kind] of STATUS_KINDS) {
     const { client } = makeClient({ key: FAKE_KEY, impl: async () => textResponse(`denied for ${FAKE_KEY}`, status) });
     const result = await client.listModels();
     t.false(result.ok);
-    if (!result.ok) t.is(result.error, 'http_error');
+    if (!result.ok) t.is(result.error, kind);
     assertNoKey(t, result);
   }
 });
@@ -595,10 +609,11 @@ test('I4: listModels leaks no part of a key that straddles the error-body cut', 
   assertNoKey(t, result);
 });
 
-test('listModels reports a rejected fetch and a non-JSON catalog without the key', async t => {
+test('listModels reports a rejected fetch (network, E-037) and a non-JSON catalog (invalid_response) without the key', async t => {
   const rejected = makeClient({ key: FAKE_KEY, impl: async () => { throw new Error(`socket closed, key ${FAKE_KEY}`); } });
   const first = await rejected.client.listModels();
   t.false(first.ok);
+  if (!first.ok) t.is(first.error, 'network');
   assertNoKey(t, first);
   const html = makeClient({ key: FAKE_KEY, impl: async () => textResponse('<html>oops</html>') });
   const second = await html.client.listModels();
@@ -804,7 +819,8 @@ test('E-036: the check is not a decision: it counts against no per-minute window
 
   await client.checkAccess();
   await client.checkAccess();
-  t.like(client.status(), { callsLastMinute: 0, callsLastHour: 0, instinctCallsLastMinute: 0 });
+  // E-037: callsLastHour counts every request sent, the two GETs of each check among them; the minute windows do not.
+  t.like(client.status(), { callsLastMinute: 0, callsLastHour: 4, instinctCallsLastMinute: 0 });
 
   t.true((await client.decide(STATE, QUESTIONS)).ok, 'the chat budget of 1 is still free');
   t.true((await client.decide(STATE, QUESTIONS, { budget: 'instinct' })).ok, 'the instinct budget of 1 is still free');
@@ -840,13 +856,15 @@ test.serial('E-036: a decision that succeeds sets the health online and moves at
 
   const failing = checkedClient({ key: FAKE_KEY, impl: routes({ decision: () => textResponse('bad gateway', 502) }) });
   t.false((await failing.client.decide(STATE, QUESTIONS)).ok);
-  t.is(failing.client.health().state, 'unchecked', 'a failed decision leaves the health alone (E-037 changes that)');
+  t.is(failing.client.health().state, 'unchecked', 'one server error leaves the health alone (E-037 pauses after three)');
   t.deepEqual(failing.changes, []);
 });
 
-test('E-036: a decision that succeeds after a refused key brings the health back online; the same result twice is one change', async t => {
+// E-037 changed this E-036 case: after a refused key no decision is sent until a check passes, so the way back online
+// is a check that passes, and a decision after it.
+test('E-036 / E-037: after a refused key a check that passes brings the health back online; the same result twice is one change', async t => {
   let keyStatus = 401;
-  const { client, changes } = checkedClient({
+  const { client, fetch, changes } = checkedClient({
     key: FAKE_KEY,
     impl: routes({ key: () => (keyStatus === 200 ? jsonResponse(KEY_INFO) : textResponse('nope', keyStatus)) })
   });
@@ -854,10 +872,12 @@ test('E-036: a decision that succeeds after a refused key brings the health back
   await client.checkAccess();
   t.deepEqual(changes.map(change => change.state), ['offline'], 'the same refusal twice is reported once');
 
-  t.true((await client.decide(STATE, QUESTIONS)).ok);
-  t.deepEqual(changes.map(change => change.state), ['offline', 'online']);
+  assertFailure(t, await client.decide(STATE, QUESTIONS), 'backoff');
+  t.false(urlsOf(fetch).includes(DECISIONS_ENDPOINT), 'no decision request with a refused key');
   keyStatus = 200;
   await client.checkAccess();
+  t.deepEqual(changes.map(change => change.state), ['offline', 'online']);
+  t.true((await client.decide(STATE, QUESTIONS)).ok);
   t.deepEqual(changes.map(change => change.state), ['offline', 'online'], 'still online: no change');
 });
 
@@ -875,9 +895,586 @@ test('E-036: a check that ends after a decision succeeded does not overwrite tha
 });
 
 test('E-036: a throwing onHealthChange does not break a check or a decision', async t => {
-  const { client } = makeClient({ key: FAKE_KEY, impl: routes(), onHealthChange: () => { throw new Error('display failed'); } });
+  const onHealthChange = () => { throw new Error('display failed'); };
+  const { client } = makeClient({ key: FAKE_KEY, impl: routes(), onHealthChange });
   t.is((await client.checkAccess()).state, 'online');
-  const off = makeClient({ key: FAKE_KEY, impl: routes({ key: () => textResponse('', 401) }), onHealthChange: () => { throw new Error('display failed'); } });
+  const off = makeClient({ key: FAKE_KEY, impl: routes({ key: () => textResponse('', 401) }), onHealthChange });
   t.is((await off.client.checkAccess()).state, 'offline');
-  t.true((await off.client.decide(STATE, QUESTIONS)).ok);
+  // E-037: a refused key sends no decision; the call still ends with a typed result.
+  assertFailure(t, await off.client.decide(STATE, QUESTIONS), 'backoff');
+  // A decision that brings the health online, and a pause (E-037), both report a change.
+  const fresh = makeClient({ key: FAKE_KEY, impl: routes(), onHealthChange });
+  t.true((await fresh.client.decide(STATE, QUESTIONS)).ok);
+  const paused = makeClient({ key: FAKE_KEY, impl: routes({ decision: () => textResponse('slow down', 429) }), onHealthChange });
+  assertFailure(t, await paused.client.decide(STATE, QUESTIONS), 'throttled');
+  assertFailure(t, await paused.client.decide(STATE, QUESTIONS), 'backoff');
+});
+
+// ---- E-037: error kinds, pauses and statistics ---------------------------------------------------------------------
+// Expected from the E-037 row (Q26) and the task notes for step 15: one set of pauses for every decide call (instinct,
+// chat) and the key check. (a) auth (401/403): health OFFLINE, no decision request until checkAccess passes; a call 10
+// minutes after the last check starts one in the background; a 401 from the check is the auth state too. (b) no_credit
+// (402): health OFFLINE, one request let through every 5 minutes. (c) throttled (429): paused for Retry-After (seconds
+// or an HTTP date) kept within 1-60 s, or 2 s doubling up to 30 s without it. (d) 3 server or network errors in a row:
+// 2 s doubling up to 15 s. (e) bad_request, timeout and invalid_response do not pause. Any success clears everything
+// and sets online. checkAccess is not held back by auth or no_credit but waits for a pause. During a pause decide
+// returns backoff at once, e.g. "not calling OpenRouter for 7s more (HTTP 429)", and that is not a sent request.
+// Entering OFFLINE or a pause is one onHealthChange, failures in a row are not reported again. instinctState shows
+// "OFFLINE for 7 more s (paused after HTTP 429)" and the health before the pause once it is over. Statistics since the
+// client was made (once per server): sent requests by instinct, chat and check, second requests apart, failures, the
+// sum of usage.cost, and the calls without a cost at the median of the last 50 known costs (unknown before any).
+// callsLastHour counts every request sent. listModels is classified the same way but never held back. No text has the key.
+
+const RETRY_AFTER = 'retry-after';
+
+function withHeaders(response: FakeResponse, headers: Record<string, string>): FakeResponse {
+  return { ...response, headers: { get: (name: string) => headers[name.toLowerCase()] ?? null } };
+}
+
+function decisionsSent(fetch: Setup['fetch']): number {
+  return urlsOf(fetch).filter(url => url === DECISIONS_ENDPOINT).length;
+}
+
+function keyChecksSent(fetch: Setup['fetch']): number {
+  return urlsOf(fetch).filter(url => url === KEY_ENDPOINT).length;
+}
+
+function messageOf(result: DecisionResult): string {
+  return result.ok ? '<ok>' : result.message;
+}
+
+/** A success with a given usage.cost, or with no usage at all. */
+function costing(cost: number | undefined): FakeResponse {
+  const body = sampleResponse();
+  if (cost === undefined) delete body.usage;
+  else body.usage = { input_tokens: 120, output_tokens: 0, cost };
+  return jsonResponse(body);
+}
+
+test.serial('E-037: Retry-After 7, or an HTTP date 7 s ahead, holds every call back for 7 s without a request', async t => {
+  const clock = useClock(t);
+  for (const value of ['7', () => new Date(Date.now() + 7000).toUTCString()]) {
+    let throttle = true;
+    const { client, fetch } = makeClient({
+      key: FAKE_KEY,
+      impl: routes({ decision: () => (throttle ? withHeaders(textResponse('slow down', 429), { [RETRY_AFTER]: typeof value === 'string' ? value : value() }) : jsonResponse(sampleResponse())) })
+    });
+    assertFailure(t, await client.decide(STATE, QUESTIONS), 'throttled');
+    throttle = false;
+
+    const held = await client.decide(STATE, QUESTIONS);
+    assertFailure(t, held, 'backoff');
+    t.is(messageOf(held), 'not calling OpenRouter for 7s more (HTTP 429)', 'the row\'s example');
+    await clock.tickAsync(6999);
+    assertFailure(t, await client.decide(STATE, QUESTIONS, { budget: 'instinct' }), 'backoff');
+    t.is(decisionsSent(fetch), 1, 'no request within the 7 s, for the instinct either');
+    await clock.tickAsync(1);
+    t.true((await client.decide(STATE, QUESTIONS)).ok, 'the pause is over after 7 s');
+    t.is(decisionsSent(fetch), 2);
+  }
+});
+
+test.serial('E-037: a Retry-After over 60 s pauses for 60 s, and one under a second for 1 s', async t => {
+  const clock = useClock(t);
+  for (const [value, ms] of [['120', 60_000], [new Date(Date.now() + 300_000).toUTCString(), 60_000], ['0', 1000]] as const) {
+    let throttle = true;
+    const { client, fetch } = makeClient({
+      key: FAKE_KEY,
+      impl: routes({ decision: () => (throttle ? withHeaders(textResponse('slow down', 429), { [RETRY_AFTER]: value }) : jsonResponse(sampleResponse())) })
+    });
+    assertFailure(t, await client.decide(STATE, QUESTIONS), 'throttled');
+    throttle = false;
+    await clock.tickAsync(ms - 1);
+    assertFailure(t, await client.decide(STATE, QUESTIONS), 'backoff');
+    await clock.tickAsync(1);
+    t.true((await client.decide(STATE, QUESTIONS)).ok, `Retry-After ${value}: over after ${ms} ms`);
+    t.is(decisionsSent(fetch), 2);
+  }
+});
+
+test.serial('E-037: 429s without Retry-After pause for 2, 4, 8, 16, 30 and 30 s; a success clears the count', async t => {
+  const clock = useClock(t);
+  let throttle = true;
+  const { client, fetch } = makeClient({ key: FAKE_KEY, impl: routes({ decision: () => (throttle ? textResponse('slow down', 429) : jsonResponse(sampleResponse())) }) });
+  for (const [index, s] of [2, 4, 8, 16, 30, 30].entries()) {
+    assertFailure(t, await client.decide(STATE, QUESTIONS), 'throttled');
+    const held = await client.decide(STATE, QUESTIONS);
+    t.is(messageOf(held), `not calling OpenRouter for ${s}s more (HTTP 429)`, `429 number ${index + 1}`);
+    await clock.tickAsync(s * 1000 - 1);
+    assertFailure(t, await client.decide(STATE, QUESTIONS), 'backoff');
+    await clock.tickAsync(1);
+  }
+  t.is(decisionsSent(fetch), 6, 'only the requests between the pauses went out');
+  throttle = false;
+  t.true((await client.decide(STATE, QUESTIONS)).ok);
+  throttle = true;
+  assertFailure(t, await client.decide(STATE, QUESTIONS), 'throttled');
+  t.is(messageOf(await client.decide(STATE, QUESTIONS)), 'not calling OpenRouter for 2s more (HTTP 429)', 'back to 2 s after the success');
+});
+
+test.serial('E-037: after three 503s in a row the fourth call is backoff; 2 s, then 4, 8 and at most 15 s; a success clears the count', async t => {
+  const clock = useClock(t);
+  let status = 503;
+  const { client, fetch } = makeClient({ key: FAKE_KEY, impl: routes({ decision: () => (status === 200 ? jsonResponse(sampleResponse()) : textResponse('unavailable', status)) }) });
+  for (let i = 0; i < 3; i++) assertFailure(t, await client.decide(STATE, QUESTIONS), 'server_error');
+  const fourth = await client.decide(STATE, QUESTIONS);
+  assertFailure(t, fourth, 'backoff');
+  t.is(messageOf(fourth), 'not calling OpenRouter for 2s more (HTTP 503)');
+  t.is(decisionsSent(fetch), 3, 'the fourth call sent nothing');
+
+  for (const s of [2, 4, 8, 15, 15]) {
+    await clock.tickAsync(s * 1000 - 1);
+    assertFailure(t, await client.decide(STATE, QUESTIONS), 'backoff');
+    await clock.tickAsync(1);
+    assertFailure(t, await client.decide(STATE, QUESTIONS), 'server_error');
+  }
+  t.is(messageOf(await client.decide(STATE, QUESTIONS)), 'not calling OpenRouter for 15s more (HTTP 503)', 'at most 15 s');
+  await clock.tickAsync(15_000);
+
+  status = 200;
+  t.true((await client.decide(STATE, QUESTIONS)).ok);
+  status = 503;
+  for (let i = 0; i < 2; i++) assertFailure(t, await client.decide(STATE, QUESTIONS), 'server_error');
+  // Two after the success, so the third still goes out.
+  assertFailure(t, await client.decide(STATE, QUESTIONS), 'server_error');
+  assertFailure(t, await client.decide(STATE, QUESTIONS), 'backoff');
+});
+
+test.serial('E-037: network errors count with server errors; another kind in between breaks the row', async t => {
+  useClock(t);
+  const thrown = makeClient({ key: FAKE_KEY, impl: async () => { throw new TypeError(`fetch failed for ${FAKE_KEY}`); } });
+  for (let i = 0; i < 3; i++) assertFailure(t, await thrown.client.decide(STATE, QUESTIONS), 'network');
+  const held = await thrown.client.decide(STATE, QUESTIONS);
+  t.is(messageOf(held), 'not calling OpenRouter for 2s more (network errors)');
+  t.is(thrown.fetch.callCount, 3);
+  assertNoKey(t, [held, thrown.client.health()]);
+
+  const replies: Reply[] = [
+    () => textResponse('x', 502), () => { throw new TypeError('fetch failed'); }, () => textResponse('x', 500)
+  ];
+  const mixed = makeClient({ key: FAKE_KEY, impl: routes({ decision: () => replies.shift()?.() ?? textResponse('x', 503) }) });
+  for (const kind of ['server_error', 'network', 'server_error'] as const) assertFailure(t, await mixed.client.decide(STATE, QUESTIONS), kind);
+  assertFailure(t, await mixed.client.decide(STATE, QUESTIONS), 'backoff');
+
+  const broken: Reply[] = [() => textResponse('x', 503), () => textResponse('x', 503), () => textResponse('x', 400)];
+  const row = makeClient({ key: FAKE_KEY, impl: routes({ decision: () => broken.shift()?.() ?? textResponse('x', 503) }) });
+  for (const kind of ['server_error', 'server_error', 'bad_request', 'server_error', 'server_error', 'server_error'] as const) {
+    assertFailure(t, await row.client.decide(STATE, QUESTIONS), kind);
+  }
+  // Three in a row after the 400.
+  assertFailure(t, await row.client.decide(STATE, QUESTIONS), 'backoff');
+});
+
+test.serial('E-037: timeouts, bad requests and invalid responses never pause, however many come in a row', async t => {
+  const clock = useClock(t);
+  const hanging = makeClient({ key: FAKE_KEY, impl: abortableHang });
+  for (let i = 0; i < 10; i++) {
+    const pending = hanging.client.decide(STATE, QUESTIONS, { budget: 'instinct' });
+    await clock.tickAsync(CONTRACT_DEFAULT_TIMEOUT_MS);
+    assertFailure(t, await pending, 'timeout');
+  }
+  t.is(hanging.fetch.callCount, 10, 'every timeout was a request of its own');
+  t.is(hanging.client.health().state, 'unchecked');
+
+  const cases: [Reply, DecisionErrorKind][] = [[() => textResponse('bad request', 400), 'bad_request'], [() => textResponse('not json'), 'invalid_response']];
+  for (const [reply, kind] of cases) {
+    const { client, fetch, changes } = checkedClient({ key: FAKE_KEY, impl: routes({ decision: reply }) });
+    for (let i = 0; i < 5; i++) assertFailure(t, await client.decide(STATE, QUESTIONS), kind);
+    t.is(decisionsSent(fetch), 5, `${kind}: every call was a request of its own`);
+    t.deepEqual(changes, [], `${kind}: no change is reported`);
+    t.is(client.health().state, 'unchecked', `${kind}: the health stays as it was`);
+  }
+});
+
+test.serial('E-037: only a success resets the doubling after 429s; a timeout or another failure in between does not', async t => {
+  const clock = useClock(t);
+  const replies: Reply[] = [
+    () => textResponse('slow down', 429),
+    () => new Promise<FakeResponse>(() => undefined),
+    () => textResponse('bad request', 400),
+    () => textResponse('unavailable', 503),
+    () => { throw new TypeError('fetch failed'); },
+    () => textResponse('slow down', 429)
+  ];
+  const { client } = makeClient({ key: FAKE_KEY, impl: routes({ decision: () => replies.shift()!() }) });
+  assertFailure(t, await client.decide(STATE, QUESTIONS), 'throttled');
+  t.is(messageOf(await client.decide(STATE, QUESTIONS)), 'not calling OpenRouter for 2s more (HTTP 429)');
+  await clock.tickAsync(2000);
+  const pending = client.decide(STATE, QUESTIONS);
+  await clock.tickAsync(CONTRACT_DEFAULT_TIMEOUT_MS);
+  assertFailure(t, await pending, 'timeout');
+  for (const kind of ['bad_request', 'server_error', 'network', 'throttled'] as const) assertFailure(t, await client.decide(STATE, QUESTIONS), kind);
+  t.is(messageOf(await client.decide(STATE, QUESTIONS)), 'not calling OpenRouter for 4s more (HTTP 429)', 'the second 429 doubles the wait');
+});
+
+test.serial('E-037: after a 401 no decision request goes out until a check passes; only a call 10 minutes after the last check starts one', async t => {
+  const clock = useClock(t);
+  let keyStatus = 401;
+  const { client, fetch } = makeClient({
+    key: FAKE_KEY,
+    impl: routes({
+      key: () => (keyStatus === 200 ? jsonResponse(KEY_INFO) : textResponse(`User not found: ${FAKE_KEY}`, keyStatus)),
+      decision: () => (keyStatus === 200 ? jsonResponse(sampleResponse()) : textResponse(`no such key ${FAKE_KEY}`, 401))
+    })
+  });
+  // A decision refused with 401 right after the startup check.
+  t.like(await client.checkAccess(), { state: 'offline' });
+  keyStatus = 403;
+  const refused = await client.decide(STATE, QUESTIONS);
+  t.true(refused.ok === false && refused.error === 'backoff', 'the check\'s 401 is the auth state already: not even this one is sent');
+  t.is(decisionsSent(fetch), 0);
+  t.is(messageOf(refused), 'not calling OpenRouter until the API key passes a check (HTTP 401)');
+  t.like(client.health(), { state: 'offline', reason: 'OpenRouter rejected the API key (HTTP 401)' });
+
+  for (const minutes of [1, 5, 9]) {
+    await clock.tickAsync(minutes === 1 ? 60_000 : 4 * 60_000);
+    assertFailure(t, await client.decide(STATE, QUESTIONS, { budget: 'instinct' }), 'backoff');
+  }
+  await clock.tickAsync(60_000 - 1);
+  assertFailure(t, await client.decide(STATE, QUESTIONS), 'backoff');
+  t.is(keyChecksSent(fetch), 1, 'within 10 minutes of the check, calls start no new one');
+  t.is(decisionsSent(fetch), 0);
+
+  await clock.tickAsync(1);
+  // The call that starts the check is held back itself.
+  assertFailure(t, await client.decide(STATE, QUESTIONS), 'backoff');
+  await clock.tickAsync(0);
+  t.is(keyChecksSent(fetch), 2, '10 minutes after the last check, a call starts one in the background');
+  t.like(client.health(), { state: 'offline', reason: 'OpenRouter rejected the API key (HTTP 403)' });
+  assertFailure(t, await client.decide(STATE, QUESTIONS), 'backoff');
+  t.is(keyChecksSent(fetch), 2, 'and the next call does not start another');
+
+  keyStatus = 200;
+  await clock.tickAsync(10 * 60_000);
+  assertFailure(t, await client.decide(STATE, QUESTIONS), 'backoff');
+  await clock.tickAsync(0);
+  t.is(keyChecksSent(fetch), 3);
+  t.is(client.health().state, 'online', 'the check passed');
+  t.true((await client.decide(STATE, QUESTIONS)).ok, 'decisions go out again');
+  t.is(decisionsSent(fetch), 1);
+});
+
+test.serial('E-037: a decision refused with 401 or 403 is the auth state; a check passes it, any time, and not before', async t => {
+  useClock(t);
+  for (const status of [401, 403]) {
+    let keyOk = false;
+    const { client, fetch } = makeClient({
+      key: FAKE_KEY,
+      impl: routes({
+        key: () => (keyOk ? jsonResponse(KEY_INFO) : textResponse('nope', status)),
+        decision: () => (keyOk ? jsonResponse(sampleResponse()) : textResponse('nope', status))
+      })
+    });
+    assertFailure(t, await client.decide(STATE, QUESTIONS), 'auth');
+    t.like(client.health(), { state: 'offline', reason: `OpenRouter rejected the API key (HTTP ${status})` });
+    // No check before in this client, so the first held call starts one; it is shared with the next checkAccess.
+    assertFailure(t, await client.decide(STATE, QUESTIONS), 'backoff');
+    t.like(await client.checkAccess(), { state: 'offline' });
+    t.is(decisionsSent(fetch), 1);
+
+    // The check is not held back by the refusal (otherwise it could never pass): bind or main.ts call it.
+    keyOk = true;
+    t.is((await client.checkAccess()).state, 'online');
+    t.true((await client.decide(STATE, QUESTIONS)).ok);
+    t.is(decisionsSent(fetch), 2);
+  }
+});
+
+test.serial('E-037: a check that cannot reach OpenRouter leaves the auth state and its OFFLINE health as they are', async t => {
+  useClock(t);
+  let reachable = true;
+  const { client, fetch } = makeClient({
+    key: FAKE_KEY,
+    impl: routes({ key: () => { if (!reachable) throw new TypeError('fetch failed'); return textResponse('nope', 401); } })
+  });
+  await client.checkAccess();
+  reachable = false;
+  t.like(await client.checkAccess(), { state: 'offline', reason: 'OpenRouter rejected the API key (HTTP 401)' });
+  assertFailure(t, await client.decide(STATE, QUESTIONS), 'backoff');
+  t.is(decisionsSent(fetch), 0);
+});
+
+test.serial('E-037: with no credit (402) one request goes out every 5 minutes; the calls in between are backoff', async t => {
+  const clock = useClock(t);
+  let status = 402;
+  const { client, fetch } = makeClient({ key: FAKE_KEY, impl: routes({ decision: () => (status === 200 ? jsonResponse(sampleResponse()) : textResponse('Insufficient credits', status)) }) });
+  assertFailure(t, await client.decide(STATE, QUESTIONS), 'no_credit');
+  t.like(client.health(), { state: 'offline', reason: 'the OpenRouter account has no credit (HTTP 402)' });
+  const held = await client.decide(STATE, QUESTIONS);
+  t.is(messageOf(held), 'not calling OpenRouter for 300s more (HTTP 402)');
+
+  await clock.tickAsync(5 * 60_000 - 1);
+  assertFailure(t, await client.decide(STATE, QUESTIONS, { budget: 'instinct' }), 'backoff');
+  t.is(decisionsSent(fetch), 1);
+  await clock.tickAsync(1);
+  // Two calls at the same moment: only one of them is let through.
+  const [first, second] = await Promise.all([client.decide(STATE, QUESTIONS), client.decide(STATE, QUESTIONS, { budget: 'instinct' })]);
+  assertFailure(t, first, 'no_credit');
+  assertFailure(t, second, 'backoff');
+  t.is(decisionsSent(fetch), 2);
+  assertFailure(t, await client.decide(STATE, QUESTIONS), 'backoff');
+  t.is(messageOf(await client.decide(STATE, QUESTIONS)), 'not calling OpenRouter for 300s more (HTTP 402)');
+
+  status = 200;
+  await clock.tickAsync(5 * 60_000);
+  t.true((await client.decide(STATE, QUESTIONS)).ok, 'the next try succeeds: credit was added');
+  t.is(client.health().state, 'online');
+  t.true((await client.decide(STATE, QUESTIONS)).ok, 'and the calls after it are not held back');
+  t.is(decisionsSent(fetch), 4);
+});
+
+test.serial('E-037: ten failures in a row are one onHealthChange, for 503s and for 429s alike', async t => {
+  const clock = useClock(t);
+  for (const status of [503, 429]) {
+    const { client, fetch, changes } = checkedClient({ key: FAKE_KEY, impl: routes({ decision: () => textResponse('x', status) }) });
+    while (decisionsSent(fetch) < 10) {
+      const result = await client.decide(STATE, QUESTIONS);
+      if (!result.ok && result.error === 'backoff') await clock.tickAsync(30_000);
+    }
+    t.is(changes.length, 1, `HTTP ${status}: ${JSON.stringify(changes)}`);
+    t.like(changes[0], { state: 'offline', reason: `paused after HTTP ${status}` });
+    t.is(typeof changes[0].pausedMs, 'number');
+  }
+  // Ten timeouts in a row are no change at all: they do not pause.
+  const { client, changes } = checkedClient({ key: FAKE_KEY, impl: abortableHang });
+  for (let i = 0; i < 10; i++) {
+    const pending = client.decide(STATE, QUESTIONS);
+    await clock.tickAsync(CONTRACT_DEFAULT_TIMEOUT_MS);
+    await pending;
+  }
+  t.deepEqual(changes, []);
+});
+
+test.serial('E-037: a refused key is one change however many checks and calls follow; a success after an outage is one more', async t => {
+  const clock = useClock(t);
+  let keyStatus = 401;
+  const { client, changes } = checkedClient({
+    key: FAKE_KEY,
+    impl: routes({ key: () => (keyStatus === 200 ? jsonResponse(KEY_INFO) : textResponse('nope', keyStatus)) })
+  });
+  for (let i = 0; i < 10; i++) {
+    await client.checkAccess();
+    await client.decide(STATE, QUESTIONS);
+    await clock.tickAsync(11 * 60_000);
+  }
+  t.deepEqual(changes.map(change => change.state), ['offline']);
+  keyStatus = 200;
+  await client.checkAccess();
+  t.deepEqual(changes.map(change => change.state), ['offline', 'online']);
+});
+
+test.serial('E-037: the check is sent in the auth state, but waits for a 429\'s pause to end', async t => {
+  const clock = useClock(t);
+  let throttle = true;
+  const { client, fetch } = makeClient({
+    key: FAKE_KEY,
+    impl: routes({ decision: () => (throttle ? withHeaders(textResponse('slow down', 429), { [RETRY_AFTER]: '7' }) : jsonResponse(sampleResponse())) })
+  });
+  assertFailure(t, await client.decide(STATE, QUESTIONS), 'throttled');
+  throttle = false;
+  let health: DecisionHealth | undefined;
+  void client.checkAccess().then(result => { health = result; });
+  await clock.tickAsync(6999);
+  t.is(keyChecksSent(fetch), 0, 'the check waits for the pause');
+  await clock.tickAsync(1);
+  t.is(keyChecksSent(fetch), 1, 'and goes out when it ends');
+  await clock.tickAsync(0);
+  t.like(health, { state: 'online' });
+
+  const refused = makeClient({ key: FAKE_KEY, impl: routes({ decision: () => textResponse('nope', 401) }) });
+  assertFailure(t, await refused.client.decide(STATE, QUESTIONS), 'auth');
+  const before = keyChecksSent(refused.fetch);
+  t.like(await refused.client.checkAccess(), { state: 'online' });
+  t.is(keyChecksSent(refused.fetch), before + 1, 'a refused key does not hold the check back');
+
+  const noCredit = makeClient({ key: FAKE_KEY, impl: routes({ decision: () => textResponse('Insufficient credits', 402) }) });
+  assertFailure(t, await noCredit.client.decide(STATE, QUESTIONS), 'no_credit');
+  await noCredit.client.checkAccess();
+  t.is(keyChecksSent(noCredit.fetch), 1, 'an account without credit does not hold the check back either');
+
+  const failing = makeClient({ key: FAKE_KEY, impl: routes({ decision: () => textResponse('unavailable', 503) }) });
+  for (let i = 0; i < 3; i++) assertFailure(t, await failing.client.decide(STATE, QUESTIONS), 'server_error');
+  void failing.client.checkAccess();
+  await clock.tickAsync(1999);
+  t.is(keyChecksSent(failing.fetch), 0, 'the check waits for the pause after three 503s');
+  await clock.tickAsync(1);
+  t.is(keyChecksSent(failing.fetch), 1, 'and goes out when it ends');
+});
+
+test.serial('E-037: a check that passes leaves the no-credit state as it is: only a decision that succeeds ends it', async t => {
+  const clock = useClock(t);
+  let status = 402;
+  const { client, fetch, changes } = checkedClient({ key: FAKE_KEY, impl: routes({ decision: () => (status === 200 ? jsonResponse(sampleResponse()) : textResponse('Insufficient credits', status)) }) });
+  assertFailure(t, await client.decide(STATE, QUESTIONS), 'no_credit');
+  t.is(changes.length, 1);
+
+  // GET /api/v1/key accepts a key whatever its credit (PLAN step 14), so the join's check says nothing about it.
+  t.like(await client.checkAccess(), { state: 'offline', reason: 'the OpenRouter account has no credit (HTTP 402)' });
+  t.like(client.health(), { state: 'offline', reason: 'the OpenRouter account has no credit (HTTP 402)' });
+  await clock.tickAsync(60_000);
+  assertFailure(t, await client.decide(STATE, QUESTIONS), 'backoff');
+  t.is(decisionsSent(fetch), 1, 'still one request in 5 minutes');
+  t.is(changes.length, 1, 'no change was reported: neither back online nor OFFLINE again');
+
+  status = 200;
+  await clock.tickAsync(4 * 60_000);
+  t.true((await client.decide(STATE, QUESTIONS)).ok, 'the next try 5 minutes later succeeds');
+  t.deepEqual(changes.map(change => change.state), ['offline', 'online']);
+});
+
+test.serial('E-037: during a pause health() and instinctState show the seconds left; after it the health from before shows again', async t => {
+  // 1.7e12 ms is 2023-11-14 22:13:20 UTC.
+  const clock = useClock(t);
+  let throttle = false;
+  const fetch = routes({ decision: () => (throttle ? withHeaders(textResponse('slow down', 429), { [RETRY_AFTER]: '7' }) : jsonResponse(sampleResponse())) });
+  const autopilot = new Autopilot({ events: new EventStore(), decisions: { getKey: () => FAKE_KEY, fetch } });
+  await autopilot.checkDecisionModel();
+  const before = autopilot.decisions.health();
+  t.is(instinctState(autopilot), 'online (key checked at 22:13 UTC)');
+
+  throttle = true;
+  assertFailure(t, await autopilot.decisions.decide(STATE, QUESTIONS, { budget: 'instinct' }), 'throttled');
+  t.like(autopilot.decisions.health(), { state: 'offline', reason: 'paused after HTTP 429', pausedMs: 7000 });
+  t.is(instinctState(autopilot), 'OFFLINE for 7 more s (paused after HTTP 429): the bot does not react to dangers by itself');
+  await clock.tickAsync(3000);
+  t.is(instinctState(autopilot), 'OFFLINE for 4 more s (paused after HTTP 429): the bot does not react to dangers by itself');
+  await clock.tickAsync(4000);
+  t.deepEqual(autopilot.decisions.health(), before, 'the pause is over and no request has answered since');
+  t.is(instinctState(autopilot), 'online (key checked at 22:13 UTC)');
+
+  // Before any check passed, the health under the pause is "not checked yet".
+  const unchecked = new Autopilot({ events: new EventStore(), decisions: { getKey: () => FAKE_KEY, fetch } });
+  assertFailure(t, await unchecked.decisions.decide(STATE, QUESTIONS), 'throttled');
+  t.regex(instinctState(unchecked), /^OFFLINE for 7 more s \(paused after HTTP 429\)/);
+  await clock.tickAsync(7000);
+  t.is(instinctState(unchecked), 'not checked yet');
+});
+
+test.serial('E-037 / I4: no backoff message, health, change report or statistic holds the key', async t => {
+  const clock = useClock(t);
+  const seen: unknown[] = [];
+  for (const status of [401, 402, 429, 503]) {
+    const { client, changes } = checkedClient({ key: FAKE_KEY, impl: routes({ decision: () => textResponse(`rejected ${FAKE_KEY}`, status), key: () => textResponse(`bad ${FAKE_KEY}`, status) }) });
+    for (let i = 0; i < 5; i++) seen.push(await client.decide(STATE, QUESTIONS), client.health());
+    // A check waits for a pause to end: let the clock run meanwhile.
+    const check = client.checkAccess();
+    await clock.tickAsync(60_000);
+    seen.push(await check, changes, client.spend(), client.status());
+  }
+  assertNoKey(t, seen);
+});
+
+test.serial('E-037: listModels is never held back by a pause and starts none', async t => {
+  useClock(t);
+  const { client, fetch } = makeClient({
+    key: FAKE_KEY,
+    impl: routes({ decision: () => textResponse('slow down', 429), catalog: () => jsonResponse(SAMPLE_CATALOG) })
+  });
+  assertFailure(t, await client.decide(STATE, QUESTIONS), 'throttled');
+  t.true((await client.listModels()).ok, 'the catalog is read during the pause');
+  t.is(urlsOf(fetch).filter(url => url === MODELS_ENDPOINT).length, 1);
+
+  const throttledCatalog = makeClient({ key: FAKE_KEY, impl: routes({ catalog: () => textResponse('slow down', 429) }) });
+  const result = await throttledCatalog.client.listModels();
+  t.true(!result.ok && result.error === 'throttled');
+  t.true((await throttledCatalog.client.decide(STATE, QUESTIONS)).ok, 'a refused catalog pauses no decision');
+  t.is(throttledCatalog.client.spend().calls, 1, 'and the catalog is not counted');
+});
+
+test.serial('E-037: the statistics count requests by purpose and second requests apart, failures, and the reported cost', async t => {
+  useClock(t);
+  const replies: Reply[] = [
+    () => costing(0.00001), () => costing(0.00003), () => costing(0.00002), () => costing(undefined), () => textResponse('x', 500), () => costing(0.00004)
+  ];
+  const { client } = makeClient({ key: FAKE_KEY, impl: routes({ decision: () => replies.shift()!() }) });
+  await client.checkAccess();
+  for (let i = 0; i < 3; i++) t.true((await client.decide(STATE, QUESTIONS)).ok);
+  t.true((await client.decide(STATE, QUESTIONS, { budget: 'instinct' })).ok);
+  assertFailure(t, await client.decide(STATE, QUESTIONS, { budget: 'instinct' }), 'server_error');
+  t.true((await client.decide(STATE, QUESTIONS, { budget: 'instinct', second: true })).ok);
+
+  const spend = client.spend();
+  t.like(spend, { calls: 8, instinct: 3, secondRequests: 1, chat: 3, check: 2, failed: 1, withoutCost: 1 });
+  t.true(Math.abs(spend.reportedCost - 0.0001) < 1e-12, `the sum of usage.cost: ${spend.reportedCost}`);
+  // The median of 0.00001, 0.00003, 0.00002 and 0.00004 for the one success without a cost; the failure is not estimated.
+  t.true(spend.estimatedCost !== null && Math.abs(spend.estimatedCost - 0.000025) < 1e-12, `estimate: ${spend.estimatedCost}`);
+  t.is(client.status().callsLastHour, 8, 'callsLastHour counts every request sent, the instinct\'s among them');
+  t.like(client.status(), { callsLastMinute: 3, instinctCallsLastMinute: 3 }, 'the per-minute windows count as before');
+});
+
+test.serial('E-037: calls that are not sent are not counted: disabled, rate_limited, backoff, too many questions', async t => {
+  useClock(t);
+  const store = new PolicyStore();
+  t.true(store.update({ decisions: { maxCallsPerMinute: 1 } }, 'llm').ok);
+  const { client } = makeClient({ key: FAKE_KEY, store, impl: routes({ decision: () => textResponse('slow down', 429) }) });
+  assertFailure(t, await client.decide(STATE, QUESTIONS), 'throttled');
+  assertFailure(t, await client.decide(STATE, QUESTIONS), 'backoff');
+  const many: Record<string, DecisionQuestion> = {};
+  for (let i = 0; i < 129; i++) many[`q${i}`] = QUESTIONS.addressed;
+  t.false((await client.decide(STATE, many)).ok);
+  t.like(client.spend(), { calls: 1, chat: 1, failed: 1 });
+  t.like(client.status(), { callsLastMinute: 1, callsLastHour: 1 }, 'a backoff takes nothing from the per-minute limit');
+
+  const limited = makeClient({ key: FAKE_KEY, store, impl: routes() });
+  t.true((await limited.client.decide(STATE, QUESTIONS)).ok);
+  assertFailure(t, await limited.client.decide(STATE, QUESTIONS), 'rate_limited');
+  t.like(limited.client.spend(), { calls: 1, failed: 0 });
+
+  const none = makeClient({ key: undefined, impl: routes() });
+  assertFailure(t, await none.client.decide(STATE, QUESTIONS), 'disabled');
+  await none.client.checkAccess();
+  t.like(none.client.spend(), { calls: 0, check: 0, failed: 0 });
+});
+
+test.serial('E-037: a check counts its requests as check, a refused key one failed request; a cost in an unusable answer still counts', async t => {
+  useClock(t);
+  const refused = makeClient({ key: FAKE_KEY, impl: routes({ key: () => textResponse('nope', 401) }) });
+  await refused.client.checkAccess();
+  await refused.client.checkAccess();
+  t.like(refused.client.spend(), { calls: 2, check: 2, failed: 2, instinct: 0, chat: 0 });
+
+  const answers = sampleAnswers();
+  delete answers.urgency;
+  const body = { ...sampleResponse(answers), usage: { cost: 0.00005 } };
+  const unusable = makeClient({ key: FAKE_KEY, impl: routes({ decision: () => jsonResponse(body) }) });
+  assertFailure(t, await unusable.client.decide(STATE, QUESTIONS), 'invalid_response');
+  t.like(unusable.client.spend(), { calls: 1, failed: 1, reportedCost: 0.00005, withoutCost: 0, estimatedCost: 0 });
+});
+
+test.serial('E-037: the estimate is unknown before any cost is known, and uses the median of the last 50 known costs', async t => {
+  const clock = useClock(t);
+  const fresh = makeClient({ key: FAKE_KEY, impl: routes({ decision: () => costing(undefined) }) });
+  t.true((await fresh.client.decide(STATE, QUESTIONS)).ok);
+  t.like(fresh.client.spend(), { withoutCost: 1, estimatedCost: null, reportedCost: 0 });
+
+  // Sixty expensive calls first, then 50 cheap ones: the median of all 110, or of the first 50, would be 0.01; only
+  // the last 50 give 0.00002. One call a second stays under the instinct's 90 a minute.
+  const costs = [...Array(60).fill(0.01), ...Array(50).fill(0.00002), undefined, undefined];
+  const many = makeClient({ key: FAKE_KEY, impl: routes({ decision: () => costing(costs.shift()) }) });
+  for (let i = 0; i < 112; i++) {
+    t.true((await many.client.decide(STATE, QUESTIONS, { budget: 'instinct' })).ok);
+    await clock.tickAsync(1000);
+  }
+  const spend = many.client.spend();
+  t.is(spend.withoutCost, 2);
+  t.true(spend.estimatedCost !== null && Math.abs(spend.estimatedCost - 0.00004) < 1e-12, `estimate: ${spend.estimatedCost}`);
+});
+
+test.serial('E-037: the statistics live in the client the Autopilot makes once, so unbind and bind do not reset them', async t => {
+  useClock(t);
+  const autopilot = new Autopilot({ events: new EventStore(), decisions: { getKey: () => FAKE_KEY, fetch: routes() } });
+  await autopilot.checkDecisionModel();
+  autopilot.bind(new EventEmitter() as never);
+  t.teardown(() => autopilot.unbind('test finished'));
+  await autopilot.checkDecisionModel();
+  t.true((await autopilot.decisions.decide(STATE, QUESTIONS, { budget: 'instinct' })).ok);
+  t.true((await autopilot.decisions.decide(STATE, QUESTIONS)).ok);
+  const before = autopilot.decisions.spend();
+  t.like(before, { instinct: 1, chat: 1, check: 4 });
+
+  autopilot.unbind('disconnected');
+  autopilot.bind(new EventEmitter() as never);
+  await autopilot.checkDecisionModel();
+  t.like(autopilot.decisions.spend(), { instinct: 1, chat: 1, check: 6, calls: before.calls + 2 }, 'only the join\'s check was added');
+  t.is(autopilot.decisions.status().callsLastHour, before.calls + 2);
 });

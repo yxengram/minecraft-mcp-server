@@ -483,16 +483,17 @@ test('E-036: each change of the health is one instinct event and one log line, O
   t.is(reports.logs().length, 1);
   t.is(reports.events().length, 1);
 
-  // A later join with a key that passes: one more line and event, not as a warning.
+  // A later join with a key that passes: one more line and event, not as a warning. E-037 changed their words: coming
+  // back from OFFLINE says how long it lasted, "decision model back online (offline for 42s)" (G3).
   state.keyStatus = 200;
   autopilot.bind(eventBot().bot as never);
   await autopilot.checkDecisionModel();
   t.is(autopilot.decisions.health().state, 'online');
   t.is(reports.logs().length, 2);
   t.is(reports.logs()[1][0], 'info');
-  t.regex(reports.logs()[1][1], /^Decision model online\b/);
+  t.regex(reports.logs()[1][1], /^Decision model back online \(offline for \d+s\)$/);
   t.is(reports.events().length, 2);
-  t.regex(reports.events()[1], /^decision model online\b/);
+  t.regex(reports.events()[1], /^decision model back online \(offline for \d+s\)$/);
 
   const everything = JSON.stringify([log.getCalls().map(call => call.args), events.query({ limit: 500 }).events]);
   t.false(everything.includes('FAKE-autopilot-key-check'), 'I4: no part of the key in a log line or an event');
@@ -515,4 +516,96 @@ test('E-036: without a key neither the startup check nor a join sends anything; 
   t.true(fetch.notCalled);
   t.deepEqual(reports.logs(), [['warn', 'Decision model OFFLINE: no OPENROUTER_API_KEY. The bot will not react to dangers by itself']]);
   t.deepEqual(reports.events(), ['decision model offline: no OPENROUTER_API_KEY; dangers are left to you']);
+});
+
+// ---- E-037: pauses and the way back, as events and log lines (F-001, F-015, G3) -----------------------------------
+// Expected from the E-037 row: entering OFFLINE or a pause is one instinct event and one stderr line through E-036's
+// onHealthChange, failures in a row are not written again, and the recovery is "decision model back online (offline
+// for 42s)" (G3). The first time the health is online it is still "decision model online (<model>)" (E-036).
+
+/** A fetch whose decision replies the test sets: a status, with Retry-After for a 429; the check passes. */
+type ScriptedReply = { ok: boolean; status: number; text: () => Promise<string>; headers?: { get(name: string): string | null } };
+
+function scriptedFetch(state: { status: number; retryAfter?: string }) {
+  return sinon.spy(async (url: string): Promise<ScriptedReply> => {
+    if (url === KEY_CHECK_URL) return { ok: true, status: 200, text: async () => '{}' };
+    if (url !== DECISIONS_URL) return { ok: true, status: 200, text: async () => JSON.stringify({ data: [{ id: DEFAULT_DECISION_MODEL }] }) };
+    if (state.status === 200) {
+      const answers = { action: { type: 'choice', choice: 'none', confidence: 0.9, probabilities: { none: 0.9 } } };
+      return { ok: true, status: 200, text: async () => JSON.stringify({ model: 'test/decider-1', answers }) };
+    }
+    return {
+      ok: false,
+      status: state.status,
+      text: async () => `nope ${TEST_KEY}`,
+      headers: { get: (name: string) => (name.toLowerCase() === 'retry-after' ? state.retryAfter ?? null : null) }
+    };
+  });
+}
+
+const ONE_QUESTION = { action: { type: 'choice', instructions: 'test', criteria: { none: 'nothing' } } } as const;
+
+test.serial('E-037: a pause is one warning and one event, failures in a row add none, and the success after it says how long it lasted', async t => {
+  const clock = sinon.useFakeTimers({ now: 1.7e12 });
+  t.teardown(() => clock.restore());
+  const state: { status: number; retryAfter?: string } = { status: 200 };
+  const log = sinon.spy();
+  const events = new EventStore();
+  const autopilot = new Autopilot({ events, log, decisions: { getKey: () => TEST_KEY, fetch: scriptedFetch(state) } });
+  const reports = healthReports(events, log);
+  await autopilot.checkDecisionModel();
+  t.deepEqual(reports.events(), [`decision model online (${DEFAULT_DECISION_MODEL})`], 'the first online keeps E-036\'s words');
+
+  state.status = 429;
+  state.retryAfter = '7';
+  const ask = () => autopilot.decisions.decide({}, ONE_QUESTION, { budget: 'instinct' });
+  t.false((await ask()).ok);
+  t.deepEqual(reports.logs().at(-1), ['warn', 'Decision model OFFLINE for 7 s (paused after HTTP 429). The bot will not react to dangers by itself']);
+  t.is(reports.events().at(-1), 'decision model offline for 7 s (paused after HTTP 429); dangers are left to you');
+
+  // More 429s after each pause, and three 503s: the same outage, nothing more is written.
+  for (let i = 0; i < 4; i++) {
+    await clock.tickAsync(7000);
+    t.false((await ask()).ok);
+  }
+  state.status = 503;
+  for (let i = 0; i < 3; i++) {
+    await clock.tickAsync(7000);
+    t.false((await ask()).ok);
+  }
+  t.is(reports.events().length, 2);
+  t.is(reports.logs().length, 2);
+
+  await clock.tickAsync(2000);
+  state.status = 200;
+  t.true((await ask()).ok);
+  // From the first 429: four more 429s 7 s apart, three 503s 7 s apart, and the 2 s pause after them (28 + 21 + 2 s).
+  t.deepEqual(reports.logs().at(-1), ['info', 'Decision model back online (offline for 51s)']);
+  t.is(reports.events().at(-1), 'decision model back online (offline for 51s)');
+  t.is(reports.events().length, 3);
+  const everything = JSON.stringify([log.getCalls().map(call => call.args), events.query({ limit: 500 }).events]);
+  t.false(everything.includes('FAKE-autopilot-key-check'), 'I4: no part of the key in a log line or an event');
+});
+
+test.serial('E-037: a decision refused with 402 is OFFLINE once; the success five minutes later is back online', async t => {
+  const clock = sinon.useFakeTimers({ now: 1.7e12 });
+  t.teardown(() => clock.restore());
+  const state = { status: 402 };
+  const log = sinon.spy();
+  const events = new EventStore();
+  const autopilot = new Autopilot({ events, log, decisions: { getKey: () => TEST_KEY, fetch: scriptedFetch(state) } });
+  const reports = healthReports(events, log);
+  const ask = () => autopilot.decisions.decide({}, ONE_QUESTION);
+
+  t.false((await ask()).ok);
+  t.false((await ask()).ok);
+  t.deepEqual(reports.logs(), [['warn', 'Decision model OFFLINE: the OpenRouter account has no credit (HTTP 402). The bot will not react to dangers by itself']]);
+  t.deepEqual(reports.events(), ['decision model offline: the OpenRouter account has no credit (HTTP 402); dangers are left to you']);
+  await clock.tickAsync(5 * 60_000);
+  t.false((await ask()).ok, 'the try after 5 minutes gets 402 again: no new line');
+  t.is(reports.events().length, 1);
+  state.status = 200;
+  await clock.tickAsync(5 * 60_000);
+  t.true((await ask()).ok);
+  t.deepEqual(reports.events().at(-1), 'decision model back online (offline for 600s)');
 });

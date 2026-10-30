@@ -44,7 +44,7 @@
 - **聊天分拣：**决策模型对聊天分类，只有发给机器人的消息才会以 `chat_request` 事件唤醒 LLM。除非 LLM 允许，任何人都不能通过聊天指挥机器人。
 
 ### 3. 在游戏里实测，而不只是纸面
-- 1346 个单元测试。
+- 1387 个单元测试。
 - 实机测试：在真实服务器上逐一运行全部 66 个工具。
 - 情景测试：比较有无 Autopilot 时机器人的表现，包括僵尸潮、空手被僵尸追赶、苦力怕、饥饿、着火、溺水、有意潜水、岩浆岸边和聊天。
 - 普通难度下的 10 天生存测试：机器人度过了全部十个夜晚，没有死亡，并建起一座 7×7 的房子，带门、八扇玻璃窗、床、箱子、工作台、熔炉和火把。
@@ -226,6 +226,8 @@ API key 只从环境变量 `OPENROUTER_API_KEY` 读取，不要把它写进仓�
 
 服务器启动时和机器人每次进入游戏时都会核对 key：先核对 key 本身，再确认决策模型在 OpenRouter 的模型目录中。结果每变一次，就在 stderr 写一行，例如 `Decision model OFFLINE: OpenRouter rejected the API key (HTTP 401). The bot will not react to dangers by itself`，并写一个 `instinct` 事件，例如 `decision model offline: OpenRouter rejected the API key (HTTP 401); dangers are left to you`。机器人进入游戏之前，`get-policy` 的 `Decision model:` 一行也会显示结果（`key checked at HH:MM UTC`、`key not checked yet` 或 `OFFLINE (<reason>)`）。
 
+某些失败之后，服务器会先等一等再联系 OpenRouter，本能和聊天都一样。key 被拒绝（HTTP 401 或 403，来自决策请求或 key 的核对）之后，在 key 通过核对之前不发任何决策请求：机器人每次进入游戏时会核对，距上次核对满 10 分钟后本能或聊天再询问时也会核对。余额不足（HTTP 402）时，每 5 分钟只放行一个请求。HTTP 429 之后，按 OpenRouter 的 `Retry-After` 等待（1～60 秒）；没有这个头时从 2 秒开始翻倍，最多 30 秒。连续 3 次服务器或网络错误之后，从 2 秒开始翻倍，最多等 15 秒。超时、其他被拒绝的请求和无效的回答不会让它等待。等待期间不发送决策请求，调用立即以 `backoff` 失败，例如 `not calling OpenRouter for 7s more (HTTP 429)`，聊天改为按规则处理。每次开始等待在 stderr 写一行，并写一个 `instinct` 事件，例如 `decision model offline for 7 s (paused after HTTP 429); dangers are left to you`；之后连续的失败不再重复写。下一次成功的请求结束所有等待，并写 `decision model back online (offline for 42s)`。通过的 key 核对也一样，只有 HTTP 402 之后例外：核对看不出账户有没有余额，所以这种等待只在有请求成功时结束。
+
 `Instinct:` 一行说明是哪种情况。`get-observation` 里有同样的一行；在 `get-policy` 里，这一行后面还接着 `; <n> call(s) in the last minute`：
 
 | `Instinct:` 一行显示 | 怎么做 |
@@ -233,12 +235,13 @@ API key 只从环境变量 `OPENROUTER_API_KEY` 读取，不要把它写进仓�
 | `Instinct: online (key checked at HH:MM UTC)` | 不用做什么：key 通过了核对。时间是最近一次核对或最近一次成功决策的时间 |
 | `Instinct: OFFLINE (no OPENROUTER_API_KEY): the bot does not react to dangers by itself` | key 没有传到服务器。把它写进客户端配置的 `env`（见[第 3 步](#3-在-mcp-客户端中添加服务器)），然后完全重启客户端 |
 | `Instinct: OFFLINE (OpenRouter rejected the API key (HTTP 401)): the bot does not react to dangers by itself`（或 `HTTP 403`） | OpenRouter 不接受这个 key，例如抄错了或已被删除。新建一个 key，写进 `env`，然后完全重启客户端 |
-| `Instinct: OFFLINE (the OpenRouter account has no credit (HTTP 402)): the bot does not react to dangers by itself` | 给 OpenRouter 账户充值。机器人下次进入游戏时会再核对 key |
+| `Instinct: OFFLINE (the OpenRouter account has no credit (HTTP 402)): the bot does not react to dangers by itself` | 给 OpenRouter 账户充值。在此之前服务器每 5 分钟只试一个请求，第一个成功的请求结束 `OFFLINE`（key 的核对看不出有没有余额） |
 | `Instinct: OFFLINE (model <id> is not in the decision model catalog): the bot does not react to dangers by itself` | 从 `list-decision-models` 里选一个模型，作为 `--decision-model` 写进 `args`，然后完全重启客户端 |
+| `Instinct: OFFLINE for <n> more s (paused after HTTP 429): the bot does not react to dangers by itself`（或 `paused after HTTP 503`、`paused after network errors`） | OpenRouter 要求服务器放慢，或者连续失败了 3 次。不用做什么：时间到了以后，这一行恢复显示之前的状态，下一个请求照常发送。如果反复出现，请查看 OpenRouter 的状态页 |
 | `Instinct: not checked yet`，或 `not checked yet (<reason>)` | 核对还没有结束，或者连不上 OpenRouter（括号里说明原因）。本能照常询问决策模型；机器人下次进入游戏时会再核对 key |
 | `Instinct: offline (decisions are turned off in the policy); dangers are only reported as instinct events, the bot does not act on them` | `set-policy { "decisions": { "enabled": true } }` |
 | `Instinct: turned off in the policy` | `set-policy { "instinct": { "enabled": true } }` |
-| `Instinct: offline at the last request (<error>: <message>); dangers are left to you` | 上一次请求失败了。`timeout`：没有及时回答。`http_error`：请求失败，或 OpenRouter 返回了错误；消息里有 HTTP 状态码和返回内容，请检查 key 和 OpenRouter 账户的余额。`rate_limited`：本能一分钟内询问的次数超过了 `instinct.maxCallsPerMinute`。`invalid_response`：模型的回答不是有效的 JSON，或者没有回答全部问题；通常下一次请求就会恢复，否则用 `set-policy { "decisions": { "model": "..." } }` 换一个模型。下一次请求成功后，这一行会重新显示 `online (key checked at HH:MM UTC)` |
+| `Instinct: offline at the last request (<error>: <message>); dangers are left to you` | 上一次请求失败了。`timeout`：没有及时回答。`server_error`：OpenRouter 或模型提供方返回了 HTTP 5xx。`network`：连不上 OpenRouter。`bad_request`：OpenRouter 拒绝了这个请求（其他 HTTP 4xx）；消息里有状态码和返回内容。key 被拒绝（`auth`）、余额不足（`no_credit`）或 HTTP 429（`throttled`）时，改为显示上面的 `OFFLINE`。`rate_limited`：本能一分钟内询问的次数超过了 `instinct.maxCallsPerMinute`。`invalid_response`：模型的回答不是有效的 JSON，或者没有回答全部问题；通常下一次请求就会恢复，否则用 `set-policy { "decisions": { "model": "..." } }` 换一个模型。下一次请求成功后，这一行会重新显示 `online (key checked at HH:MM UTC)` |
 
 `OFFLINE` 优先显示：即使策略里也关闭了本能，这一行仍显示 `OFFLINE`。
 
@@ -387,14 +390,16 @@ API key 只从环境变量 `OPENROUTER_API_KEY` 读取，不要把它写进仓�
 ### 隐私与费用
 **发送什么：**有 key 时，其他玩家的聊天消息和机器人处境的摘要会发送给 OpenRouter 和模型提供方。摘要包括生命、饥饿、氧气、危险、可选项、当前任务和 LLM 的意图。服务器启动时和机器人每次进入游戏时的 key 核对，只问 OpenRouter 是否接受这个 key，并读取决策模型目录，不发送任何游戏内容。没有 key 时什么都不发送。
 
-**费用：**每次调用约 0.00002 美元。本能每分钟最多 90 次，聊天最多 30 次，而且只在危险持续期间询问。
+**费用：**每次调用约 0.00002 美元。本能每分钟最多 90 次，聊天最多 30 次，而且只在危险持续期间询问。2026-10-30 用情景测试实测（约 6 分钟里危险一个接一个）：59 个请求（本能 53、聊天 2、key 核对 4），报告的费用 0.0012 美元；照这个速度，危险不断时每小时约 580 个请求、0.012 美元。
+
+**已经花了多少：**`get-policy` 里 `Decision model:` 的下一行统计服务器启动以来发给 OpenRouter 的每个请求，格式为 `Spend since the server started: <n> call(s) (instinct <n> incl. <n> second requests, chat <n>, check <n>), <n> failed; $<x> reported, about $<y> estimated for <n> call(s) without a cost`，`, about` 之后的部分只在有成功但没有报告费用的调用时出现。`instinct` 包括它的第二个请求（紧急危险的第一个请求回答得慢时发出），`chat` 是聊天筛选，`check` 是 key 的核对，`failed` 是失败的请求（返回错误状态码、连不上 OpenRouter、没有及时回答或回答无法使用）。美元金额是 OpenRouter 报告的费用；成功但没有报告费用的调用，按最近 50 个已知费用的中位数估算（还没有已知费用时写 `unknown`）。没有发出的请求（`backoff`、`rate_limited`）不计，`list-decision-models` 也不计。统计只在内存中，服务器重启时从零开始，机器人重新进入游戏时不清零。`Decision model:` 一行的 `<n> call(s) in the last hour` 统计的也是这些请求。
 
 ---
 
 ## 测试
 
 ```bash
-npm test             # 1346 个单元测试
+npm test             # 1387 个单元测试
 npm run lint
 npm run test:live -- <局域网端口>                                 # 对世界做只读检查
 npm run test:live:world -- <局域网端口> --allow-world-changes      # 在开启作弊的一次性世界中运行每个工具
@@ -411,7 +416,7 @@ npm run test:scenarios -- <局域网端口> --allow-world-changes       # Autopi
 - `creeper-ambush` 会报告结果但不要求通过，因为决策 API 的延迟不总能赶在引信之前。
 - 在命令前加 `OPENROUTER_API_KEY="..."` 传入 key。
 
-`test:live:world` 分三轮检查 key 的核对：没有 key；用伪造的 key（`LIVE_FAKE_KEY=1` 加上一个编造的 `OPENROUTER_API_KEY`，OpenRouter 必须拒绝它）；用真实的 key。每一轮最多等 15 秒让核对结束，然后要求 stderr、`instinct` 事件、`get-policy` 和 `get-observation` 显示同一状态。
+`test:live:world` 分三轮检查 key 的核对：没有 key；用伪造的 key（`LIVE_FAKE_KEY=1` 加上一个编造的 `OPENROUTER_API_KEY`，OpenRouter 必须拒绝它）；用真实的 key。每一轮最多等 15 秒让核对结束，然后要求 stderr、`instinct` 事件、`get-policy` 和 `get-observation` 显示同一状态。伪造 key 的一轮接着让机器人饥饿，检查这个危险没有发出决策请求，`get-policy` 的 Spend 一行中失败的请求数也没有增加。`test:scenarios` 在每种配置的服务器停止之前打印它的 Spend 一行。
 
 ## 项目文档
 - [docs/BLUEPRINT.md](docs/BLUEPRINT.md)：设计、每个文件的契约、跨模块约定和安全不变量

@@ -9,7 +9,8 @@
 // in-process bot (MCPHelper) acts as another player for chat, whisper and follow tests.
 // With the real OPENROUTER_API_KEY the decision model is used as well; without a key the no-key behavior is checked, and
 // LIVE_FAKE_KEY=1 says that this round's OPENROUTER_API_KEY is a made-up literal: the key check (E-036) must then show
-// OpenRouter's refusal everywhere. So there are three rounds: no key, a made-up key with LIVE_FAKE_KEY=1, the real key.
+// OpenRouter's refusal everywhere, and a danger must add no failed request to get-policy's Spend line (E-037). So there
+// are three rounds: no key, a made-up key with LIVE_FAKE_KEY=1, the real key.
 
 import { Vec3 } from 'vec3';
 import { createArena, parseLiveArgs, responseText, SetupFailed, sleep } from './lib/live-arena.mjs';
@@ -118,6 +119,36 @@ try {
     } else {
       expectIncludes(text, 'Not configured', 'list-decision-models without a key');
       expectIncludes(text, 'Without a key the instinct is offline: the bot does not react to dangers by itself', 'list-decision-models without a key');
+    }
+
+    // E-037: after the check's 401 no decision request is sent until a check passes, so a danger adds no failed
+    // request. Only a key check may add one: a call 10 minutes after the last check starts another in the background.
+    if (keyMode === 'fake') {
+      const spendOf = policyText => {
+        const line = lineOf(policyText, 'Spend since the server started: ');
+        const match = line.match(/: (\d+) call\(s\) \(instinct (\d+) incl\. \d+ second requests, chat (\d+), check (\d+)\), (\d+) failed; /);
+        expect(match, `get-policy has no Spend line in the E-037 format: ${line}`);
+        const [instinct, chat, check, failed] = match.slice(2).map(Number);
+        return { line, instinct, chat, check, failed };
+      };
+      const before = spendOf(await call('get-policy'));
+      const since = Number((await call('get-events', { limit: 1 })).match(/nextSince: (\d+)/)[1]);
+      // A danger that costs no health: hunger with bread to eat (the instinct's 'hungry' cue, food below 14).
+      await cmd('/give @s bread 2');
+      await cmd('/effect give @s minecraft:hunger 5 255 true');
+      try {
+        await waitFor(async () => (await call('get-events', { since, types: ['instinct'], limit: 50 })).includes('instinct offline (backoff: '),
+          'an "instinct offline (backoff: ...)" event for the hunger', 15000);
+        // A few more re-asks while the danger lasts.
+        await sleep(3000);
+      } finally {
+        await cmd('/effect clear @s');
+        await cmd('/effect give @s minecraft:saturation 1 20 true');
+        await cmd('/clear @s bread');
+      }
+      const after = spendOf(await call('get-policy'));
+      expect(after.instinct === before.instinct && after.chat === before.chat, `a decision request was sent with a made-up key:\n${before.line}\n${after.line}`);
+      expect(after.failed - before.failed <= after.check - before.check, `the failed count grew with the danger, not only with key checks:\n${before.line}\n${after.line}`);
     }
   });
 

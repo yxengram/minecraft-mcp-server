@@ -202,3 +202,31 @@ test('E-036: get-observation shows the state before the Autopilot has bound the 
   t.is(passed.instinctLines.length, 1);
   t.regex(passed.instinctLines[0], /^Instinct: online \(key checked at \d\d:\d\d UTC\)$/);
 });
+
+// E-037: a pause after a 429 shows in get-observation the same way as in get-policy, "OFFLINE for 7 more s (paused after
+// HTTP 429)", since both come from instinctState.
+test.serial('E-037: during a pause get-observation has the same Instinct line as get-policy, with the seconds left', async (t) => {
+  const clock = sinon.useFakeTimers({ now: 1.7e12 });
+  t.teardown(() => clock.restore());
+  const check = keyCheck(200);
+  const fetch = sinon.stub().callsFake(async (url: string, init: unknown) => url === 'https://openrouter.ai/api/alpha/decisions'
+    ? { ok: false, status: 429, text: async () => `slow down ${FAKE_KEY}`, headers: { get: (name: string) => (name.toLowerCase() === 'retry-after' ? '7' : null) } }
+    : check(url, init));
+  const autopilot = new Autopilot({ events: new EventStore(), decisions: { getKey: () => FAKE_KEY, fetch } });
+  const bot = observationBot();
+  autopilot.bind(bot as never);
+  t.teardown(() => autopilot.unbind('test finished'));
+  await autopilot.checkDecisionModel();
+  const result = await autopilot.decisions.decide({}, { action: { type: 'choice', instructions: 'test', criteria: { none: 'nothing' } } }, { budget: 'instinct' });
+  t.true(!result.ok && result.error === 'throttled');
+
+  const { factory, getTool } = createFactory();
+  registerGameStateTools(factory, asBot(bot), () => autopilot);
+  registerPolicyTools(factory, () => autopilot, new EventStore());
+  const observation = (await getTool('get-observation')!.execute({})).content[0].text;
+  const policy = (await getTool('get-policy')!.execute({})).content[0].text;
+  const instinctLines = observation.split('\n').filter(line => line.startsWith('Instinct'));
+  t.deepEqual(instinctLines, ['Instinct: OFFLINE for 7 more s (paused after HTTP 429): the bot does not react to dangers by itself']);
+  t.is(policy.split('\n').find(line => line.startsWith('Instinct: '))?.replace(/; \d+ call\(s\) in the last minute$/, ''), instinctLines[0]);
+  t.false(observation.includes('FAKE-gamestate-tools'), 'no key in the observation (I4)');
+});

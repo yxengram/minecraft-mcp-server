@@ -837,7 +837,8 @@ for (const [label, decisions] of [
       t.is(decisionRequests(fetch), 0, 'decisions off: no request');
     } else {
       t.is(decisionRequests(fetch), 1);
-      t.regex(line, /http_error/, `the reason is named: ${line}`);
+      // E-037: a rejected fetch is network (it was http_error).
+      t.regex(line, /\(network: /, `the reason is named: ${line}`);
     }
     const offline = events.query({ types: ['instinct'], limit: 20 }).events.filter(event => event.message.includes('instinct offline'));
     t.is(offline.length, 1);
@@ -907,7 +908,8 @@ test.serial('E-036: with a key the Decision model line starts with enabled and s
 
   t.is(decisionLine((await call('get-policy')).text), `Decision model: enabled, ${model}, key not checked yet; 0 call(s) in the last hour`);
   await autopilot.checkDecisionModel();
-  t.is(decisionLine((await call('get-policy')).text), `Decision model: enabled, ${model}, key checked at 22:13 UTC; 0 call(s) in the last hour`);
+  // E-037: the last hour counts every request sent, so the check's two GETs as well.
+  t.is(decisionLine((await call('get-policy')).text), `Decision model: enabled, ${model}, key checked at 22:13 UTC; 2 call(s) in the last hour`);
 });
 
 test('E-036: with a key and decisions turned off the Decision model line keeps its start and still shows the key state', async (t) => {
@@ -975,4 +977,211 @@ test('E-036: with a key list-decision-models keeps its list format', async (t) =
     `1 decision model(s); in use: ${model}`,
     `- ${model}, context 4096, $0.020 per million input tokens, (in use)`
   ]);
+});
+
+// ---------------------------------------------------------------------------------------------------------------
+// E-037: the Spend line and a pause in get-policy. Expected from the E-037 row: a line right after the Decision model
+// line, "Spend since the server started: 412 call(s) (instinct 380 incl. 12 second requests, chat 30, check 2), 3
+// failed; $0.0081 reported, about $0.0004 estimated for 20 call(s) without a cost", shown before the bot joins as well;
+// "N call(s) in the last hour" includes the instinct's calls; during a pause the Decision model and Instinct lines say
+// "OFFLINE for 7 more s (paused after HTTP 429)", and the health from before once it is over. The key is in neither.
+
+function spendLineOf(text: string): string {
+  const lines = text.split('\n');
+  const at = lines.findIndex(line => line.startsWith('Decision model: '));
+  return at >= 0 ? lines[at + 1] ?? '<nothing after the Decision model line>' : '<no Decision model line>';
+}
+
+test('E-037: get-policy has the Spend line right after the Decision model line, before the bot joins and without a key', async (t) => {
+  const { call, autopilot, bot } = setup({ bind: false, decisions: NO_KEY });
+  await autopilot.checkDecisionModel();
+  t.is(spendLineOf((await call('get-policy')).text),
+    'Spend since the server started: 0 call(s) (instinct 0 incl. 0 second requests, chat 0, check 0), 0 failed; $0.0000 reported');
+  autopilot.bind(bot as never);
+  t.teardown(() => autopilot.unbind('test finished'));
+  t.regex(spendLineOf((await call('get-policy')).text), /^Spend since the server started: 0 call\(s\) /);
+});
+
+test.serial('E-037: the Spend line counts the instinct, its second requests, chat, the check, the failures and the costs', async (t) => {
+  const clock = sinon.useFakeTimers({ now: 1.7e12 });
+  t.teardown(() => clock.restore());
+  const answers = { action: { type: 'choice', choice: 'none', confidence: 0.9, probabilities: { none: 0.9 } } };
+  const replies = [
+    { model: 'test/decider-1', answers, usage: { cost: 0.0004 } },
+    { model: 'test/decider-1', answers, usage: { cost: 0.0002 } },
+    { model: 'test/decider-1', answers },
+    null
+  ];
+  const base = byUrl();
+  const fetch = sinon.stub().callsFake(async (url: string, init: unknown) => {
+    if (url !== DECISIONS_URL) return base(url, init);
+    const body = replies.shift();
+    return body ? { ok: true, status: 200, text: async () => JSON.stringify(body) } : { ok: false, status: 500, text: async () => `oops ${FAKE_KEY}` };
+  });
+  const { call, autopilot } = setup({ bind: false, decisions: { getKey: () => FAKE_KEY, fetch } });
+  await autopilot.checkDecisionModel();
+  const question = { action: { type: 'choice' as const, instructions: 'test', criteria: { none: 'nothing' } } };
+  await autopilot.decisions.decide({}, question, { budget: 'instinct' });
+  await autopilot.decisions.decide({}, question, { budget: 'instinct', second: true });
+  await autopilot.decisions.decide({}, question);
+  await autopilot.decisions.decide({}, question);
+
+  const text = (await call('get-policy')).text;
+  t.is(spendLineOf(text),
+    'Spend since the server started: 6 call(s) (instinct 2 incl. 1 second requests, chat 2, check 2), 1 failed; $0.0006 reported, about $0.0003 estimated for 1 call(s) without a cost');
+  t.regex(decisionLine(text), /; 6 call\(s\) in the last hour$/, 'the last hour has the instinct calls too');
+  t.false(text.includes(FAKE_KEY.slice('sk-or-v1-'.length)), 'I4');
+});
+
+test('E-037: a cost below a hundredth of a cent keeps its digits, and an estimate without any known cost is unknown', async (t) => {
+  const answers = { action: { type: 'choice', choice: 'none', confidence: 0.9, probabilities: { none: 0.9 } } };
+  const costs = [0.00002, undefined];
+  const fetch = sinon.stub().callsFake(async (url: string) => {
+    if (url !== DECISIONS_URL) throw new Error('no network in tests');
+    const cost = costs.shift();
+    return { ok: true, status: 200, text: async () => JSON.stringify({ model: 'test/decider-1', answers, ...(cost === undefined ? {} : { usage: { cost } }) }) };
+  });
+  const { call, autopilot } = setup({ bind: false, decisions: { getKey: () => FAKE_KEY, fetch } });
+  const question = { action: { type: 'choice' as const, instructions: 'test', criteria: { none: 'nothing' } } };
+  await autopilot.decisions.decide({}, question);
+  t.regex(spendLineOf((await call('get-policy')).text), /; \$0\.000020 reported$/);
+
+  const unknown = setup({ bind: false, decisions: { getKey: () => FAKE_KEY, fetch: sinon.stub().callsFake(async (url: string) => {
+    if (url !== DECISIONS_URL) throw new Error('no network in tests');
+    return { ok: true, status: 200, text: async () => JSON.stringify({ model: 'test/decider-1', answers }) };
+  }) } });
+  await unknown.autopilot.decisions.decide({}, question);
+  t.regex(spendLineOf((await unknown.call('get-policy')).text), /; \$0\.0000 reported, unknown for 1 call\(s\) without a cost$/);
+});
+
+test.serial('E-037: during a pause the Decision model and Instinct lines say OFFLINE for N more s; afterwards the state from before', async (t) => {
+  // 1.7e12 ms is 2023-11-14 22:13:20 UTC.
+  const clock = sinon.useFakeTimers({ now: 1.7e12 });
+  t.teardown(() => clock.restore());
+  let throttled = false;
+  const base = byUrl();
+  const fetch = sinon.stub().callsFake(async (url: string, init: unknown) => {
+    if (url !== DECISIONS_URL || !throttled) return base(url, init);
+    return { ok: false, status: 429, text: async () => `slow down ${FAKE_KEY}`, headers: { get: (name: string) => (name.toLowerCase() === 'retry-after' ? '7' : null) } };
+  });
+  const { call, autopilot } = setup({ decisions: { getKey: () => FAKE_KEY, fetch } });
+  t.teardown(() => autopilot.unbind('test finished'));
+  await autopilot.checkDecisionModel();
+  const model = DEFAULT_POLICY.decisions.model;
+
+  throttled = true;
+  const question = { action: { type: 'choice' as const, instructions: 'test', criteria: { none: 'nothing' } } };
+  const result = await autopilot.decisions.decide({}, question, { budget: 'instinct' });
+  t.true(!result.ok && result.error === 'throttled');
+
+  let text = (await call('get-policy')).text;
+  t.is(decisionLine(text), `Decision model: enabled, ${model}, OFFLINE for 7 more s (paused after HTTP 429); 3 call(s) in the last hour`);
+  t.is(instinctLine(text), 'Instinct: OFFLINE for 7 more s (paused after HTTP 429): the bot does not react to dangers by itself; 1 call(s) in the last minute');
+  await clock.tickAsync(7000);
+  text = (await call('get-policy')).text;
+  t.is(decisionLine(text), `Decision model: enabled, ${model}, key checked at 22:13 UTC; 3 call(s) in the last hour`);
+  t.regex(instinctLine(text) ?? '', /^Instinct: online \(key checked at 22:13 UTC\); /);
+  t.false(text.includes(FAKE_KEY.slice('sk-or-v1-'.length)), 'I4');
+});
+
+test.serial('E-037: the instinct held back by a pause writes one offline event; a backoff is no request, so afterwards the line shows the health from before', async (t) => {
+  // 1.7e12 ms is 2023-11-14 22:13:20 UTC.
+  const clock = sinon.useFakeTimers({ now: 1.7e12 });
+  t.teardown(() => clock.restore());
+  const base = byUrl();
+  const fetch = sinon.stub().callsFake(async (url: string, init: unknown) => {
+    if (url !== DECISIONS_URL) return base(url, init);
+    return { ok: false, status: 429, text: async () => 'slow down', headers: { get: (name: string) => (name.toLowerCase() === 'retry-after' ? '7' : null) } };
+  });
+  const { call, autopilot, bot, events } = setup({ decisions: { getKey: () => FAKE_KEY, fetch } });
+  t.teardown(() => autopilot.unbind('test finished'));
+  await autopilot.checkDecisionModel();
+  // A pause from an earlier request (chat, say), then a danger: on fire in the open.
+  const question = { action: { type: 'choice' as const, instructions: 'test', criteria: { none: 'nothing' } } };
+  t.false((await autopilot.decisions.decide({}, question)).ok);
+  bot.entity.metadata[0] = 0x01;
+  for (let i = 0; i < 4; i++) {
+    bot.emit('physicsTick');
+    await clock.tickAsync(1500);
+  }
+
+  t.is(decisionRequests(fetch), 1, 'the instinct sent nothing during the pause');
+  const offline = events.query({ types: ['instinct'], limit: 50 }).events.map(event => event.message).filter(message => message.startsWith('instinct offline'));
+  t.deepEqual(offline.length, 1, offline.join('\n'));
+  t.regex(offline[0], /^instinct offline \(backoff: not calling OpenRouter for \ds more \(HTTP 429\)\): on fire/);
+  // 6 s of the 7 have passed; then the pause is over and no request has answered since.
+  t.regex(instinctLine((await call('get-policy')).text) ?? '', /^Instinct: OFFLINE for 1 more s \(paused after HTTP 429\)/);
+  await clock.tickAsync(1000);
+  t.regex(instinctLine((await call('get-policy')).text) ?? '', /^Instinct: online \(key checked at 22:13 UTC\); /);
+});
+
+// The 429 on the instinct's own request: the engine keeps "throttled: …" as its last failure, but that failure is the
+// pause, so once the pause is over the Instinct line shows the health from before it, like the Decision model line.
+test.serial('E-037: a 429 on the instinct\'s own request shows as the pause, and once it is over as the health from before, also after a chat success', async (t) => {
+  // 1.7e12 ms is 2023-11-14 22:13:20 UTC.
+  const clock = sinon.useFakeTimers({ now: 1.7e12 });
+  t.teardown(() => clock.restore());
+  let throttled = true;
+  const answers = { action: { type: 'choice', choice: 'none', confidence: 0.9, probabilities: { none: 0.9 } } };
+  const base = byUrl(answers);
+  const fetch = sinon.stub().callsFake(async (url: string, init: unknown) => {
+    if (url !== DECISIONS_URL || !throttled) return base(url, init);
+    return { ok: false, status: 429, text: async () => `slow down ${FAKE_KEY}`, headers: { get: (name: string) => (name.toLowerCase() === 'retry-after' ? '7' : null) } };
+  });
+  const { call, autopilot, bot } = setup({ decisions: { getKey: () => FAKE_KEY, fetch } });
+  t.teardown(() => autopilot.unbind('test finished'));
+  await autopilot.checkDecisionModel();
+  const model = DEFAULT_POLICY.decisions.model;
+
+  // On fire in the open: the instinct's own request gets the 429. Then the fire is out, so nothing asks again.
+  bot.entity.metadata[0] = 0x01;
+  bot.emit('physicsTick');
+  await clock.tickAsync(10);
+  t.is(decisionRequests(fetch), 1);
+  t.regex(autopilot.instinct.status().offline ?? '', /^throttled: HTTP 429: /);
+  bot.entity.metadata[0] = 0;
+  bot.emit('physicsTick');
+
+  let text = (await call('get-policy')).text;
+  t.is(decisionLine(text), `Decision model: enabled, ${model}, OFFLINE for 7 more s (paused after HTTP 429); 3 call(s) in the last hour`);
+  t.regex(instinctLine(text) ?? '', /^Instinct: OFFLINE for 7 more s \(paused after HTTP 429\): the bot does not react to dangers by itself; /);
+  await clock.tickAsync(7000);
+  text = (await call('get-policy')).text;
+  t.is(decisionLine(text), `Decision model: enabled, ${model}, key checked at 22:13 UTC; 3 call(s) in the last hour`);
+  t.regex(instinctLine(text) ?? '', /^Instinct: online \(key checked at 22:13 UTC\); /, 'the same state as the Decision model line');
+
+  // A chat decision that succeeds afterwards does not bring the old 429 back either.
+  throttled = false;
+  const question = { action: { type: 'choice' as const, instructions: 'test', criteria: { none: 'nothing' } } };
+  t.true((await autopilot.decisions.decide({}, question)).ok);
+  text = (await call('get-policy')).text;
+  t.regex(instinctLine(text) ?? '', /^Instinct: online \(key checked at 22:13 UTC\); /);
+  t.false(text.includes(FAKE_KEY.slice('sk-or-v1-'.length)), 'I4');
+});
+
+test.serial('E-037: the Autopilot passes the instinct\'s hedged second request on to the client, which counts it apart', async (t) => {
+  const clock = sinon.useFakeTimers({ now: 1.7e12 });
+  t.teardown(() => clock.restore());
+  const answers = {
+    action: { type: 'choice', choice: 'leave_lava', confidence: 0.9, probabilities: { leave_lava: 0.9, continue: 0.05, ask_llm: 0.05, none: 0 } },
+    urgent: { type: 'noul', noul: 0.9 }
+  };
+  const base = byUrl(answers);
+  // Decisions answer after 1 s, so the instinct's 800 ms hedge sends the second request before the first answers.
+  const fetch = sinon.stub().callsFake((url: string, init: unknown) => (url === DECISIONS_URL
+    ? new Promise(resolve => setTimeout(() => resolve(base(url, init)), 1000))
+    : base(url, init)));
+  const { call, autopilot, bot } = setup({ decisions: { getKey: () => FAKE_KEY, fetch }, lavaAtFeet: true });
+  t.teardown(() => autopilot.unbind('test finished'));
+  await autopilot.checkDecisionModel();
+
+  // Lava at the feet is an urgent cue (HEDGE_CUES).
+  bot.emit('physicsTick');
+  await clock.tickAsync(900);
+  t.is(decisionRequests(fetch), 2, 'the first request and the hedged second one');
+  t.like(autopilot.decisions.spend(), { instinct: 2, secondRequests: 1, chat: 0 });
+  const spend = spendLineOf((await call('get-policy')).text);
+  t.true(spend.includes('(instinct 2 incl. 1 second requests, chat 0, '), spend);
+  // Let both answers arrive before the test ends.
+  await clock.tickAsync(1000);
 });

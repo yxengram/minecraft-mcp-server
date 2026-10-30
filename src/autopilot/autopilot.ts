@@ -1,5 +1,6 @@
 // Contract: docs/BLUEPRINT.md F-001 (arbiter, tasks, behaviors, policy, decisions, bind/unbind; the instinct since M8, E-011;
-// no reflexes since M9, E-012; the decision model key check and its health since M19, E-036).
+// no reflexes since M9, E-012; the decision model key check and its health since M19, E-036; pauses and the recovery
+// line since E-037).
 import type mineflayer from 'mineflayer';
 import { ActionArbiter, HolderInfo, PRIORITY } from './action-arbiter.js';
 import { TaskManager, TaskRecord, BehaviorDefinition } from './task-manager.js';
@@ -56,7 +57,7 @@ export class Autopilot {
     this.decisions = new OpenRouterClient({
       getPolicy: () => this.policy.get(),
       ...options.decisions,
-      onHealthChange: health => this.reportHealth(health)
+      onHealthChange: (health, previous) => this.reportHealth(health, previous)
     });
     this.hooks = new DecisionHooks({
       decide: (state, questions) => this.decisions.decide(state, questions),
@@ -132,7 +133,7 @@ export class Autopilot {
       tasks: this.tasks,
       getPolicy: () => this.policy.get(),
       events: this.options.events,
-      decide: (state, questions) => this.decisions.decide(state, questions, { budget: 'instinct' }),
+      decide: (state, questions, options) => this.decisions.decide(state, questions, { budget: 'instinct', second: options?.second }),
       // Runs while an instinct action may still hold the body, so a paused task cannot resume in between (M7).
       onDeath: () => void this.tasks.cancelAll('the bot died'),
       log: this.options.log
@@ -152,12 +153,24 @@ export class Autopilot {
     return this.decisions.checkAccess();
   }
 
-  /** Each change of the decision model's health is one stderr line and one instinct event (E-036). */
-  private reportHealth(health: DecisionHealth): void {
+  /**
+   * Each change of the decision model's health is one stderr line and one instinct event (E-036). E-037: a pause is
+   * reported when it starts, the failures after it in the same run are not, and coming back from OFFLINE or a pause
+   * says how long it lasted.
+   */
+  private reportHealth(health: DecisionHealth, previous: DecisionHealth): void {
     const model = this.policy.get().decisions.model;
-    if (health.state === 'offline') {
+    if (health.state === 'offline' && health.pausedMs !== undefined) {
+      const pause = `for ${Math.ceil(health.pausedMs / 1000)} s (${health.reason})`;
+      this.options.log?.('warn', `Decision model OFFLINE ${pause}. The bot will not react to dangers by itself`);
+      this.options.events.addEvent('instinct', `decision model offline ${pause}; dangers are left to you`);
+    } else if (health.state === 'offline') {
       this.options.log?.('warn', `Decision model OFFLINE: ${health.reason}. The bot will not react to dangers by itself`);
       this.options.events.addEvent('instinct', `decision model offline: ${health.reason}; dangers are left to you`);
+    } else if (health.state === 'online' && previous.state === 'offline' && previous.at !== undefined && health.at !== undefined) {
+      const back = `back online (offline for ${Math.max(0, Math.round((health.at - previous.at) / 1000))}s)`;
+      this.options.log?.('info', `Decision model ${back}`);
+      this.options.events.addEvent('instinct', `decision model ${back}`);
     } else if (health.state === 'online') {
       this.options.log?.('info', `Decision model online (${model})`);
       this.options.events.addEvent('instinct', `decision model online (${model})`);

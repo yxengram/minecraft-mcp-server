@@ -11,7 +11,9 @@
 //             LLM and the bot does not act on them (by design)
 //   instinct  default policy with the decision model (needs OPENROUTER_API_KEY; skipped without it)
 // The instinct configuration must pass every scenario except the stress tests (STRESS_TESTS); the other
-// configurations are for comparison.
+// configurations are for comparison. Before each configuration's server stops, the Spend line of get-policy is printed
+// with the minutes since that server started (E-037: the requests sent and their cost), so the calls per hour can be
+// written down.
 import { createArena, parseLiveArgs, SetupFailed, sleep, ARENA_RADIUS } from './lib/live-arena.mjs';
 
 const { port, only, args } = parseLiveArgs('The scenario test');
@@ -472,6 +474,8 @@ for (let round = 1; round <= rounds; round++) {
       serverEnv: config.withKey ? { OPENROUTER_API_KEY: key } : {}
     });
     const s = extend(session);
+    // The server starts with connect(): the Spend line below counts from here (E-037).
+    const startedAt = Date.now();
     try {
       await session.connect();
       await session.setup();
@@ -496,6 +500,15 @@ for (let round = 1; round <= rounds; round++) {
         }
       }
     } finally {
+      // E-037: print only the Spend line, never the rest of get-policy; no assertion. The minutes since the server
+      // started give the calls per hour.
+      const ran = `${config.name} (${((Date.now() - startedAt) / 60000).toFixed(1)} min since its server started)`;
+      try {
+        const spend = (await session.call('get-policy')).split('\n').find(line => line.startsWith('Spend since the server started: '));
+        console.log(`  ${ran}: ${spend ?? 'no Spend line in get-policy'}`);
+      } catch {
+        console.log(`  ${ran}: no Spend line (get-policy failed)`);
+      }
       await session.close();
       // Give the server a moment to drop the old bot before the next configuration logs in with the same name.
       await sleep(3000);

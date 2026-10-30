@@ -44,7 +44,7 @@ The upstream project is a good, simple bridge: the LLM calls a tool, and the bot
 - **Chat triage:** the decision model sorts chat. Only messages meant for the bot wake the LLM, as `chat_request` events. Nobody can command the bot by chat unless the LLM allows it.
 
 ### 3. Tested in the game, not only on paper
-- 1346 unit tests.
+- 1387 unit tests.
 - A live test that exercises all 66 tools against a real server.
 - A scenario test that compares the bot with and without the Autopilot: zombie waves, being chased by zombies with bare hands, creepers, hunger, fire, drowning, diving on purpose, a lava shore, chat.
 - A 10-day survival test on Normal difficulty. The bot survived all ten nights without dying and built a 7×7 house with a door, eight glass windows, a bed, a chest, a crafting table, a furnace and torches.
@@ -226,6 +226,8 @@ Without a working decision model the bot does not dodge, flee or eat by itself. 
 
 The server checks the key when it starts and each time the bot joins: first the key itself, then that the decision model is in OpenRouter's catalog. Each change of the result is one line on stderr, for example `Decision model OFFLINE: OpenRouter rejected the API key (HTTP 401). The bot will not react to dangers by itself`, and one `instinct` event, for example `decision model offline: OpenRouter rejected the API key (HTTP 401); dangers are left to you`. The `Decision model:` line of `get-policy` shows the result even before the bot joins (`key checked at HH:MM UTC`, `key not checked yet` or `OFFLINE (<reason>)`).
 
+After some failures the server waits before it calls OpenRouter again, for the instinct and chat alike. After a refused key (HTTP 401 or 403, from a decision or from the key check) it sends no decision until the key passes a check: each time the bot joins, and when the instinct or chat asks 10 minutes or more after the last check. Without credit (HTTP 402) it lets one request through every 5 minutes. After HTTP 429 it waits as long as OpenRouter's `Retry-After` says (1 to 60 s), or 2 s, doubling up to 30 s, without it. After 3 server or network errors in a row it waits 2 s, doubling up to 15 s. Timeouts, other refused requests and invalid answers do not make it wait. While it waits, a decision is not sent and fails at once as `backoff`, for example `not calling OpenRouter for 7s more (HTTP 429)`, and chat falls back to the rules. A wait is one line on stderr and one `instinct` event, for example `decision model offline for 7 s (paused after HTTP 429); dangers are left to you`; the failures after it are not written again. The next request that succeeds ends every wait and writes `decision model back online (offline for 42s)`. A key check that passes does the same, except after HTTP 402: the check cannot tell whether the account has credit, so that wait ends only with a request that succeeds.
+
 The `Instinct:` line says which case it is. `get-observation` has the same line; in `get-policy` it goes on with `; <n> call(s) in the last minute`:
 
 | The `Instinct:` line says | What to do |
@@ -233,12 +235,13 @@ The `Instinct:` line says which case it is. `get-observation` has the same line;
 | `Instinct: online (key checked at HH:MM UTC)` | Nothing: the key passed. The time is that of the last check or of the last decision that succeeded |
 | `Instinct: OFFLINE (no OPENROUTER_API_KEY): the bot does not react to dangers by itself` | The key did not reach the server. Put it in `env` in the client config ([step 3](#3-add-the-server-to-your-mcp-client)) and restart the client completely |
 | `Instinct: OFFLINE (OpenRouter rejected the API key (HTTP 401)): the bot does not react to dangers by itself` (or `HTTP 403`) | OpenRouter does not accept the key, for example because it was mistyped or deleted. Create a new key, put it in `env` and restart the client completely |
-| `Instinct: OFFLINE (the OpenRouter account has no credit (HTTP 402)): the bot does not react to dangers by itself` | Add credit to the OpenRouter account. The key is checked again the next time the bot joins |
+| `Instinct: OFFLINE (the OpenRouter account has no credit (HTTP 402)): the bot does not react to dangers by itself` | Add credit to the OpenRouter account. Until then the server tries one request every 5 minutes, and the first one that succeeds ends the `OFFLINE` (a key check cannot tell whether there is credit) |
 | `Instinct: OFFLINE (model <id> is not in the decision model catalog): the bot does not react to dangers by itself` | Pick a model from `list-decision-models`, put it in `args` as `--decision-model` and restart the client completely |
+| `Instinct: OFFLINE for <n> more s (paused after HTTP 429): the bot does not react to dangers by itself` (or `paused after HTTP 503`, `paused after network errors`) | OpenRouter asked the server to slow down, or failed 3 times in a row. Nothing to do: when the time is up the line shows the state from before again, and the next request is sent. If it keeps coming back, check OpenRouter's status page |
 | `Instinct: not checked yet`, or `not checked yet (<reason>)` | The check has not finished yet, or it could not reach OpenRouter (the reason says why). The instinct still asks the decision model; the key is checked again the next time the bot joins |
 | `Instinct: offline (decisions are turned off in the policy); dangers are only reported as instinct events, the bot does not act on them` | `set-policy { "decisions": { "enabled": true } }` |
 | `Instinct: turned off in the policy` | `set-policy { "instinct": { "enabled": true } }` |
-| `Instinct: offline at the last request (<error>: <message>); dangers are left to you` | The last request failed. `timeout`: no answer in time. `http_error`: the request failed or OpenRouter answered with an error; the message has the HTTP status and the reply, so check the key and the credit on your OpenRouter account. `rate_limited`: the instinct asked more than `instinct.maxCallsPerMinute` times in a minute. `invalid_response`: the model's answer was not valid JSON or did not answer every question; it usually passes on the next request, otherwise pick another model with `set-policy { "decisions": { "model": "..." } }`. The line says `online (key checked at HH:MM UTC)` again after the next request that succeeds |
+| `Instinct: offline at the last request (<error>: <message>); dangers are left to you` | The last request failed. `timeout`: no answer in time. `server_error`: OpenRouter or the model provider answered with HTTP 5xx. `network`: OpenRouter could not be reached. `bad_request`: OpenRouter refused the request (another HTTP 4xx); the message has the status and the reply. A refused key (`auth`), an account without credit (`no_credit`) and HTTP 429 (`throttled`) show as `OFFLINE` above instead. `rate_limited`: the instinct asked more than `instinct.maxCallsPerMinute` times in a minute. `invalid_response`: the model's answer was not valid JSON or did not answer every question; it usually passes on the next request, otherwise pick another model with `set-policy { "decisions": { "model": "..." } }`. The line says `online (key checked at HH:MM UTC)` again after the next request that succeeds |
 
 An `OFFLINE` comes first: the line shows it even when the instinct is also turned off in the policy.
 
@@ -387,14 +390,16 @@ The policy lives in memory only, and goes back to these defaults whenever the bo
 ### Privacy and cost
 **What is sent:** with a key, chat messages from other players and a summary of the bot's situation go to OpenRouter and the model provider. The summary covers health, food, air, the dangers, the options, the current task and the LLM's intent. The key check, when the server starts and each time the bot joins, asks OpenRouter whether it accepts the key and reads its catalog of decision models; nothing about the game is sent with it. Without a key, nothing is sent.
 
-**Cost:** a call costs about $0.00002. The instinct is limited to 90 calls a minute and chat to 30. It only asks while a danger lasts.
+**Cost:** a call costs about $0.00002. The instinct is limited to 90 calls a minute and chat to 30. It only asks while a danger lasts. Measured on 2026-10-30 with the scenario test, where one danger follows another for about 6 minutes: 59 requests (53 from the instinct, 2 for chat, 4 key checks) and $0.0012 reported, which is about 580 requests and $0.012 an hour while dangers keep coming.
+
+**What has been spent:** the line after `Decision model:` in `get-policy` counts every request sent to OpenRouter since the server started, in the form `Spend since the server started: <n> call(s) (instinct <n> incl. <n> second requests, chat <n>, check <n>), <n> failed; $<x> reported, about $<y> estimated for <n> call(s) without a cost`; the part from `, about` is there only when some successful calls reported no cost. `instinct` includes its second requests (sent when the first one is slow to answer about an urgent danger), `chat` is chat triage, `check` the key checks, and `failed` the requests that failed (an error status, OpenRouter could not be reached, no answer in time or an unusable answer). The dollar amounts are the costs OpenRouter reported; a successful call that reports none is estimated at the median of the last 50 known costs (`unknown` before any is known). Requests that were not sent (`backoff`, `rate_limited`) are not counted, nor is `list-decision-models`. The count lives in memory and starts again when the server restarts, not when the bot rejoins. `<n> call(s) in the last hour` on the `Decision model:` line counts the same requests.
 
 ---
 
 ## Testing
 
 ```bash
-npm test             # 1346 unit tests
+npm test             # 1387 unit tests
 npm run lint
 npm run test:live -- <LAN_PORT>                                 # read-only check against a world
 npm run test:live:world -- <LAN_PORT> --allow-world-changes      # every tool, in a throwaway world with cheats on
@@ -411,7 +416,7 @@ npm run test:scenarios -- <LAN_PORT> --allow-world-changes       # the Autopilot
 - `creeper-ambush` is reported but not required, because the decision API's latency doesn't always beat the fuse.
 - Pass the key with `OPENROUTER_API_KEY="..."` in front of the command.
 
-`test:live:world` checks the key check in three rounds: without a key, with a made-up key (`LIVE_FAKE_KEY=1` together with a made-up `OPENROUTER_API_KEY`, which OpenRouter must refuse), and with the real key. Each round waits at most 15 s for the check, then expects the same state on stderr, in the `instinct` events, in `get-policy` and in `get-observation`.
+`test:live:world` checks the key check in three rounds: without a key, with a made-up key (`LIVE_FAKE_KEY=1` together with a made-up `OPENROUTER_API_KEY`, which OpenRouter must refuse), and with the real key. Each round waits at most 15 s for the check, then expects the same state on stderr, in the `instinct` events, in `get-policy` and in `get-observation`. The made-up key round then makes the bot hungry and checks that the danger sends no decision request and adds no failed request to the Spend line of `get-policy`. `test:scenarios` prints the Spend line of each configuration before its server stops.
 
 ## Project documents
 - [docs/BLUEPRINT.md](docs/BLUEPRINT.md): the design, the contract of every file, the cross-module rules and the safety invariants (in Chinese)

@@ -345,7 +345,8 @@ test('I2: a command outside the fixed list is never run, even when the model ret
 
 // ---- decision failures and no decision model (rule fallback) --------------------------------------------------
 
-for (const error of ['timeout', 'disabled', 'rate_limited'] as DecisionErrorKind[]) {
+// E-037: during a pause the client answers backoff at once, and chat falls back to the rules the same way.
+for (const error of ['timeout', 'disabled', 'rate_limited', 'backoff', 'auth', 'throttled', 'network'] as DecisionErrorKind[]) {
   test(`decide fails with ${error}: decision event with the failure; rule fallback reports whispers and name mentions only; nothing runs`, async (t) => {
     const h = setup(async () => ({ ok: false, error, message: `fake ${error}`, latencyMs: 1500 }));
     h.authorize('Steve');
@@ -616,4 +617,42 @@ test('an authorized player giving a command to someone else is neither run nor r
   t.true(h.runCommand.notCalled);
   t.deepEqual(h.of('chat_request'), []);
   t.true(h.of('decision').some(message => message.includes('not run')), 'the decision is still visible');
+});
+
+// E-037: the client's pauses are shared by every caller, chat triage among them. Expected from the E-037 row: during a
+// pause decide returns backoff without a request, and chat is reported by the rules (whispers and messages that name
+// the bot), as for any other failure; nothing runs.
+test('Autopilot: during a pause after a 429 chat gets backoff without a request and is reported by the rules', async (t) => {
+  const events = new EventStore();
+  const decisionBodies: unknown[] = [];
+  type Reply = { ok: boolean; status: number; text: () => Promise<string>; headers?: { get(name: string): string | null } };
+  const fetch = sinon.spy(async (url: string, init: { body?: string }): Promise<Reply> => {
+    if (url !== DECISIONS_URL) return { ok: true, status: 200, text: async () => JSON.stringify({ data: [] }) };
+    decisionBodies.push(init.body);
+    return { ok: false, status: 429, text: async () => 'slow down', headers: { get: (name: string) => (name.toLowerCase() === 'retry-after' ? '30' : null) } };
+  });
+  const autopilot = new Autopilot({ events, decisions: { fetch, getKey: () => 'test-key' } });
+  autopilot.bind(chatBot() as never);
+  t.teardown(() => autopilot.unbind('test finished'));
+  t.true(autopilot.policy.update({ chat: { commandsFrom: ['Steve'] } }, 'llm').ok);
+  const decisions = () => events.query({ types: ['decision'], limit: 50 }).events.map(event => event.message);
+
+  autopilot.handleChat('Steve', `${BOT}, follow me`, false);
+  await waitFor(() => decisions().length === 1);
+  t.regex(decisions()[0], /^chat-triage: throttled \(HTTP 429: slow down\) for Steve → rule fallback$/);
+
+  autopilot.handleChat('Steve', 'psst, over here', true);
+  autopilot.handleChat('Alex', `${BOT}, can you help?`, false);
+  autopilot.handleChat('Alex', 'nice weather today', false);
+  await waitFor(() => decisions().length === 4);
+  await flush();
+
+  t.is(decisionBodies.length, 1, 'no request during the pause');
+  // Real timers here: the seconds left are pinned by the fake-clock tests in tests/openrouter-client.test.ts.
+  for (const text of decisions().slice(1)) t.regex(text, /^chat-triage: backoff \(not calling OpenRouter for \d+s more \(HTTP 429\)\) for \S+( \(whisper\))? → rule fallback$/);
+  const requests = events.query({ types: ['chat_request'], limit: 10 }).events.map(event => event.message);
+  t.true(requests.some(text => text.startsWith('Steve (whisper): ') && text.includes('rule: whisper; decision backoff')), requests.join('\n'));
+  t.true(requests.some(text => text.startsWith('Alex: ') && text.includes('rule: mentioned name; decision backoff')), requests.join('\n'));
+  t.false(requests.some(text => text.includes('nice weather')), 'chat not meant for the bot stays out');
+  t.is(autopilot.currentTask(), null, 'no command runs without a decision');
 });
