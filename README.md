@@ -44,7 +44,7 @@ The upstream project is a good, simple bridge: the LLM calls a tool, and the bot
 - **Chat triage:** the decision model sorts chat. Only messages meant for the bot wake the LLM, as `chat_request` events. Nobody can command the bot by chat unless the LLM allows it.
 
 ### 3. Tested in the game, not only on paper
-- 1531 unit tests.
+- 1543 unit tests.
 - A live test that exercises all 67 tools against a real server.
 - A scenario test that compares the bot with and without the Autopilot: zombie waves, being chased by zombies with bare hands, creepers, hunger, fire, drowning, diving on purpose, a lava shore, chat.
 - A 10-day survival test on Normal difficulty. The bot survived all ten nights without dying and built a 7×7 house with a door, eight glass windows, a bed, a chest, a crafting table, a furnace and torches.
@@ -101,7 +101,17 @@ The full design, the contract of every file, and the evidence behind each choice
 
 ## Getting started
 
-The server is the npm package `@yxengram/minecraft-mcp-autopilot`, and the steps below run it with `npx`, which comes with Node.js. To change the server or run the tests, [build it from source](#build-from-source) instead.
+In Claude Desktop, the simplest way is to [install the extension](#claude-desktop-install-the-extension). Otherwise, the server is the npm package `@yxengram/minecraft-mcp-autopilot`, and steps 1 to 4 below run it with `npx`, which comes with Node.js. To change the server or run the tests, [build it from source](#build-from-source) instead.
+
+### Claude Desktop: install the extension
+1. Download `minecraft-mcp-autopilot-<version>.mcpb` from the [latest release](https://github.com/yxengram/minecraft-mcp-server/releases/latest) on GitHub.
+2. Double-click it, and Claude Desktop offers to install the extension Minecraft Autopilot. It carries the server and its dependencies, so nothing is downloaded with npm.
+3. In the extension's settings, enter the **LAN port** of your world. Enter a fixed Port Number on the LAN World screen ([step 2](#2-open-a-world-to-lan)), and this setting never has to change. If you like, also enter a **Bot name** (default `LLMBot`; see [Accounts](#accounts)) and your **OpenRouter API key** ([get one in 2 minutes](#get-an-openrouter-key-in-2-minutes)). **Minecraft host** stays `localhost` for a world on this computer.
+4. Open the world to LAN as in [step 2](#2-open-a-world-to-lan), then [play](#4-play). Steps 1 and 3 are only for npx.
+
+The key is a sensitive setting, which Claude Desktop keeps itself; the server gets it only through the `OPENROUTER_API_KEY` environment variable, never on its command line. Without a key the instinct is offline, as with npx. What the bot sends with a key is in [Privacy and cost](#privacy-and-cost); the extension's description says the same.
+
+The extension has only these four settings. For `--allow-commands`, `--greeting`, `--waypoint-file`, `--decision-model` or `--call-limit-seconds`, run the server with npx as below instead.
 
 ### Requirements
 - Node.js 22 or later
@@ -113,7 +123,7 @@ The server is the npm package `@yxengram/minecraft-mcp-autopilot`, and the steps
 1. Sign in at [openrouter.ai](https://openrouter.ai).
 2. Add credit to the account. A decision costs about $0.00002.
 3. Create an API key. A key can be given a credit limit.
-4. Put the key in `env` in the MCP client's config ([step 3](#3-add-the-server-to-your-mcp-client)).
+4. Put the key in `env` in the MCP client's config ([step 3](#3-add-the-server-to-your-mcp-client)), or, with the extension, in its **OpenRouter API key** setting ([Claude Desktop: install the extension](#claude-desktop-install-the-extension)).
 5. Restart the client completely: the server reads the key only when it starts.
 
 The server checks the key with OpenRouter when it starts and each time the bot joins the game. The result is a line on stderr, an `instinct` event, and the `Instinct:` line of `get-policy` and `get-observation`; see [The instinct is offline](#the-instinct-is-offline).
@@ -134,7 +144,7 @@ Start a world and choose `ESC → Open to LAN`. Turn cheats on if you want to ru
 
 The LAN World screen has a **Port Number** box that takes 1024–65535. Enter a fixed port, for example `25565`, and enter the same number each time you open the world to LAN: the port then stays the same, and the `--port` in step 3 never has to change.
 
-If you leave the box empty, Minecraft picks a different port each time and prints it in chat as `Local game hosted on port N`. Put that N in `--port` and restart the client completely: the server reads `--port` only when it starts.
+If you leave the box empty, Minecraft picks a different port each time and prints it in chat as `Local game hosted on port N`. Put that N in `--port` and restart the client completely: the server reads `--port` only when it starts. With the extension, put N in its **LAN port** setting instead.
 
 ### Check the connection
 Before you change the client's config, you can check in a terminal that the bot can join and that the key works. With the world open to LAN:
@@ -283,8 +293,8 @@ The `Instinct:` line says which case it is. `get-observation` has the same line;
 | The `Instinct:` line says | What to do |
 |---|---|
 | `Instinct: online (key checked at HH:MM UTC)` | Nothing: the key passed. The time is that of the last check or of the last decision that succeeded |
-| `Instinct: OFFLINE (no OPENROUTER_API_KEY): the bot does not react to dangers by itself` | The key did not reach the server. Put it in `env` in the client config ([step 3](#3-add-the-server-to-your-mcp-client)) and restart the client completely |
-| `Instinct: OFFLINE (OpenRouter rejected the API key (HTTP 401)): the bot does not react to dangers by itself` (or `HTTP 403`) | OpenRouter does not accept the key, for example because it was mistyped or deleted. Create a new key, put it in `env` and restart the client completely |
+| `Instinct: OFFLINE (no OPENROUTER_API_KEY): the bot does not react to dangers by itself` | The key did not reach the server. Put it in `env` in the client config ([step 3](#3-add-the-server-to-your-mcp-client)) and restart the client completely; with the extension, enter it in the extension's **OpenRouter API key** setting |
+| `Instinct: OFFLINE (OpenRouter rejected the API key (HTTP 401)): the bot does not react to dangers by itself` (or `HTTP 403`) | OpenRouter does not accept the key, for example because it was mistyped or deleted. Create a new key, put it in `env` and restart the client completely; with the extension, enter it in the extension's **OpenRouter API key** setting |
 | `Instinct: OFFLINE (the OpenRouter account has no credit (HTTP 402)): the bot does not react to dangers by itself` | Add credit to the OpenRouter account. Until then the server tries one request every 5 minutes, and the first one that succeeds ends the `OFFLINE` (a key check cannot tell whether there is credit) |
 | `Instinct: OFFLINE (model <id> is not in the decision model catalog): the bot does not react to dangers by itself` | Pick a model from `list-decision-models`, put it in `args` as `--decision-model` and restart the client completely |
 | `Instinct: OFFLINE for <n> more s (paused after HTTP 429): the bot does not react to dangers by itself` (or `paused after HTTP 503`, `paused after network errors`) | OpenRouter asked the server to slow down, or failed 3 times in a row. Nothing to do: when the time is up the line shows the state from before again, and the next request is sent. If it keeps coming back, check OpenRouter's status page |
@@ -457,7 +467,7 @@ Limits:
 The policy lives in memory only, and goes back to these defaults whenever the bot joins the game.
 
 ### Privacy and cost
-**What is sent:** with a key, chat messages from other players and a summary of the bot's situation go to OpenRouter and the model provider. The summary covers health, food, air, the dangers, the options, the current task and the LLM's intent. The key check, when the server starts and each time the bot joins, asks OpenRouter whether it accepts the key and reads its catalog of decision models; nothing about the game is sent with it. Without a key, nothing is sent.
+**What is sent:** with a key, chat messages from other players, with their names, and a summary of the bot's situation go to OpenRouter and the model provider. The summary covers health, food, air, whether the bot is in lava or on fire, its held item, armor points and best weapon, the hostile mobs within 16 blocks and their distances, the dangers, the options, the command or task it is doing, its recent instinct actions and earlier dangers, and the intent the LLM sets with `set-policy`; chat triage also sends the bot's name and its current task. The key check, when the server starts and each time the bot joins, asks OpenRouter whether it accepts the key and reads its catalog of decision models; nothing about the game is sent with it. Without a key, nothing is sent: the server talks only to the Minecraft server it connects to.
 
 **Cost:** a call costs about $0.00002. The instinct is limited to 90 calls a minute and chat to 30. It only asks while a danger lasts. Measured on 2026-10-30 with the scenario test, where one danger follows another for about 6 minutes: 59 requests (53 from the instinct, 2 for chat, 4 key checks) and $0.0012 reported, which is about 580 requests and $0.012 an hour while dangers keep coming.
 
@@ -506,7 +516,7 @@ In the client config, `command` is `node` and the first item of `args` is the fu
 ## Testing
 
 ```bash
-npm test             # 1531 unit tests
+npm test             # 1543 unit tests
 npm run lint
 npm run test:live -- <LAN_PORT>                                 # read-only check against a world
 npm run test:live:world -- <LAN_PORT> --allow-world-changes      # every tool, in a throwaway world with cheats on

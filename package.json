@@ -50,6 +50,7 @@
     "dev": "tsx src/main.ts",
     "prebuild": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
     "build": "tsc -p tsconfig.build.json",
+    "build:mcpb": "node scripts/build-mcpb.mjs",
     "prepare": "npm run build",
     "start": "node dist/main.js",
     "test": "ava",
@@ -70,6 +71,7 @@
     "zod": "^3.25.76"
   },
   "devDependencies": {
+    "@anthropic-ai/mcpb": "2.1.2",
     "@ava/typescript": "^6.0.0",
     "@types/node": "^25.2.3",
     "@types/sinon": "^21.0.0",

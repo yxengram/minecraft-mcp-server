@@ -96,3 +96,26 @@ jobs:
         name: npm-package
         path: ${{ env.PACKAGE_TGZ }}
         retention-days: 14
+
+    # The MCPB extension for Claude Desktop (E-047). npm shrinkwrap in Pack has renamed package-lock.json, and
+    # build:mcpb takes npm-shrinkwrap.json first, so the extension installs the tree tested above.
+    - name: Build the MCPB extension
+      if: matrix.os == 'ubuntu-latest' && matrix.node == '22.x'
+      run: |
+        npm run build:mcpb
+        echo "MCPB_FILE=$PWD/build/$(node -p "const { name, version } = require('./mcpb/manifest.json'); name + '-' + version").mcpb" >> "$GITHUB_ENV"
+
+    # As Claude Desktop runs it: dist/main.js of the unpacked extension, with the node_modules inside it.
+    - name: Smoke test the unpacked extension
+      if: matrix.os == 'ubuntu-latest' && matrix.node == '22.x'
+      run: |
+        npx mcpb unpack "$MCPB_FILE" "$RUNNER_TEMP/mcpb"
+        npm run test:smoke -- "$RUNNER_TEMP/mcpb/dist/main.js"
+
+    - name: Upload the extension
+      if: matrix.os == 'ubuntu-latest' && matrix.node == '22.x'
+      uses: actions/upload-artifact@v6
+      with:
+        name: mcpb-extension
+        path: ${{ env.MCPB_FILE }}
+        retention-days: 14

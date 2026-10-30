@@ -5,6 +5,7 @@ import test from 'ava';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { parseConfig } from '../src/config.js';
 import { COMMAND_NAME, PACKAGE_NAME, PACKAGE_VERSION } from '../src/package-info.js';
 import { TOOL_NAMES } from '../src/tool-annotations.js';
 
@@ -238,3 +239,133 @@ for (const file of ['README.md', 'README.zh-CN.md']) {
     t.false(text.includes('sk-or-'), `${file} contains "sk-or-"; write <your OpenRouter key> instead`);
   });
 }
+
+// ---------------------------------------------------------------------------------------------------------------
+// E-047 (Q19): mcpb/manifest.json (F-057) is the MCPB extension's manifest for Claude Desktop. It carries the package's
+// name without the scope and its version, runs dist/main.js with node, and has exactly four settings, whose defaults
+// are the command line's. The key goes only into env as OPENROUTER_API_KEY, never into args, which show up in the
+// process list and the client's logs (G6 I4). The privacy text is the one the owner chose on 2026-10-31. mcpb validate
+// (F-058) checks the schema; these cases check the contract.
+// ---------------------------------------------------------------------------------------------------------------
+
+interface UserConfigOption {
+  type?: string;
+  title?: string;
+  description?: string;
+  required?: boolean;
+  default?: unknown;
+  sensitive?: boolean;
+  min?: number;
+  max?: number;
+}
+
+interface McpbManifest {
+  manifest_version?: string;
+  name?: string;
+  display_name?: string;
+  version?: string;
+  long_description?: string;
+  author?: { name?: string };
+  license?: string;
+  tools?: unknown;
+  server?: { type?: string; entry_point?: string; mcp_config?: { command?: string; args?: string[]; env?: Record<string, string> } };
+  compatibility?: { runtimes?: { node?: string } };
+  user_config?: Record<string, UserConfigOption>;
+}
+
+const MANIFEST = 'mcpb/manifest.json';
+const MCPB_ARGS = [
+  '${__dirname}/dist/main.js',
+  '--host', '${user_config.host}',
+  '--port', '${user_config.port}',
+  '--username', '${user_config.username}'
+];
+const PRIVACY_TEXT = "With an OpenRouter API key, the bot sends other players' chat messages (with their names) and short summaries of its own state (for example health, nearby mobs, its current task and the intent the AI sets with set-policy) to OpenRouter, which decides how it reacts. Without a key, it talks only to the Minecraft server you connect to.";
+const PORT_DESCRIPTION = 'The LAN port Minecraft prints in chat after Open to LAN, or the Port Number you chose';
+
+test('E-047: the manifest has the version of package.json, the name without the scope and the approved identity', (t) => {
+  const pkg = readJson<PackageJson>('package.json');
+  const manifest = readJson<McpbManifest>(MANIFEST);
+  t.is(manifest.version, pkg.version, `${MANIFEST} version differs from package.json`);
+  const unscoped = (pkg.name ?? '').replace(/^@[^/]+\//, '');
+  t.is(manifest.name, unscoped);
+  t.is(manifest.name, COMMAND_NAME);
+  t.is(manifest.display_name, 'Minecraft Autopilot');
+  t.is(manifest.author?.name, 'yxengram');
+  t.is(manifest.license, 'Apache-2.0');
+  t.is(manifest.license, pkg.license);
+  t.truthy(manifest.manifest_version, 'manifest_version is missing');
+});
+
+test('E-047: the manifest runs dist/main.js with node and passes host, port and username as options', (t) => {
+  const { bin } = readJson<PackageJson>('package.json');
+  const { server } = readJson<McpbManifest>(MANIFEST);
+  t.is(server?.type, 'node');
+  t.is(server?.entry_point, 'dist/main.js');
+  t.deepEqual(typeof bin === 'object' ? Object.values(bin) : [bin], [server?.entry_point], 'the entry point is the one bin runs');
+  t.is(server?.mcp_config?.command, 'node');
+  t.deepEqual(server?.mcp_config?.args, MCPB_ARGS);
+  t.is(server?.mcp_config?.args?.[0], `\${__dirname}/${server?.entry_point}`);
+});
+
+test('E-047 / I4: the key goes only into env, as OPENROUTER_API_KEY, and never into args', (t) => {
+  const { server, user_config: settings = {} } = readJson<McpbManifest>(MANIFEST);
+  const args = server?.mcp_config?.args ?? [];
+  const env = server?.mcp_config?.env ?? {};
+  t.deepEqual(args.filter(arg => /openrouter|api_key/i.test(arg)), [], 'args show up in the process list and the client\'s logs');
+  t.deepEqual(Object.keys(env), ['OPENROUTER_API_KEY'], 'env has only the key');
+  t.is(env.OPENROUTER_API_KEY, '${user_config.openrouter_api_key}');
+  // Every setting the command line or env refers to exists, and the key is referred to only by env.
+  const referenced = [...args, ...Object.values(env)].flatMap(value => [...value.matchAll(/\$\{user_config\.([^}]+)\}/g)].map(match => match[1]));
+  t.deepEqual(referenced.filter(name => !(name in settings)), [], 'settings that the manifest refers to but does not define');
+  t.deepEqual(referenced.filter(name => name === 'openrouter_api_key'), ['openrouter_api_key']);
+});
+
+test('E-047: user_config is exactly host, port, username and openrouter_api_key; the key is sensitive and not required', (t) => {
+  const { user_config: settings = {} } = readJson<McpbManifest>(MANIFEST);
+  t.deepEqual(Object.keys(settings).sort(), ['host', 'openrouter_api_key', 'port', 'username']);
+  t.is(settings.host?.type, 'string');
+  t.is(settings.port?.type, 'number');
+  t.is(settings.username?.type, 'string');
+  const key = settings.openrouter_api_key;
+  t.is(key?.type, 'string');
+  t.is(key?.sensitive, true, 'Claude Desktop keeps a sensitive setting out of its plain config');
+  t.not(key?.required, true, 'the extension must also run without a key');
+  t.false(key !== undefined && 'default' in key, 'the key has no default');
+  t.deepEqual(Object.entries(settings).filter(([, option]) => option.sensitive).map(([name]) => name), ['openrouter_api_key']);
+  t.is(settings.port?.min, 1);
+  t.is(settings.port?.max, 65535);
+  t.is(settings.port?.description, PORT_DESCRIPTION);
+});
+
+test('E-047: the defaults of user_config are those of parseConfig([]), and the args with them filled in parse to the same', (t) => {
+  const { server, user_config: settings = {} } = readJson<McpbManifest>(MANIFEST);
+  const defaults = parseConfig([]);
+  t.is(settings.host?.default, defaults.host);
+  t.is(settings.port?.default, defaults.port);
+  t.is(settings.username?.default, defaults.username);
+  // As Claude Desktop starts it: the first arg is the script, the rest are options with the settings filled in.
+  const options = (server?.mcp_config?.args ?? []).slice(1)
+    .map(arg => arg.replace(/\$\{user_config\.([^}]+)\}/g, (_, name: string) => String(settings[name]?.default)));
+  const parsed = parseConfig(options);
+  t.like(parsed, { host: defaults.host, port: defaults.port, username: defaults.username });
+});
+
+test('E-047: compatibility.runtimes.node is >=22.0.0, the same bound as engines.node', (t) => {
+  const { engines } = readJson<PackageJson>('package.json');
+  const { compatibility } = readJson<McpbManifest>(MANIFEST);
+  t.is(compatibility?.runtimes?.node, '>=22.0.0');
+  t.is(engines?.node?.replace(/^>=(\d+)$/, '>=$1.0.0'), compatibility?.runtimes?.node, 'change both together, with approval (E-047)');
+});
+
+test('E-047: the manifest has the owner\'s privacy text word for word and lists no tools by hand', (t) => {
+  const manifest = readJson<McpbManifest>(MANIFEST);
+  t.true((manifest.long_description ?? '').includes(PRIVACY_TEXT), `${MANIFEST} long_description lacks the privacy text of F-057`);
+  t.false('tools' in manifest, 'a tool list, if ever, is generated from TOOL_NAMES by scripts/build-mcpb.mjs (F-058)');
+});
+
+test('E-047: mcpb/ and scripts/ stay out of the npm package, and the build script is build:mcpb', (t) => {
+  const { files = [], scripts } = readJson<PackageJson>('package.json');
+  t.deepEqual(files.filter(entry => /^(mcpb|scripts|build)(\/|$)/.test(entry)), []);
+  t.is(scripts?.['build:mcpb'], 'node scripts/build-mcpb.mjs');
+});

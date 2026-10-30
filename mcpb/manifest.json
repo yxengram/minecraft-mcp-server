@@ -1,0 +1,65 @@
+{
+  "manifest_version": "0.2",
+  "name": "minecraft-mcp-autopilot",
+  "display_name": "Minecraft Autopilot",
+  "version": "3.0.0",
+  "description": "MCP server that lets an LLM play Minecraft Java Edition through a Mineflayer bot, with background tasks and an instinct that reacts to danger in real time",
+  "long_description": "A bot joins your Minecraft Java Edition 26.1.2 world, and the AI plays through its tools: moving, mining, building, crafting, trading and background tasks. Open the world to LAN and enter its port in the extension's settings. With an OpenRouter API key, an instinct reacts to dangers in real time; without one, the bot does not react to dangers by itself.\n\nPrivacy: With an OpenRouter API key, the bot sends other players' chat messages (with their names) and short summaries of its own state (for example health, nearby mobs, its current task and the intent the AI sets with set-policy) to OpenRouter, which decides how it reacts. Without a key, it talks only to the Minecraft server you connect to.",
+  "author": {
+    "name": "yxengram"
+  },
+  "license": "Apache-2.0",
+  "server": {
+    "type": "node",
+    "entry_point": "dist/main.js",
+    "mcp_config": {
+      "command": "node",
+      "args": [
+        "${__dirname}/dist/main.js",
+        "--host",
+        "${user_config.host}",
+        "--port",
+        "${user_config.port}",
+        "--username",
+        "${user_config.username}"
+      ],
+      "env": {
+        "OPENROUTER_API_KEY": "${user_config.openrouter_api_key}"
+      }
+    }
+  },
+  "compatibility": {
+    "runtimes": {
+      "node": ">=22.0.0"
+    }
+  },
+  "user_config": {
+    "host": {
+      "type": "string",
+      "title": "Minecraft host",
+      "description": "The computer the Minecraft world runs on: localhost for a world opened to LAN on this computer",
+      "default": "localhost"
+    },
+    "port": {
+      "type": "number",
+      "title": "LAN port",
+      "description": "The LAN port Minecraft prints in chat after Open to LAN, or the Port Number you chose",
+      "default": 25565,
+      "min": 1,
+      "max": 65535
+    },
+    "username": {
+      "type": "string",
+      "title": "Bot name",
+      "description": "The bot's name in the game and in chat; players use it to talk to the bot. The bot joins with an offline account, so give it a name of its own, not yours or another player's",
+      "default": "LLMBot"
+    },
+    "openrouter_api_key": {
+      "type": "string",
+      "title": "OpenRouter API key",
+      "description": "Optional, strongly recommended: it turns on the instinct and chat triage. Without a key the instinct is offline and the bot does not react to dangers by itself. With a key, other players' chat messages and short summaries of the bot's state are sent to OpenRouter",
+      "sensitive": true,
+      "required": false
+    }
+  }
+}

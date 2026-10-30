@@ -1478,3 +1478,59 @@ test.serial('E-037: the statistics live in the client the Autopilot makes once, 
   t.like(autopilot.decisions.spend(), { instinct: 1, chat: 1, check: 6, calls: before.calls + 2 }, 'only the join\'s check was added');
   t.is(autopilot.decisions.status().callsLastHour, before.calls + 2);
 });
+
+// ---- E-047: an MCPB setting left empty -------------------------------------------------------------------------
+// Expected from the E-047 row: mcpb/manifest.json (F-057) passes the key as "${user_config.openrouter_api_key}" in env,
+// and the MCPB spec does not say what an optional user_config field left empty becomes. A value that starts with
+// "${user_config." is therefore no key, the same as an empty one: status().configured is false, decide is disabled and
+// fetch is never called. The other key rules stay: only OPENROUTER_API_KEY, and I4.
+
+const UNFILLED_KEYS = ['${user_config.openrouter_api_key}', '  ${user_config.openrouter_api_key}\n', '${user_config.'];
+
+test('E-047: an unfilled ${user_config.…} key is no key: status().configured is false, decide is disabled, nothing is fetched', async t => {
+  for (const key of UNFILLED_KEYS) {
+    const { client, fetch } = makeClient({ key, impl: routes() });
+    t.false(client.isConfigured(), `key ${JSON.stringify(key)}`);
+    t.deepEqual(client.status(), {
+      configured: false, enabled: true, model: DEFAULT_DECISION_MODEL, callsLastMinute: 0, callsLastHour: 0, instinctCallsLastMinute: 0
+    }, `the same status as without a key, for key ${JSON.stringify(key)}`);
+    assertFailure(t, await client.decide(STATE, QUESTIONS), 'disabled');
+    assertFailure(t, await client.decide(STATE, QUESTIONS, { budget: 'instinct' }), 'disabled');
+    t.is(fetch.callCount, 0, `key ${JSON.stringify(key)} must not send a request`);
+  }
+});
+
+test('E-047: with an unfilled key the check and the catalog send nothing, and the health is OFFLINE (no OPENROUTER_API_KEY)', async t => {
+  for (const key of UNFILLED_KEYS) {
+    const { client, fetch, changes } = checkedClient({ key, impl: routes() });
+    t.like(await client.checkAccess(), { state: 'offline', reason: 'no OPENROUTER_API_KEY' });
+    t.deepEqual(changes.map(change => [change.state, change.reason]), [['offline', 'no OPENROUTER_API_KEY']]);
+    const catalog = await client.listModels();
+    t.false(catalog.ok);
+    if (!catalog.ok) t.is(catalog.error, 'disabled');
+    t.is(fetch.callCount, 0, `key ${JSON.stringify(key)} must not send a request`);
+  }
+});
+
+test('E-047: with an unfilled key get-policy\'s Instinct state is the E-036 OFFLINE one, as without a key, and nothing is sent', async t => {
+  const fetch = sinon.spy(routes());
+  const autopilot = new Autopilot({ events: new EventStore(), decisions: { getKey: () => UNFILLED_KEYS[0], fetch } });
+  await autopilot.checkDecisionModel();
+  t.is(instinctState(autopilot), 'OFFLINE (no OPENROUTER_API_KEY): the bot does not react to dangers by itself');
+  t.true(fetch.notCalled, 'an unfilled key must not send the key check or the catalog request');
+});
+
+test('E-047: only a value that starts with ${user_config. is a placeholder; any other key is still used, trimmed as before', async t => {
+  const { client, fetch } = makeClient({ key: ` ${FAKE_KEY} `, impl: okFetch });
+  t.true(client.status().configured);
+  t.true((await client.decide(STATE, QUESTIONS)).ok);
+  t.is(fetch.callCount, 1);
+  t.is(header(fetch.firstCall.args[1], 'Authorization'), `Bearer ${FAKE_KEY}`);
+
+  // The placeholder text later in the value is not a placeholder: the key is sent as it is.
+  const { client: embedded, fetch: embeddedFetch } = makeClient({ key: 'x${user_config.openrouter_api_key}', impl: okFetch });
+  t.true(embedded.status().configured);
+  t.true((await embedded.decide(STATE, QUESTIONS)).ok);
+  t.is(embeddedFetch.callCount, 1);
+  t.is(header(embeddedFetch.firstCall.args[1], 'Authorization'), 'Bearer x${user_config.openrouter_api_key}');
+});

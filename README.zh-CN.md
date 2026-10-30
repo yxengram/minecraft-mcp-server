@@ -44,7 +44,7 @@
 - **聊天分拣：**决策模型对聊天分类，只有发给机器人的消息才会以 `chat_request` 事件唤醒 LLM。除非 LLM 允许，任何人都不能通过聊天指挥机器人。
 
 ### 3. 在游戏里实测，而不只是纸面
-- 1531 个单元测试。
+- 1543 个单元测试。
 - 实机测试：在真实服务器上逐一运行全部 67 个工具。
 - 情景测试：比较有无 Autopilot 时机器人的表现，包括僵尸潮、空手被僵尸追赶、苦力怕、饥饿、着火、溺水、有意潜水、岩浆岸边和聊天。
 - 普通难度下的 10 天生存测试：机器人度过了全部十个夜晚，没有死亡，并建起一座 7×7 的房子，带门、八扇玻璃窗、床、箱子、工作台、熔炉和火把。
@@ -101,7 +101,17 @@ LLM 每一轮“观察、思考、调用工具”都要几秒，而 Minecraft �
 
 ## 快速开始
 
-服务器是 npm 包 `@yxengram/minecraft-mcp-autopilot`，下面的步骤用 Node.js 自带的 `npx` 运行它。要修改服务器或运行测试，请改为[从源码构建](#从源码构建)。
+在 Claude Desktop 中，最简单的方式是[安装扩展](#claude-desktop安装扩展)。其他情况下，服务器是 npm 包 `@yxengram/minecraft-mcp-autopilot`，下面的第 1～4 步用 Node.js 自带的 `npx` 运行它。要修改服务器或运行测试，请改为[从源码构建](#从源码构建)。
+
+### Claude Desktop：安装扩展
+1. 从 GitHub 上的[最新发布](https://github.com/yxengram/minecraft-mcp-server/releases/latest)下载 `minecraft-mcp-autopilot-<版本>.mcpb`。
+2. 双击它，Claude Desktop 会提示安装扩展 Minecraft Autopilot。扩展里已经带着服务器和它的依赖，不用再经 npm 下载。
+3. 在扩展的设置里填世界的 **LAN port**（局域网端口）。在局域网世界界面填一个固定的 Port Number（见[第 2 步](#2-对局域网开放世界)），这项设置就不用再改。还可以填 **Bot name**（机器人的名字，默认 `LLMBot`，见[账号（Accounts）](#账号accounts)）和你的 **OpenRouter API key**（见[2 分钟取得 OpenRouter key](#2-分钟取得-openrouter-key)）。世界在本机时，**Minecraft host** 保持 `localhost`。
+4. 按[第 2 步](#2-对局域网开放世界)对局域网开放世界，然后[开始玩](#4-开始玩)。第 1、3 步只用于 npx 方式。
+
+key 是敏感（sensitive）设置，由 Claude Desktop 自己保管；服务器只经环境变量 `OPENROUTER_API_KEY` 取得它，它从不出现在服务器的命令行里。没有 key 时本能离线，与 npx 方式相同。有 key 时机器人发送什么，见[隐私与费用](#隐私与费用)；扩展的说明里写的也是这些。
+
+扩展只有这四项设置。要用 `--allow-commands`、`--greeting`、`--waypoint-file`、`--decision-model` 或 `--call-limit-seconds`，请改用下面的 npx 方式运行服务器。
 
 ### 环境要求
 - Node.js 22 或以上
@@ -113,7 +123,7 @@ LLM 每一轮“观察、思考、调用工具”都要几秒，而 Minecraft �
 1. 登录 [openrouter.ai](https://openrouter.ai)。
 2. 给账户充值。每次决策约 0.00002 美元。
 3. 创建一个 API key。key 可以设置额度上限。
-4. 把 key 写进 MCP 客户端配置的 `env`（见[第 3 步](#3-在-mcp-客户端中添加服务器)）。
+4. 把 key 写进 MCP 客户端配置的 `env`（见[第 3 步](#3-在-mcp-客户端中添加服务器)）；用扩展时，填进扩展的 **OpenRouter API key** 设置（见[Claude Desktop：安装扩展](#claude-desktop安装扩展)）。
 5. 完全重启客户端：服务器只在启动时读取 key。
 
 服务器启动时和机器人每次进入游戏时，都会向 OpenRouter 核对 key。结果写成 stderr 的一行和一个 `instinct` 事件，也显示在 `get-policy` 和 `get-observation` 的 `Instinct:` 一行；见[本能离线](#本能离线)。
@@ -134,7 +144,7 @@ npx 下载这个包和它的依赖，运行包里唯一的命令 `minecraft-mcp-
 
 打开后的局域网世界界面（LAN World）有一栏 **Port Number**（端口号），可以填 1024～65535。建议填一个固定端口，例如 `25565`，以后每次对局域网开放时都填同一个数：端口保持不变，第 3 步里的 `--port` 就不用再改。
 
-这一栏留空时，Minecraft 每次另选一个端口，并在聊天栏显示，英文界面是 `Local game hosted on port N`。把这个 N 写进 `--port`，然后完全重启客户端：服务器只在启动时读取 `--port`。
+这一栏留空时，Minecraft 每次另选一个端口，并在聊天栏显示，英文界面是 `Local game hosted on port N`。把这个 N 写进 `--port`，然后完全重启客户端：服务器只在启动时读取 `--port`。用扩展时，改为把 N 填进扩展的 **LAN port** 设置。
 
 ### 检查连接
 改客户端配置之前，可以先在终端里确认机器人能进入世界、key 可用。世界对局域网开放后运行：
@@ -283,8 +293,8 @@ API key 只从环境变量 `OPENROUTER_API_KEY` 读取，没有哪个选项接�
 | `Instinct:` 一行显示 | 怎么做 |
 |---|---|
 | `Instinct: online (key checked at HH:MM UTC)` | 不用做什么：key 通过了核对。时间是最近一次核对或最近一次成功决策的时间 |
-| `Instinct: OFFLINE (no OPENROUTER_API_KEY): the bot does not react to dangers by itself` | key 没有传到服务器。把它写进客户端配置的 `env`（见[第 3 步](#3-在-mcp-客户端中添加服务器)），然后完全重启客户端 |
-| `Instinct: OFFLINE (OpenRouter rejected the API key (HTTP 401)): the bot does not react to dangers by itself`（或 `HTTP 403`） | OpenRouter 不接受这个 key，例如抄错了或已被删除。新建一个 key，写进 `env`，然后完全重启客户端 |
+| `Instinct: OFFLINE (no OPENROUTER_API_KEY): the bot does not react to dangers by itself` | key 没有传到服务器。把它写进客户端配置的 `env`（见[第 3 步](#3-在-mcp-客户端中添加服务器)），然后完全重启客户端；用扩展时，填进扩展的 **OpenRouter API key** 设置 |
+| `Instinct: OFFLINE (OpenRouter rejected the API key (HTTP 401)): the bot does not react to dangers by itself`（或 `HTTP 403`） | OpenRouter 不接受这个 key，例如抄错了或已被删除。新建一个 key，写进 `env`，然后完全重启客户端；用扩展时，填进扩展的 **OpenRouter API key** 设置 |
 | `Instinct: OFFLINE (the OpenRouter account has no credit (HTTP 402)): the bot does not react to dangers by itself` | 给 OpenRouter 账户充值。在此之前服务器每 5 分钟只试一个请求，第一个成功的请求结束 `OFFLINE`（key 的核对看不出有没有余额） |
 | `Instinct: OFFLINE (model <id> is not in the decision model catalog): the bot does not react to dangers by itself` | 从 `list-decision-models` 里选一个模型，作为 `--decision-model` 写进 `args`，然后完全重启客户端 |
 | `Instinct: OFFLINE for <n> more s (paused after HTTP 429): the bot does not react to dangers by itself`（或 `paused after HTTP 503`、`paused after network errors`） | OpenRouter 要求服务器放慢，或者连续失败了 3 次。不用做什么：时间到了以后，这一行恢复显示之前的状态，下一个请求照常发送。如果反复出现，请查看 OpenRouter 的状态页 |
@@ -457,7 +467,7 @@ API key 只从环境变量 `OPENROUTER_API_KEY` 读取，没有哪个选项接�
 策略只保存在内存中，机器人每次加入游戏都会恢复为这些默认值。
 
 ### 隐私与费用
-**发送什么：**有 key 时，其他玩家的聊天消息和机器人处境的摘要会发送给 OpenRouter 和模型提供方。摘要包括生命、饥饿、氧气、危险、可选项、当前任务和 LLM 的意图。服务器启动时和机器人每次进入游戏时的 key 核对，只问 OpenRouter 是否接受这个 key，并读取决策模型目录，不发送任何游戏内容。没有 key 时什么都不发送。
+**发送什么：**有 key 时，其他玩家的聊天消息（连同他们的名字）和机器人处境的摘要会发送给 OpenRouter 和模型提供方。摘要包括生命、饥饿、氧气、是否在岩浆里或着火、手持物品、护甲值与最好的武器、16 格内的敌对生物及其距离、危险、可选项、正在做的命令或任务、最近的本能动作与先前的危险，以及 LLM 用 `set-policy` 设置的意图；聊天分拣还发送机器人的名字和它当前的任务。服务器启动时和机器人每次进入游戏时的 key 核对，只问 OpenRouter 是否接受这个 key，并读取决策模型目录，不发送任何游戏内容。没有 key 时什么都不发送：服务器只与它连接的 Minecraft 服务器通信。
 
 **费用：**每次调用约 0.00002 美元。本能每分钟最多 90 次，聊天最多 30 次，而且只在危险持续期间询问。2026-10-30 用情景测试实测（约 6 分钟里危险一个接一个）：59 个请求（本能 53、聊天 2、key 核对 4），报告的费用 0.0012 美元；照这个速度，危险不断时每小时约 580 个请求、0.012 美元。
 
@@ -506,7 +516,7 @@ node dist/main.js --check --port <局域网端口> --username ClaudeBot
 ## 测试
 
 ```bash
-npm test             # 1531 个单元测试
+npm test             # 1543 个单元测试
 npm run lint
 npm run test:live -- <局域网端口>                                 # 对世界做只读检查
 npm run test:live:world -- <局域网端口> --allow-world-changes      # 在开启作弊的一次性世界中运行每个工具

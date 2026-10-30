@@ -12,6 +12,8 @@ const CATALOG_TIMEOUT_MS = 10000;
 // Per request of checkAccess (the key, then the catalog), so a whole check ends within 10 s.
 const CHECK_TIMEOUT_MS = 5000;
 export const NO_KEY_REASON = 'no OPENROUTER_API_KEY';
+// How mcpb/manifest.json (F-057) passes the key; a value that still starts with it was never filled in (E-047).
+const UNFILLED_USER_CONFIG = '${user_config.';
 const MAX_QUESTIONS = 128;
 const MINUTE_MS = 60_000;
 const HOUR_MS = 3_600_000;
@@ -282,9 +284,13 @@ export class OpenRouterClient {
     this.now = options.now ?? Date.now;
   }
 
+  /**
+   * The key, or undefined when there is none. E-047: the MCPB spec does not say what an optional user_config field
+   * left empty becomes, so a value that is still a `${user_config.…}` placeholder counts as no key, like an empty one.
+   */
   private key(): string | undefined {
-    const key = (this.options.getKey ?? (() => process.env.OPENROUTER_API_KEY))();
-    return key && key.trim() ? key.trim() : undefined;
+    const key = (this.options.getKey ?? (() => process.env.OPENROUTER_API_KEY))()?.trim();
+    return key && !key.startsWith(UNFILLED_USER_CONFIG) ? key : undefined;
   }
 
   /** Removes the key from any text that might leave this module; cut to `limit` characters only afterwards. */

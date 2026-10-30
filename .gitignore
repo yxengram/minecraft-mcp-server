@@ -1,6 +1,9 @@
 # Dist folder
 dist/
 
+# npm run build:mcpb assembles and packs the MCPB extension here (F-058)
+build/
+
 # Node.js dependencies
 node_modules/
 
