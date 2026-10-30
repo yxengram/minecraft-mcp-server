@@ -44,7 +44,7 @@ The upstream project is a good, simple bridge: the LLM calls a tool, and the bot
 - **Chat triage:** the decision model sorts chat. Only messages meant for the bot wake the LLM, as `chat_request` events. Nobody can command the bot by chat unless the LLM allows it.
 
 ### 3. Tested in the game, not only on paper
-- 1523 unit tests.
+- 1531 unit tests.
 - A live test that exercises all 67 tools against a real server.
 - A scenario test that compares the bot with and without the Autopilot: zombie waves, being chased by zombies with bare hands, creepers, hunger, fire, drowning, diving on purpose, a lava shore, chat.
 - A 10-day survival test on Normal difficulty. The bot survived all ten nights without dying and built a 7×7 house with a door, eight glass windows, a bed, a chest, a crafting table, a furnace and torches.
@@ -101,8 +101,10 @@ The full design, the contract of every file, and the evidence behind each choice
 
 ## Getting started
 
+The server is the npm package `@yxengram/minecraft-mcp-autopilot`, and the steps below run it with `npx`, which comes with Node.js. To change the server or run the tests, [build it from source](#build-from-source) instead.
+
 ### Requirements
-- Node.js 22 or later, and Git
+- Node.js 22 or later
 - Minecraft Java Edition 26.1.2
 - An MCP client, for example [Claude Desktop](https://claude.ai/download)
 - Strongly recommended: an [OpenRouter](https://openrouter.ai) API key for the instinct and chat triage. Without one the instinct is offline: the bot does not react to dangers by itself (it does not dodge, flee or eat), and chat is sorted by rules
@@ -116,13 +118,16 @@ The full design, the contract of every file, and the evidence behind each choice
 
 The server checks the key with OpenRouter when it starts and each time the bot joins the game. The result is a line on stderr, an `instinct` event, and the `Instinct:` line of `get-policy` and `get-observation`; see [The instinct is offline](#the-instinct-is-offline).
 
-### 1. Build the server
+### 1. Download the server
+Run this once in a terminal before the MCP client starts the server:
+
 ```bash
-git clone https://github.com/yxengram/minecraft-mcp-server.git
-cd minecraft-mcp-server
-npm install
-npm run build
+npx -y @yxengram/minecraft-mcp-autopilot@3.0.0 --version
 ```
+
+npx downloads the package and its dependencies, runs the package's one command, `minecraft-mcp-autopilot`, and prints `3.0.0`. The first download is large (minecraft-data alone is about 26 MB compressed) and may take longer than the MCP client waits for a server to start, so do it here rather than in the client. Then [check the connection](#check-the-connection) once the world is open to LAN.
+
+The examples name the version, `@3.0.0`, instead of `latest`, so that npx does not fetch a new release each time the client starts the server. To move to another version, change it in your commands and in the client config.
 
 ### 2. Open a world to LAN
 Start a world and choose `ESC → Open to LAN`. Turn cheats on if you want to run the live tests.
@@ -132,10 +137,10 @@ The LAN World screen has a **Port Number** box that takes 1024–65535. Enter a 
 If you leave the box empty, Minecraft picks a different port each time and prints it in chat as `Local game hosted on port N`. Put that N in `--port` and restart the client completely: the server reads `--port` only when it starts.
 
 ### Check the connection
-Before you change the client's config, you can check in a terminal that the bot can join and that the key works. In the folder of step 1, with the world open to LAN:
+Before you change the client's config, you can check in a terminal that the bot can join and that the key works. With the world open to LAN:
 
 ```bash
-node dist/main.js --check --port <LAN port> --username ClaudeBot
+npx -y @yxengram/minecraft-mcp-autopilot@3.0.0 --check --port <LAN port> --username ClaudeBot
 ```
 
 Give it the same `--host`, `--port` and `--username` that you will put in step 3. To check the key too, set `OPENROUTER_API_KEY` in the same terminal first; the key is never printed. The bot joins the world once and leaves at once, so other players see it join and leave. It says nothing in chat, even with `--greeting`. With a key, the check asks OpenRouter about the key and the decision model, as the server does when it starts; it sends no decision. It writes no files.
@@ -165,18 +170,20 @@ For Claude Desktop, go to `Settings → Developer → Edit Config`, then add an 
 {
   "mcpServers": {
     "minecraft": {
-      "command": "node",
+      "command": "npx",
       "args": [
-        "/path/to/minecraft-mcp-server/dist/main.js",
+        "-y", "@yxengram/minecraft-mcp-autopilot@3.0.0",
         "--host", "localhost",
-        "--port", "25565",
+        "--port", "<LAN port>",
         "--username", "ClaudeBot"
       ],
-      "env": { "OPENROUTER_API_KEY": "sk-or-..." }
+      "env": { "OPENROUTER_API_KEY": "<your OpenRouter key>" }
     }
   }
 }
 ```
+
+Put the port of step 2 in place of `<LAN port>` and your key in place of `<your OpenRouter key>`. The client keeps the key in `claude_desktop_config.json` as plain text, like the rest of its config: do not share that file with the key in it. A credit limit on the key ([Get an OpenRouter key](#get-an-openrouter-key-in-2-minutes)) caps what it can spend.
 
 The example names the bot `ClaudeBot`; without `--username` it is `LLMBot`. The name appears in chat, and players use it to talk to the bot: chat triage goes by the bot's name to tell whether a message is meant for it (without a key, whispers and messages that name the bot are reported). Give the bot a name of its own; see [Accounts](#accounts).
 
@@ -200,7 +207,7 @@ Restart the client completely. The bot joins the world once the client starts th
 | `--help`, `-h` | — | Print the options and exit |
 | `--version` | — | Print the version and exit |
 
-The API key is read only from the `OPENROUTER_API_KEY` environment variable. Do not put it in any file inside the repository.
+The API key is read only from the `OPENROUTER_API_KEY` environment variable; no option takes it. If you build from source, do not put it in any file inside the repository.
 
 The server checks the options when it starts. An unknown option, a `--port` that is not a whole number from 1 to 65535, an empty `--host`, a `--username` that is empty, longer than 16 characters or contains spaces or control characters, a `--greeting` that is empty, longer than 256 characters, contains a line break or control character or starts with `/`, or a `--call-limit-seconds` that is not a whole number from 20 to 3600 makes it write one line to stderr and exit with 1 (2 with `--check`) before it connects. The MCP client then shows the server as failed, and the line is in the client's log for the server (see [Where to look](#where-to-look)). A name that passes but is not 3 to 16 letters, digits or underscores (for example `Bot-1`, `ab` or a name in Chinese) only gets a warning in that log, because some servers refuse such names.
 
@@ -229,7 +236,7 @@ First run the self-check of [Check the connection](#check-the-connection), with 
 ### Where to look
 - **The tool reply.** A tool call made while the bot is disconnected first tries to connect again. If that fails, the reply says why.
 - **`get-events`.** A kick after the bot has joined is a `kicked` event.
-- **The MCP client's log.** The server writes its log to stderr as `<time> [minecraft] [mcp-server] [<level>] <message>`, for example `Bot error [ECONNREFUSED]: …` or `Bot was kicked from server: …`. Claude Desktop keeps it in `~/Library/Logs/Claude/mcp-server-<key>.log` on macOS and in `%APPDATA%\Claude\logs\mcp-server-<key>.log` on Windows, where `<key>` is the server's key under `mcpServers` (`minecraft` in the example above). If an option is wrong, the server instead writes a single line without a time, `<command>: <error>; run with --help for the options`, and exits with 1 (2 with `--check`).
+- **The MCP client's log.** The server writes its log to stderr as `<time> [minecraft] [mcp-server] [<level>] <message>`, for example `Bot error [ECONNREFUSED]: …` or `Bot was kicked from server: …`. Claude Desktop keeps it in `~/Library/Logs/Claude/mcp-server-<key>.log` on macOS and in `%APPDATA%\Claude\logs\mcp-server-<key>.log` on Windows, where `<key>` is the server's key under `mcpServers` (`minecraft` in the example above). If an option is wrong, the server instead writes a single line without a time, `minecraft-mcp-autopilot: <error>; run with --help for the options`, and exits with 1 (2 with `--check`).
 
 ### The bot cannot connect
 The reply starts with `Cannot connect to Minecraft server at <host>:<port>:`, then says what went wrong and what to do, with the code or message it is based on in parentheses. Below, `<host>`, `<port>` and `<name>` stand for your `--host`, `--port` and `--username`.
@@ -458,10 +465,48 @@ The policy lives in memory only, and goes back to these defaults whenever the bo
 
 ---
 
+## Contributing
+How to fork the repository, where to branch from and where to send pull requests is in [CONTRIBUTING.md](CONTRIBUTING.md).
+
+### Build from source
+Building needs Git as well as Node.js 22 or later:
+
+```bash
+git clone https://github.com/yxengram/minecraft-mcp-server.git
+cd minecraft-mcp-server
+npm install
+npm run build
+```
+
+The build runs as `node dist/main.js` wherever [Getting started](#getting-started) runs `npx -y @yxengram/minecraft-mcp-autopilot@3.0.0`, with the same options. For example, in that folder:
+
+```bash
+node dist/main.js --check --port <LAN port> --username ClaudeBot
+```
+
+In the client config, `command` is `node` and the first item of `args` is the full path of `dist/main.js`:
+
+```json
+{
+  "mcpServers": {
+    "minecraft": {
+      "command": "node",
+      "args": [
+        "/path/to/minecraft-mcp-server/dist/main.js",
+        "--host", "localhost",
+        "--port", "25565",
+        "--username", "ClaudeBot"
+      ],
+      "env": { "OPENROUTER_API_KEY": "<your OpenRouter key>" }
+    }
+  }
+}
+```
+
 ## Testing
 
 ```bash
-npm test             # 1523 unit tests
+npm test             # 1531 unit tests
 npm run lint
 npm run test:live -- <LAN_PORT>                                 # read-only check against a world
 npm run test:live:world -- <LAN_PORT> --allow-world-changes      # every tool, in a throwaway world with cheats on

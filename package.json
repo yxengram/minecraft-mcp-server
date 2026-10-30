@@ -1,5 +1,5 @@
 {
-  "name": "minecraft-mcp-server",
+  "name": "@yxengram/minecraft-mcp-autopilot",
   "version": "3.0.0",
   "description": "MCP server that lets an LLM play Minecraft Java Edition through a Mineflayer bot, with background tasks and an instinct that reacts to danger in real time",
   "keywords": [
@@ -25,13 +25,16 @@
   "type": "module",
   "main": "dist/main.js",
   "bin": {
-    "minecraft-mcp-server": "dist/main.js"
+    "minecraft-mcp-autopilot": "dist/main.js"
   },
   "files": [
     "dist",
     "CHANGELOG.md",
     "npm-shrinkwrap.json"
   ],
+  "publishConfig": {
+    "access": "public"
+  },
   "ava": {
     "files": [
       "tests/**/*.test.ts"

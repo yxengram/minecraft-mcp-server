@@ -44,7 +44,7 @@
 - **聊天分拣：**决策模型对聊天分类，只有发给机器人的消息才会以 `chat_request` 事件唤醒 LLM。除非 LLM 允许，任何人都不能通过聊天指挥机器人。
 
 ### 3. 在游戏里实测，而不只是纸面
-- 1523 个单元测试。
+- 1531 个单元测试。
 - 实机测试：在真实服务器上逐一运行全部 67 个工具。
 - 情景测试：比较有无 Autopilot 时机器人的表现，包括僵尸潮、空手被僵尸追赶、苦力怕、饥饿、着火、溺水、有意潜水、岩浆岸边和聊天。
 - 普通难度下的 10 天生存测试：机器人度过了全部十个夜晚，没有死亡，并建起一座 7×7 的房子，带门、八扇玻璃窗、床、箱子、工作台、熔炉和火把。
@@ -101,8 +101,10 @@ LLM 每一轮“观察、思考、调用工具”都要几秒，而 Minecraft �
 
 ## 快速开始
 
+服务器是 npm 包 `@yxengram/minecraft-mcp-autopilot`，下面的步骤用 Node.js 自带的 `npx` 运行它。要修改服务器或运行测试，请改为[从源码构建](#从源码构建)。
+
 ### 环境要求
-- Node.js 22 或以上，以及 Git
+- Node.js 22 或以上
 - Minecraft Java 版 26.1.2
 - 一个 MCP 客户端，例如 [Claude Desktop](https://claude.ai/download)
 - 强烈建议：用于本能和聊天分拣的 [OpenRouter](https://openrouter.ai) API key。没有 key 时本能离线：机器人不会自己应对危险（不会躲避、逃跑或进食），聊天按规则分拣
@@ -116,13 +118,16 @@ LLM 每一轮“观察、思考、调用工具”都要几秒，而 Minecraft �
 
 服务器启动时和机器人每次进入游戏时，都会向 OpenRouter 核对 key。结果写成 stderr 的一行和一个 `instinct` 事件，也显示在 `get-policy` 和 `get-observation` 的 `Instinct:` 一行；见[本能离线](#本能离线)。
 
-### 1. 构建服务器
+### 1. 下载服务器
+在 MCP 客户端启动服务器之前，先在终端里运行一次：
+
 ```bash
-git clone https://github.com/yxengram/minecraft-mcp-server.git
-cd minecraft-mcp-server
-npm install
-npm run build
+npx -y @yxengram/minecraft-mcp-autopilot@3.0.0 --version
 ```
+
+npx 下载这个包和它的依赖，运行包里唯一的命令 `minecraft-mcp-autopilot`，打印 `3.0.0`。第一次下载的量很大（单是 minecraft-data 压缩后就约 26 MB），可能超过 MCP 客户端等待服务器启动的时间，所以先在这里下载，不要等客户端去下。世界对局域网开放后，再[检查连接](#检查连接)。
+
+示例里写的是固定的版本号 `@3.0.0`，而不是 `latest`，这样客户端每次启动服务器时 npx 不会去拉新版本。要换版本，就把命令和客户端配置里的版本号一起改掉。
 
 ### 2. 对局域网开放世界
 进入一个世界，选择 `ESC → 对局域网开放`（英文界面为 Open to LAN）。如果要运行实机测试，请开启作弊。
@@ -132,10 +137,10 @@ npm run build
 这一栏留空时，Minecraft 每次另选一个端口，并在聊天栏显示，英文界面是 `Local game hosted on port N`。把这个 N 写进 `--port`，然后完全重启客户端：服务器只在启动时读取 `--port`。
 
 ### 检查连接
-改客户端配置之前，可以先在终端里确认机器人能进入世界、key 可用。世界对局域网开放后，在第 1 步的文件夹里运行：
+改客户端配置之前，可以先在终端里确认机器人能进入世界、key 可用。世界对局域网开放后运行：
 
 ```bash
-node dist/main.js --check --port <局域网端口> --username ClaudeBot
+npx -y @yxengram/minecraft-mcp-autopilot@3.0.0 --check --port <局域网端口> --username ClaudeBot
 ```
 
 `--host`、`--port`、`--username` 用第 3 步里要写的同样的值。要一并核对 key，先在同一个终端里设好 `OPENROUTER_API_KEY`；key 不会被打印。机器人进入世界一次后马上离开，所以其他玩家会看到它加入和离开。即使给了 `--greeting`，它也不在聊天里说话。有 key 时，自检像服务器启动时那样向 OpenRouter 核对 key 和决策模型，不发决策请求。它不写任何文件。
@@ -165,18 +170,20 @@ Ready: use the same --host, --port and --username in your MCP client config
 {
   "mcpServers": {
     "minecraft": {
-      "command": "node",
+      "command": "npx",
       "args": [
-        "/path/to/minecraft-mcp-server/dist/main.js",
+        "-y", "@yxengram/minecraft-mcp-autopilot@3.0.0",
         "--host", "localhost",
-        "--port", "25565",
+        "--port", "<局域网端口>",
         "--username", "ClaudeBot"
       ],
-      "env": { "OPENROUTER_API_KEY": "sk-or-..." }
+      "env": { "OPENROUTER_API_KEY": "<your OpenRouter key>" }
     }
   }
 }
 ```
+
+把 `<局域网端口>` 换成第 2 步的端口，把 `<your OpenRouter key>` 换成你的 key。客户端把 key 和配置的其余部分一样，以明文保存在 `claude_desktop_config.json` 里：不要把带着 key 的这个文件发给别人。给 key 设置额度上限（见[2 分钟取得 OpenRouter key](#2-分钟取得-openrouter-key)），可以限制它最多能花多少。
 
 例子里机器人叫 `ClaudeBot`；不传 `--username` 时它叫 `LLMBot`。这个名字会出现在聊天里，玩家也用它和机器人说话：聊天分拣按机器人的名字判断一句话是不是对它说的（没有 key 时，报告私聊和提到机器人名字的消息）。请给机器人起一个它自己的名字，见[账号（Accounts）](#账号accounts)。
 
@@ -200,7 +207,7 @@ Ready: use the same --host, --port and --username in your MCP client config
 | `--help`、`-h` | — | 显示选项后退出 |
 | `--version` | — | 显示版本号后退出 |
 
-API key 只从环境变量 `OPENROUTER_API_KEY` 读取，不要把它写进仓库里的任何文件。
+API key 只从环境变量 `OPENROUTER_API_KEY` 读取，没有哪个选项接受它。从源码构建时，不要把它写进仓库里的任何文件。
 
 服务器启动时检查选项。未知的选项、不是 1～65535 之间整数的 `--port`、空的 `--host`，为空、超过 16 个字符、含空格或控制字符的 `--username`，为空、超过 256 个字符、含换行或控制字符、以 `/` 开头的 `--greeting`，或者不是 20～3600 之间整数的 `--call-limit-seconds`，都会让服务器在 stderr 写一行错误，并在连接之前以 1 退出（带 `--check` 时为 2）。这时 MCP 客户端显示这个服务器启动失败，这一行在客户端为它保存的日志里（见[去哪里看](#去哪里看)）。通过了检查、但不是 3～16 个字母、数字或下划线的名字（例如 `Bot-1`、`ab` 或中文名字）只在这份日志里得到一条警告，因为有些服务器会拒绝这样的名字。
 
@@ -229,7 +236,7 @@ API key 只从环境变量 `OPENROUTER_API_KEY` 读取，不要把它写进仓�
 ### 去哪里看
 - **工具回复。**机器人断开时调用任何工具，都会先重新连接；连不上时，回复会说明原因。
 - **`get-events`。**机器人进入游戏之后被踢出，会记为一个 `kicked` 事件。
-- **MCP 客户端的日志。**服务器把日志写到 stderr，格式是 `<时间> [minecraft] [mcp-server] [<级别>] <内容>`，例如 `Bot error [ECONNREFUSED]: …` 或 `Bot was kicked from server: …`。Claude Desktop 把它保存在 `~/Library/Logs/Claude/mcp-server-<key>.log`（macOS）和 `%APPDATA%\Claude\logs\mcp-server-<key>.log`（Windows），其中 `<key>` 是这个服务器在 `mcpServers` 下的键名（上面的例子里是 `minecraft`）。选项有误时，服务器改为只写一行不带时间的 `<命令名>: <错误>; run with --help for the options`，然后以 1 退出（带 `--check` 时为 2）。
+- **MCP 客户端的日志。**服务器把日志写到 stderr，格式是 `<时间> [minecraft] [mcp-server] [<级别>] <内容>`，例如 `Bot error [ECONNREFUSED]: …` 或 `Bot was kicked from server: …`。Claude Desktop 把它保存在 `~/Library/Logs/Claude/mcp-server-<key>.log`（macOS）和 `%APPDATA%\Claude\logs\mcp-server-<key>.log`（Windows），其中 `<key>` 是这个服务器在 `mcpServers` 下的键名（上面的例子里是 `minecraft`）。选项有误时，服务器改为只写一行不带时间的 `minecraft-mcp-autopilot: <错误>; run with --help for the options`，然后以 1 退出（带 `--check` 时为 2）。
 
 ### 机器人连不上
 回复以 `Cannot connect to Minecraft server at <host>:<port>:` 开头，接着说明出了什么问题、该怎么做，括号里是依据的错误代码或消息。回复是英文的，下表原样引用；`<host>`、`<port>`、`<name>` 分别代表你的 `--host`、`--port`、`--username`。
@@ -458,10 +465,48 @@ API key 只从环境变量 `OPENROUTER_API_KEY` 读取，不要把它写进仓�
 
 ---
 
+## 参与开发（Contributing）
+怎样 fork 本仓库、从哪个分支开始、把 pull request 发到哪里，见 [CONTRIBUTING.md](CONTRIBUTING.md)（英文）。
+
+### 从源码构建
+构建除了 Node.js 22 或以上，还需要 Git：
+
+```bash
+git clone https://github.com/yxengram/minecraft-mcp-server.git
+cd minecraft-mcp-server
+npm install
+npm run build
+```
+
+[快速开始](#快速开始)里运行 `npx -y @yxengram/minecraft-mcp-autopilot@3.0.0` 的地方，构建出的服务器都改用 `node dist/main.js` 运行，选项相同。例如在这个文件夹里：
+
+```bash
+node dist/main.js --check --port <局域网端口> --username ClaudeBot
+```
+
+客户端配置里，`command` 为 `node`，`args` 的第一项是 `dist/main.js` 的完整路径：
+
+```json
+{
+  "mcpServers": {
+    "minecraft": {
+      "command": "node",
+      "args": [
+        "/path/to/minecraft-mcp-server/dist/main.js",
+        "--host", "localhost",
+        "--port", "25565",
+        "--username", "ClaudeBot"
+      ],
+      "env": { "OPENROUTER_API_KEY": "<your OpenRouter key>" }
+    }
+  }
+}
+```
+
 ## 测试
 
 ```bash
-npm test             # 1523 个单元测试
+npm test             # 1531 个单元测试
 npm run lint
 npm run test:live -- <局域网端口>                                 # 对世界做只读检查
 npm run test:live:world -- <局域网端口> --allow-world-changes      # 在开启作弊的一次性世界中运行每个工具

@@ -20,13 +20,16 @@ interface PackageJson {
   author?: string | { name?: string };
   bin?: string | Record<string, string>;
   files?: string[];
+  publishConfig?: { access?: string };
   scripts?: Record<string, string>;
   engines?: Record<string, string>;
   dependencies?: Record<string, string>;
 }
 
 interface PackageLock {
-  packages: Record<string, { version?: string } | undefined>;
+  name?: string;
+  version?: string;
+  packages: Record<string, { name?: string; version?: string; bin?: Record<string, string> } | undefined>;
 }
 
 /** Read with node:fs (tsconfig does not enable JSON imports), so each test sees the file as it is on disk. */
@@ -151,5 +154,87 @@ for (const { file, heading, growth } of README_COUNTS) {
     const grown = text.match(growth)?.[1];
     t.truthy(grown, `${file} has no line ${growth}`);
     t.is(Number(grown), TOOL_NAMES.length, `the "23 → N" line in ${file}`);
+  });
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// E-046 (Q16): the npm package is @yxengram/minecraft-mcp-autopilot and its one command minecraft-mcp-autopilot. The
+// upstream package and command are both minecraft-mcp-server (the name on npm belongs to upstream), so neither may be
+// that, or a global install of one would overwrite the other. A scoped package is private by default, hence
+// publishConfig. The READMEs pin the version in every npx example and in the prose about it (Q17), so npx does not
+// fetch a new release on each start, and they never show a value shaped like a key.
+// ---------------------------------------------------------------------------------------------------------------
+
+const APPROVED_PACKAGE = '@yxengram/minecraft-mcp-autopilot';
+const APPROVED_COMMAND = 'minecraft-mcp-autopilot';
+const UPSTREAM_NAME = 'minecraft-mcp-server';
+
+test('E-046: the package name has a scope and is the approved one, not upstream\'s', (t) => {
+  const { name = '' } = readJson<PackageJson>('package.json');
+  t.regex(name, /^@[^/@]+\/[^/@]+$/, `package.json name "${name}" has no scope`);
+  t.not(name, UPSTREAM_NAME);
+  t.not(COMMAND_NAME, UPSTREAM_NAME, 'the command would overwrite upstream\'s on a global install');
+  t.is(name, APPROVED_PACKAGE);
+  t.is(COMMAND_NAME, APPROVED_COMMAND);
+});
+
+test('E-046: bin has exactly one command, minecraft-mcp-autopilot, which runs dist/main.js', (t) => {
+  const { bin } = readJson<PackageJson>('package.json');
+  t.is(typeof bin, 'object', 'bin must name the command, not only give its file');
+  const entries = Object.entries(typeof bin === 'object' ? bin : {});
+  t.is(entries.length, 1, 'npx -y <package> runs the bin only when there is exactly one');
+  t.deepEqual(entries, [[APPROVED_COMMAND, 'dist/main.js']]);
+});
+
+test('E-046: publishConfig.access is public', (t) => {
+  t.is(readJson<PackageJson>('package.json').publishConfig?.access, 'public', 'a scoped package is published private by default');
+});
+
+// npm install writes the root of the lockfile from package.json; the rename edits it the same way by hand.
+test('E-046: the root of package-lock.json follows the name, version and bin of package.json', (t) => {
+  const pkg = readJson<PackageJson>('package.json');
+  const lock = readJson<PackageLock>('package-lock.json');
+  const root = lock.packages[''];
+  t.is(lock.name, pkg.name);
+  t.is(lock.version, pkg.version);
+  t.is(root?.name, pkg.name);
+  t.is(root?.version, pkg.version);
+  t.deepEqual(root?.bin, pkg.bin);
+});
+
+// Every npx example counts, whatever it names, so a stale name or version cannot pass by not matching: npx in fenced
+// blocks and inline code, with or without -y or --yes (prose such as "npx downloads the package" is not code), and the
+// args of the client config ("-y", "<spec>"). Each code segment is searched on its own, so a bare `npx` span takes
+// nothing from the text after it.
+const CODE = /```[^\n]*\n([\s\S]*?)```|`([^`\n]+)`/g;
+const NPX_COMMAND = /\bnpx(?:\s+(?:-y|--yes))?\s+([^\s`"-][^\s`"]*)/g;
+const NPX_ARGS = /"-y",\s*"([^"]+)"/g;
+// The prose names the pinned version too ("prints `3.0.0`", "`@3.0.0`"); a code span that is only a version must be it.
+const VERSION_LITERAL = /`@?(\d+\.\d+\.\d+)`/g;
+
+for (const file of ['README.md', 'README.zh-CN.md']) {
+  test(`E-046: every npx example in ${file} names the package and version of package.json`, (t) => {
+    const { name = '', version = '' } = readJson<PackageJson>('package.json');
+    const text = fs.readFileSync(new URL(`../${file}`, import.meta.url), 'utf8');
+    const spec = `${name}@${version}`;
+    const commands = [...text.matchAll(CODE)]
+      .map(match => match[1] ?? match[2])
+      .flatMap(code => [...code.matchAll(NPX_COMMAND)].map(match => match[1]));
+    const args = [...text.matchAll(NPX_ARGS)].map(match => match[1]);
+    t.true(commands.length > 0, `${file} has no npx command`);
+    t.true(args.length > 0, `${file} has no client config with "-y", "<package>@<version>" in args`);
+    t.deepEqual(commands.filter(found => found !== spec), [], `npx commands in ${file} that are not ${spec}`);
+    t.deepEqual(args.filter(found => found !== spec), [], `npx args in ${file} that are not ${spec}`);
+    const literals = [...text.matchAll(VERSION_LITERAL)].map(match => match[1]);
+    t.deepEqual(literals.filter(found => found !== version), [], `version literals in ${file} that are not ${version}`);
+    // The first run downloads the package with --version; --check (E-042) then tries the connection.
+    t.true(text.includes(`npx -y ${spec} --version`), `${file} has no npx -y ${spec} --version`);
+    t.true(text.includes(`npx -y ${spec} --check`), `${file} has no npx -y ${spec} --check`);
+    t.regex(text, /"command": "npx"/, `${file} has no client config whose command is npx`);
+  });
+
+  test(`E-046: ${file} has no value shaped like an OpenRouter key`, (t) => {
+    const text = fs.readFileSync(new URL(`../${file}`, import.meta.url), 'utf8');
+    t.false(text.includes('sk-or-'), `${file} contains "sk-or-"; write <your OpenRouter key> instead`);
   });
 }
