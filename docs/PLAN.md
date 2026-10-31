@@ -1852,3 +1852,42 @@ M19 的 26 步都已在本地提交（最后一个是 af85ff4），没有推送�
   - `npm test`（不带 key）1556 个通过；`npm run lint`、`tsc --noEmit`、`git diff --check` 无输出。
   - README 的单元测试数改为 1556。
   - 实机不另测（契约如此：测试世界里没有现成的 parched）。
+
+### 2026-11-01 M19 附加 E-052：命令行拒绝重复的选项、点号写法与取值选项的 --no- 写法
+
+- **实现**（`src/config.ts`）：
+  - parseConfig 在交给 yargs 之前先逐个看原始参数（checkOptionNames），只看 “--” 之前的部分。命令行里有 --help、-h 或 --version 时不检查，交给 yargs 照旧打印并以 0 退出（契约：这两项的输出与退出码不变）。
+    - **点号**：选项名（“=” 之前）含点号时报 “Invalid --<第一个点之前>: dotted option names are not supported”；这一段中的控制字符写成 \uXXXX。
+    - **重复**：选项名去掉否定前缀 “no-” 后，用 yargs 自己的 camelCase（yargs/helpers 导出的 Parser.camelCase）换成键。同一个已声明选项的键出现第二次时报 “Repeated option --<横线写法>: give each option once”。
+    - **退出码**：错误以 ConfigError 抛出，带 --check 时为 2，否则为 1。
+  - 为什么在 yargs 之前看原始参数：2026-11-01 实测，yargs 对重复的开关（--check --check、--allow-commands --no-allow-commands）不给数组，只取最后一个值。
+  - checkArguments 中，waypointFile、decisionModel 为 false（--no- 写法）时报 “Invalid --<选项>: empty”；空字符串照旧处理。
+  - --call-limit-seconds 的范围检查改为看 camelCase 键 callLimitSeconds。
+  - 几处说重复的选项是数组的注释改为指向 E-052。
+- **审查**：主会话实现后，请一个独立的审查代理（只读）对照契约看改动并在 dist 上试探，报告四条：
+  1. **高**：yargs 把同一 camelCase 键的各种写法都当作同一个选项（全大写、用 _ 代替 -、名字里的双横线、混合大小写）。最初的实现只把大写字母换成 “-小写”，所以 `--waypoint-file a --waypoint-File b`、`--no-decision-Model`、`--ALLOW-COMMANDS --allow-commands` 都能绕过。原有的问题也是这个原因：`--call-limit_seconds 5`、`--CALL-LIMIT-SECONDS 99999` 绕过 E-038 的 20～3600 检查。原因是这些写法只设 camelCase 键（程序读的就是它），横线键保持默认值，而检查看的是横线键。
+     已改：键改用 Parser.camelCase 生成；checkArguments 改看 camelCase 键。主会话在 dist 上复现了这几种写法，改后都被拒绝。
+  2. **中**：点号错误中点前的部分没有转义，`$'--ho\nst.x' y` 使 stderr 有两行。已改为转义，改后 1 行。
+  3. **低**：--help、--version 与新的错误同时出现时，原来以 1 退出，与契约不符。已改为不检查；主会话在 dist 上核对：`--help --host a --host b` 以 0 退出，`--version --host.a b` 打印 3.0.0 并以 0 退出。
+  4. **低，原有**：`--check=true` 不被认作 --check，退出码仍为 1（E-042 用的是 argv.includes('--check')）。没有改，记为留待。
+  - 审查没有发现回归：README 的例子、mcpb/manifest.json、scripts/test-smoke.mjs 与 scripts/lib/live-arena.mjs 的参数都只给一次。
+- **实施时的补充**：
+  - 重复的 --greeting、--call-limit-seconds 原来给各自的错误，现在先给 “Repeated option …”（契约（a）：重复的检查先于其他检查）。tests/config.test.ts 中这两处原有断言随之改为新文字，其余原有用例不改。
+  - E-038 范围检查的绕过（上面第 1 条）一并修好，用的是原有的错误文字。
+- **文档**：README 中英文与 CHANGELOG 的 Breaking 一条，在启动时检查的选项里加上这三种写法；README 的单元测试数改为 1587。
+- **测试**：tests/config.test.ts 新增 31 个用例。
+  - 七种重复（含开关、--no-x、camelCase 与 “=” 写法），以及重复先于其他错误；
+  - 四种点号写法；点号后的文字（例如 sk-or-…）不出现在错误里；点号前的控制字符被转义；值里的点号照常接受；
+  - 两个 --no- 选项；开关的 --no- 与每个选项各给一次都照常接受；
+  - 带与不带 --check 的退出码；“--” 之后的参数不按选项检查；
+  - 审查后补的 11 种其他写法与 camelCase 写法给一次时照常接受。
+- **检查**：
+  - 变异检查：去掉检查的调用，最初的 15 个用例失败；把键换回简单的大小写转换并改回看横线键，11 个其他写法的用例中 10 个失败。恢复后全部通过。
+  - `OPENROUTER_API_KEY=<伪造的值> npm test` 在工作区通过，共 1591 个。工作区另含尚未提交的 E-053 的 3 个与 E-055 的 1 个用例，只算 E-052 时为 1587。
+  - `npm run lint`、`tsc --noEmit`、`git diff --check` 无输出。
+  - `npm run build` 后在 dist 上运行，stderr 都只有一行：
+    - `--host a --host b` 以 1 退出，“Repeated option --host: give each option once”；
+    - `--host.sk-or-v1-x y` 以 1 退出，“Invalid --host: dotted option names are not supported”；
+    - `--no-decision-model --check` 以 2 退出，“Invalid --decision-model: empty”；
+    - `--check --check` 以 2 退出。
+  - `npm run test:smoke` 17 项 PASS。

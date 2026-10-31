@@ -1,5 +1,5 @@
 import yargs from 'yargs';
-import { hideBin } from 'yargs/helpers';
+import { Parser, hideBin } from 'yargs/helpers';
 import { COMMAND_NAME, PACKAGE_VERSION } from './package-info.js';
 
 export interface ServerConfig {
@@ -54,7 +54,7 @@ const ACCOUNT_NAME = /^[A-Za-z0-9_]{3,16}$/;
 const BARE_VALUE = 'a value without an option';
 
 // The name is quoted as given. Control characters (tab, line breaks, DEL, C1) and the line and paragraph separators
-// are written as \uXXXX, so the error stays one line. A repeated --username reaches here as an array, hence String().
+// are written as \uXXXX, so the error stays one line.
 const UNPRINTABLE = /[\p{Cc}\u2028\u2029]/gu;
 
 // bot.chat sends each line of a message separately, and a line that starts with / as a command; it also cuts a line
@@ -73,12 +73,51 @@ const DEFAULT_CALL_LIMIT_SECONDS = 50;
 const CHECK_FLAG = '--check';
 const CHECK_EXIT_CODE = 2;
 
+// The options parseConfig declares, by yargs's camelCase key (what the program reads) and their dashed names (E-052).
+const OPTION_KEYS = new Map(
+  ['host', 'port', 'username', 'waypoint-file', 'decision-model', 'allow-commands', 'greeting', 'call-limit-seconds', 'check']
+    .map((name) => [Parser.camelCase(name), name])
+);
+const HELP_OR_VERSION = new Set(['--help', '-h', '--version']);
+
+/**
+ * E-052: what yargs would otherwise take without a word. A dotted name (--host.a b) makes the option an object, and a
+ * repeated option becomes an array or its last value (switches, and --no-x after --x). yargs reads every spelling
+ * with the same camelCase key as one option (--waypointFile, --WAYPOINT-FILE, --waypoint_file), so names are compared
+ * by that key, made by yargs's own function. Only the part of a dotted name before its first dot is written, with
+ * control characters escaped: the rest may be a key pasted in the wrong place (G6 I4). After "--" all are values.
+ * --help and --version are left to yargs, which prints them whatever else is on the command line.
+ */
+function checkOptionNames(argv: string[]): void {
+  const end = argv.indexOf('--');
+  const options = end >= 0 ? argv.slice(0, end) : argv;
+  if (options.some((arg) => HELP_OR_VERSION.has(arg))) return;
+  const seen = new Set<string>();
+  for (const arg of options) {
+    if (!arg.startsWith('--')) continue;
+    const name = arg.slice(2).split('=')[0];
+    const dot = name.indexOf('.');
+    if (dot >= 0) throw new Error(`Invalid --${printable(name.slice(0, dot))}: dotted option names are not supported`);
+    // yargs reads --no-<name> as <name> set to false.
+    const key = Parser.camelCase(name.startsWith('no-') ? name.slice(3) : name);
+    const option = OPTION_KEYS.get(key);
+    if (option === undefined) continue;
+    if (seen.has(key)) throw new Error(`Repeated option --${option}: give each option once`);
+    seen.add(key);
+  }
+}
+
+function printable(text: string): string {
+  return text.replace(UNPRINTABLE, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`);
+}
+
 function quoted(value: unknown): string {
-  return `"${String(value).replace(UNPRINTABLE, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`)}"`;
+  return `"${printable(String(value))}"`;
 }
 
 function checkArguments(argv: {
-  _: (string | number)[]; host: unknown; port: number; username: unknown; greeting?: unknown; 'call-limit-seconds': unknown;
+  _: (string | number)[]; host: unknown; port: number; username: unknown; waypointFile?: unknown; decisionModel?: unknown;
+  greeting?: unknown; callLimitSeconds?: unknown;
 }): true {
   // .strict() lets positional arguments after "--" through; they are rejected with yargs's wording, without the values.
   if (argv._.length > 0) {
@@ -94,16 +133,19 @@ function checkArguments(argv: {
   if (argv.username === '' || argv.username === false) {
     throw new Error('Invalid --username: empty');
   }
-  // The length in UTF-16 units, which is how the server counts the 16 characters of a name. Only a string is checked:
-  // a repeated --username is an array, which is passed on as yargs gives it.
+  // --no-waypoint-file and --no-decision-model set false too (E-052); an empty string keeps its old meaning. The
+  // camelCase keys are checked because they are what the program reads, under every spelling yargs accepts.
+  if (argv.waypointFile === false) throw new Error('Invalid --waypoint-file: empty');
+  if (argv.decisionModel === false) throw new Error('Invalid --decision-model: empty');
+  // The length in UTF-16 units, which is how the server counts the 16 characters of a name.
   const name = argv.username;
   if (typeof name === 'string' && (name.length > MAX_USERNAME_LENGTH || /[\s\p{Cc}]/u.test(name))) {
     throw new Error(
       `Invalid --username ${quoted(name)}: use at most ${MAX_USERNAME_LENGTH} characters, with no spaces or control characters`
     );
   }
-  // The error does not repeat the text. --no-greeting (false) is as empty as ''; a repeated --greeting is an array,
-  // which bot.chat would throw on in the spawn handler, before the Autopilot binds.
+  // The error does not repeat the text. --no-greeting (false) is as empty as ''. (A repeated --greeting, an array that
+  // bot.chat would throw on, is refused before this, E-052.)
   const greeting = argv.greeting;
   if (
     greeting !== undefined &&
@@ -112,9 +154,8 @@ function checkArguments(argv: {
   ) {
     throw new Error(GREETING_ERROR);
   }
-  // A repeated option is an array and --no-call-limit-seconds is false; neither is a whole number. The error does not
-  // repeat the value.
-  const limit = argv['call-limit-seconds'];
+  // --no-call-limit-seconds is false, not a whole number. The error does not repeat the value.
+  const limit = argv.callLimitSeconds;
   if (typeof limit !== 'number' || !Number.isInteger(limit) || limit < MIN_CALL_LIMIT_SECONDS || limit > MAX_CALL_LIMIT_SECONDS) {
     throw new Error(`Invalid --call-limit-seconds: expected a whole number from ${MIN_CALL_LIMIT_SECONDS} to ${MAX_CALL_LIMIT_SECONDS}`);
   }
@@ -126,6 +167,11 @@ function checkArguments(argv: {
  * setupStdioFiltering); anything else that is wrong throws a ConfigError.
  */
 export function parseConfig(argv: string[] = hideBin(process.argv)): ServerConfig {
+  try {
+    checkOptionNames(argv);
+  } catch (error) {
+    throw new ConfigError((error as Error).message, argv.includes(CHECK_FLAG) ? CHECK_EXIT_CODE : 1);
+  }
   return yargs(argv)
     .scriptName(COMMAND_NAME)
     .usage('Usage: $0 [options]')

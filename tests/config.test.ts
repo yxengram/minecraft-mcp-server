@@ -303,11 +303,11 @@ for (const [name, greeting] of [
   });
 }
 
-// --no-greeting sets false, as empty as '' (as --no-host is for E-023); a repeated --greeting is an array, which is
-// not one line either.
-test('E-034: --no-greeting and a repeated --greeting throw the greeting error', (t) => {
+// --no-greeting sets false, as empty as '' (as --no-host is for E-023). A repeated --greeting is refused as a repeated
+// option, before the greeting rule (E-052).
+test('E-034: --no-greeting throws the greeting error; a repeated --greeting is refused', (t) => {
   t.is(configError(t, ['--no-greeting'])?.message, GREETING_ERROR);
-  t.is(configError(t, ['--greeting', 'hi', '--greeting', '/op x'])?.message, GREETING_ERROR);
+  t.is(configError(t, ['--greeting', 'hi', '--greeting', '/op x'])?.message, 'Repeated option --greeting: give each option once');
 });
 
 // The error line goes to the client's log; it names the rule, not the text (G6 I4: a pasted key stays out of it).
@@ -349,10 +349,11 @@ for (const value of ['19', '3601', '0', '-5', '1.5', 'abc', '']) {
   });
 }
 
-// --no-call-limit-seconds sets false and a repeated option is an array; neither is a whole number.
-test('E-038: --no-call-limit-seconds and a repeated --call-limit-seconds throw the same error', (t) => {
+// --no-call-limit-seconds sets false, which is not a whole number. A repeated option is refused first (E-052).
+test('E-038: --no-call-limit-seconds throws the same error; a repeated --call-limit-seconds is refused', (t) => {
   t.is(configError(t, ['--no-call-limit-seconds'])?.message, CALL_LIMIT_ERROR);
-  t.is(configError(t, ['--call-limit-seconds', '60', '--call-limit-seconds', '90'])?.message, CALL_LIMIT_ERROR);
+  t.is(configError(t, ['--call-limit-seconds', '60', '--call-limit-seconds', '90'])?.message,
+    'Repeated option --call-limit-seconds: give each option once');
 });
 
 test('E-038: a bad --call-limit-seconds is a ConfigError that prints nothing, does not exit and does not repeat the value', (t) => {
@@ -424,4 +425,110 @@ test('E-042: a ConfigError with --check is thrown without printing anything or e
   } finally {
     sandbox.restore();
   }
+});
+
+// ---------------------------------------------------------------------------------------------------------------
+// E-052: a repeated option, a dotted option name and --no- on an option that takes a value are refused, as E-023's
+// errors are (one line, exit 1, or 2 with --check), and no value is written (G6 I4).
+// ---------------------------------------------------------------------------------------------------------------
+
+for (const [argv, option] of [
+  [['--host', 'a', '--host', 'b'], 'host'],
+  [['--port', '1', '--port', '2'], 'port'],
+  [['--username', 'A', '--username', 'B'], 'username'],
+  [['--check', '--check'], 'check'],
+  [['--allow-commands', '--no-allow-commands'], 'allow-commands'],
+  [['--waypointFile', 'a.json', '--waypoint-file', 'b.json'], 'waypoint-file'],
+  [['--decision-model=a', '--decision-model', 'b'], 'decision-model']
+] as const) {
+  test(`E-052: ${JSON.stringify(argv)} is a repeated option`, (t) => {
+    t.is(configError(t, [...argv])?.message, `Repeated option --${option}: give each option once`);
+  });
+}
+
+test('E-052: the repeated option is found before the other checks', (t) => {
+  t.is(configError(t, ['--port', '0', '--port', '70000'])?.message, 'Repeated option --port: give each option once');
+  t.is(configError(t, ['--host', 'a', '--host', 'b', '--hots', 'x'])?.message, 'Repeated option --host: give each option once');
+});
+
+for (const [argv, option] of [
+  [['--host.a', 'b'], 'host'],
+  [['--host.a=b'], 'host'],
+  [['--foo.bar'], 'foo'],
+  [['--port', '1', '--username.first', 'A'], 'username']
+] as const) {
+  test(`E-052: ${JSON.stringify(argv)} is a dotted option name`, (t) => {
+    t.is(configError(t, [...argv])?.message, `Invalid --${option}: dotted option names are not supported`);
+  });
+}
+
+test('E-052: the dotted error writes nothing after the first dot, where a pasted key could be', (t) => {
+  const message = configError(t, ['--host.sk-or-v1-abc.def', 'x'])?.message ?? '';
+  t.is(message, 'Invalid --host: dotted option names are not supported');
+  t.false(message.includes('sk-or'));
+});
+
+test('E-052: dots in values are values', (t) => {
+  t.is(parseConfig(['--host=a.b']).host, 'a.b');
+  t.is(parseConfig(['--host', '192.168.1.5']).host, '192.168.1.5');
+  t.is(parseConfig(['--waypoint-file', './my.waypoints.json']).waypointFile, './my.waypoints.json');
+});
+
+test('E-052: --no-waypoint-file and --no-decision-model are empty', (t) => {
+  t.is(configError(t, ['--no-waypoint-file'])?.message, 'Invalid --waypoint-file: empty');
+  t.is(configError(t, ['--no-decision-model'])?.message, 'Invalid --decision-model: empty');
+});
+
+test('E-052: --no- on a switch is still its off value, and a single use of each option is accepted', (t) => {
+  t.is(parseConfig(['--no-allow-commands']).allowCommands, false);
+  t.is(parseConfig(['--no-check']).check, false);
+  const config = parseConfig(['--host', 'h', '--port', '2', '--username', 'Bot', '--waypoint-file', 'w.json',
+    '--decision-model', 'm', '--allow-commands', '--greeting', 'hello', '--call-limit-seconds', '60']);
+  t.deepEqual([config.host, config.port, config.username, config.waypointFile, config.decisionModel, config.allowCommands,
+    config.greeting, config.callLimitSeconds], ['h', 2, 'Bot', 'w.json', 'm', true, 'hello', 60]);
+});
+
+test('E-052: with --check the new errors exit with 2, without it with 1', (t) => {
+  for (const argv of [['--host', 'a', '--host', 'b'], ['--host.a', 'b'], ['--no-waypoint-file']]) {
+    t.is(configError(t, ['--check', ...argv])?.exitCode, 2, JSON.stringify(argv));
+    t.is(configError(t, argv)?.exitCode, 1, JSON.stringify(argv));
+  }
+  t.is(configError(t, ['--check', '--check'])?.exitCode, 2);
+});
+
+test('E-052: arguments after "--" are values, not options', (t) => {
+  const message = configError(t, ['--', '--host.a', '--host'])?.message ?? '';
+  t.false(message.includes('dotted'), message);
+  t.false(message.includes('Repeated'), message);
+});
+
+// yargs reads every spelling with the same camelCase key as one option (all capitals, _ for -, a doubled -, camelCase),
+// and the program reads that key, so the rules hold for all of them (E-052 review, 2026-11-01).
+for (const [argv, message] of [
+  [['--waypoint-file', 'a', '--waypoint-File', 'b'], 'Repeated option --waypoint-file: give each option once'],
+  [['--waypoint-file', 'a', '--WAYPOINT-FILE', 'b'], 'Repeated option --waypoint-file: give each option once'],
+  [['--decision-model', 'a', '--decision_model', 'b'], 'Repeated option --decision-model: give each option once'],
+  [['--ALLOW-COMMANDS', '--allow-commands'], 'Repeated option --allow-commands: give each option once'],
+  [['--no-allow-commands', '--allow--commands'], 'Repeated option --allow-commands: give each option once'],
+  [['--no-waypoint-File'], 'Invalid --waypoint-file: empty'],
+  [['--no-decision-Model'], 'Invalid --decision-model: empty'],
+  [['--call-limit_seconds', '5'], CALL_LIMIT_ERROR],
+  [['--CALL-LIMIT-SECONDS', '99999'], CALL_LIMIT_ERROR],
+  [['--call-limit-Seconds', 'abc'], CALL_LIMIT_ERROR],
+  [['--no-call-limit_seconds'], CALL_LIMIT_ERROR]
+] as const) {
+  test(`E-052: ${JSON.stringify(argv)} is refused like the usual spelling`, (t) => {
+    t.is(configError(t, [...argv])?.message, message);
+  });
+}
+
+test('E-052: a camelCase spelling given once still works', (t) => {
+  t.is(parseConfig(['--waypointFile', 'w.json']).waypointFile, 'w.json');
+  t.is(parseConfig(['--callLimitSeconds', '60']).callLimitSeconds, 60);
+});
+
+test('E-052: control characters in the part before the dot are escaped, so the error stays one line', (t) => {
+  const message = configError(t, ['--ho\nst.sk-or-v1-abc', 'y'])?.message ?? '';
+  t.is(message, 'Invalid --ho\\u000ast: dotted option names are not supported');
+  t.false(message.includes('\n'));
 });
