@@ -1840,3 +1840,15 @@ M19 的 26 步都已在本地提交（最后一个是 af85ff4），没有推送�
   - 变异检查：把 addResultSuffix 的调用换成直接停止，新增的两个用例失败，恢复后通过。
   - `npm test`（不带 key）1554 个通过；`npm run lint`、`tsc --noEmit`、`git diff --check` 无输出。
   - 实机放在 E-056 之后一起跑，见那里的记录。
+
+### 2026-11-01 M19 附加 E-051：parched 算作敌对生物，敌对生物表与 minecraft-data 核对
+
+- **实现**：`src/autopilot/threats.ts` 的 HOSTILE_MOBS 按字母顺序加入 'parched'；注释写明每个在 minecraft-data 中为 hostile 的类型都在 HOSTILE_MOBS 或 NEUTRAL_MOBS 中，由测试核对。
+- **测试**：`tests/threats.test.ts` 新增 2 个用例。
+  - 用 SUPPORTED_MINECRAFT_VERSION 的数据，parched 的 mobHostility 为 hostile，checkTarget 合法，assessThreats 把它列为敌对生物。
+  - minecraft-data 中这一版 type 为 hostile 的实体名都在两张表之一，失败时列出漏掉的名字。
+- **检查**：
+  - 变异检查：从表中删去 parched，两个用例都失败，信息为 “hostile in minecraft-data 26.1 but in neither list: parched”；恢复后通过。
+  - `npm test`（不带 key）1556 个通过；`npm run lint`、`tsc --noEmit`、`git diff --check` 无输出。
+  - README 的单元测试数改为 1556。
+  - 实机不另测（契约如此：测试世界里没有现成的 parched）。

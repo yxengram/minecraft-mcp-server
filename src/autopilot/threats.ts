@@ -22,11 +22,12 @@ export interface TargetRules extends Partial<CombatRules> {
 export type TargetCheck = { legal: true } | { legal: false; reason: string };
 
 // Decided by entity name rather than minecraft-data's category, which calls hoglins animals and endermen hostile.
+// Every type minecraft-data calls hostile is in this list or in NEUTRAL_MOBS (E-051; tests/threats.test.ts checks).
 export const HOSTILE_MOBS = new Set([
   'blaze', 'bogged', 'breeze', 'cave_spider', 'creaking', 'creeper', 'drowned', 'elder_guardian', 'ender_dragon',
-  'endermite', 'evoker', 'ghast', 'giant', 'guardian', 'hoglin', 'husk', 'illusioner', 'magma_cube', 'phantom',
-  'piglin_brute', 'pillager', 'ravager', 'shulker', 'silverfish', 'skeleton', 'slime', 'spider', 'stray', 'vex',
-  'vindicator', 'warden', 'witch', 'wither', 'wither_skeleton', 'zoglin', 'zombie', 'zombie_villager'
+  'endermite', 'evoker', 'ghast', 'giant', 'guardian', 'hoglin', 'husk', 'illusioner', 'magma_cube', 'parched',
+  'phantom', 'piglin_brute', 'pillager', 'ravager', 'shulker', 'silverfish', 'skeleton', 'slime', 'spider', 'stray',
+  'vex', 'vindicator', 'warden', 'witch', 'wither', 'wither_skeleton', 'zoglin', 'zombie', 'zombie_villager'
 ]);
 
 // Only dangerous when provoked, and hitting one can turn a whole group against the bot (zombified piglins).

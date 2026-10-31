@@ -3,7 +3,8 @@
 import test from 'ava';
 import { Vec3 } from 'vec3';
 import minecraftData from 'minecraft-data';
-import { assessThreats, checkTarget, legalHostilesNear } from '../src/autopilot/threats.js';
+import { HOSTILE_MOBS, NEUTRAL_MOBS, assessThreats, checkTarget, legalHostilesNear, mobHostility } from '../src/autopilot/threats.js';
+import { SUPPORTED_MINECRAFT_VERSION } from '../src/bot-connection.js';
 
 const registry = minecraftData('1.21.8');
 const HOSTILE = new Set(['zombie', 'skeleton', 'spider', 'creeper']);
@@ -523,4 +524,27 @@ test('a cat with an owner uuid is illegal even when cats are named', (t) => {
   // Control: a stray cat (no owner, no tamed bit) is legal when named.
   const stray = mob('cat', ...at(2, 0), { metadata: meta('cat', { flags: 0 }) });
   t.true(checkTarget(bot, stray as never, { allowTypes: ['cat'] }).legal);
+});
+
+// ---------------------------------------------------------------- E-051: parched, and the list against minecraft-data
+
+test('E-051: parched (the 26.1.2 skeleton variant) is hostile: a threat for the instinct and a legal target for guard', (t) => {
+  const self = { id: 1, type: 'player', username: 'Bot', position: new Vec3(0.5, 64, 0.5) };
+  const parched = { id: 2, name: 'parched', type: 'hostile', position: new Vec3(4.5, 64, 0.5), isValid: true, metadata: [] };
+  const bot = {
+    registry: minecraftData(SUPPORTED_MINECRAFT_VERSION), entity: self, entities: { 1: self, 2: parched }, players: {},
+    inventory: { slots: [], items: () => [] },
+    blockAt: (pos: Vec3) => ({ name: 'air', position: pos.floored() })
+  };
+  t.is(mobHostility(bot as never, parched as never), 'hostile');
+  t.true(checkTarget(bot as never, parched as never).legal);
+  t.deepEqual(assessThreats(bot as never).hostiles.map(threat => threat.entity.id), [2]);
+});
+
+test('E-051: every entity minecraft-data calls hostile in the supported version is in HOSTILE_MOBS or NEUTRAL_MOBS', (t) => {
+  const data = minecraftData(SUPPORTED_MINECRAFT_VERSION);
+  const missing = data.entitiesArray
+    .filter(entity => entity.type === 'hostile' && !HOSTILE_MOBS.has(entity.name) && !NEUTRAL_MOBS.has(entity.name))
+    .map(entity => entity.name);
+  t.deepEqual(missing, [], `hostile in minecraft-data ${data.version.minecraftVersion} but in neither list: ${missing.join(', ')}`);
 });
