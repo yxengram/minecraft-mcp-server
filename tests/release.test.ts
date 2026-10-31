@@ -504,3 +504,9 @@ test('F-059: only the publish job runs npm publish for real, on the downloaded t
   t.not(created[0]?.[2], tarball, 'the Release carries the .mcpb as well');
   t.false(code.some(line => /\bgh release (delete|edit|upload)\b|--clobber\b/.test(line)), 'an existing Release is never overwritten');
 });
+
+// E-055 (1): ava loads tests/_no-network.ts first, so no unit test sees a real key or reaches the network.
+test('E-055: the unit tests run without OPENROUTER_API_KEY and with a fetch that fails the test file', (t) => {
+  t.is(process.env.OPENROUTER_API_KEY, undefined);
+  t.is((globalThis.fetch as unknown as { noNetwork?: boolean }).noNetwork, true);
+});

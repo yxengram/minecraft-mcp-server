@@ -519,6 +519,7 @@ try {
   await step('collect-block', async () => {
     await cmd(`/fill ${cx - 5} ${y0} ${cz - 5} ${cx - 5} ${y0 + 2} ${cz - 5} oak_log`);
     await sleep(500);
+    const since = Number((await call('get-events', { limit: 1 })).match(/nextSince: (\d+)/)[1]);
     // A gather still going when the reply is due (about 45 s) says "Still collecting …" and runs on as a task (E-038).
     // The call asks for progress notifications (E-039): one every 5 s while it runs, and it takes about 12 s here.
     const progress = [];
@@ -527,7 +528,16 @@ try {
     expect(progress.every((note, i) => (i === 0 || note.progress > progress[i - 1].progress) && typeof note.message === 'string' && note.message !== ''),
       `collect-block's progress notifications should count up and carry a message: ${JSON.stringify(progress)}`);
     expectIncludes(await finishedTask(reply, 'collecting', 90000), 'Mined 3 of 3 oak_log', 'collect-block');
-    await waitForCount('oak_log', count => count >= 3, 'logs to be picked up');
+    // E-055 (3): the reply can say a log was left on the ground that the bot picks up a second later (5 of 24 probe
+    // rounds, 2026-11-01). A log that never arrived (seen a few times before) did not come back in those rounds, so a
+    // timeout now says what lay around and what was picked up, for the next time.
+    try {
+      await waitForCount('oak_log', count => count >= 3, 'logs to be picked up');
+    } catch (error) {
+      const items = (await call('list-entities', { maxDistance: 16 })).split('\n').filter(line => /\bitem\b/.test(line));
+      const pickups = (await call('get-events', { since, types: ['item_picked_up'], limit: 20 })).split('\n').filter(line => line.includes('Picked up'));
+      throw new Error(`${error.message}; reply: ${reply.split('\n')[0]}; items within 16 blocks: ${items.join(' | ') || 'none'}; pickups: ${pickups.join(' | ') || 'none'}`);
+    }
   });
 
   await step('crafting', async () => {
@@ -923,7 +933,14 @@ try {
       }
     }
     if (repaired > 0) console.log(`    (the Nether side lost ${repaired} portal block(s), probably to a ghast; restored by command)`);
-    expectIncludes(await call('goto-waypoint', { name: 'live-portal-nether', timeoutMs: 20000 }, { timeout: 40000 }), 'now in overworld', 'goto-waypoint back');
+    // A blast can knock the bot back into a portal cell; the repair then sends it to the overworld at once, and the
+    // walk back to the Nether waypoint would fail (2026-10-30, E-055): check where it is first.
+    await sleep(1000);
+    if ((await call('get-observation')).includes('dimension: overworld')) {
+      console.log('    (the bot was already back in the overworld after the repair; skipped the walk back)');
+    } else {
+      expectIncludes(await call('goto-waypoint', { name: 'live-portal-nether', timeoutMs: 20000 }, { timeout: 40000 }), 'now in overworld', 'goto-waypoint back');
+    }
     // The game sends the bot to the existing portal nearest the Nether portal's position times 8. In a test world that
     // has seen many runs, an older portal can be nearer than the arena's, which is the game's choice, not a fault.
     const [bx, by, bz] = await position();

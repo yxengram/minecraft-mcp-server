@@ -1952,3 +1952,23 @@ M19 的 26 步都已在本地提交（最后一个是 af85ff4），没有推送�
   - parched 在本能的可选动作中按近战怪计算；
   - --greeting 开头有空格时在旧服务器上的命令问题；
   - `--check=true` 的退出码（E-052 审查的第 4 条）。
+
+### 2026-11-01 M19 附加 E-055：测试的三个小问题
+
+- **（1）单元测试不读真实 key、不联网**：
+  - 新文件 `tests/_no-network.ts`，由 package.json 的 ava.require 在每个 worker 中先于测试文件载入。它删除 OPENROUTER_API_KEY，并把 globalThis.fetch 换成一个替身：被调用时返回被拒绝的 Promise，同时抛出一个未捕获的异常，被测代码即使接住了拒绝，这个测试文件也会失败。异常经载入时保存的真实 setImmediate 抛出：审查发现 sinon 的假时钟默认替换全局的 setImmediate；主会话又核对到 sinon 21 默认也替换 process.nextTick 与 queueMicrotask，所以都不能在调用时再取。
+  - tests/release.test.ts 新增 1 个用例：环境变量不存在，fetch 带有替身的标记。
+  - 实施前用 grep 核对：没有单元测试使用真实的 fetch。
+  - **检查**：
+    - 临时写一个测试文件，在其中 fetch 并接住拒绝，ava 报 “Uncaught exception … unit tests make no network requests …” 并失败；在 sinon.useFakeTimers() 之下接住拒绝、不推进时钟就恢复，也同样失败（改用 process.nextTick 时这一种不失败）。随后删除了这个文件。
+    - `OPENROUTER_API_KEY=<伪造的值> npm test` 通过，没有未捕获的异常，即替身一次也没有被调用。工作区 1596 个，其中含尚未提交的 E-056 的 1 个；只算到本条为 1595 个，README 的单元测试数改为 1595。
+- **（2）传送门一步**（scripts/test-live-world.mjs）：补门之后先等 1 秒，用 get-observation 看 bot 是否已在主世界。
+  - 已在主世界时，打印一行说明，跳过走回下界路标的那一段；
+  - 否则照旧用 goto-waypoint 走回并核对 “now in overworld”。
+- **（3）collect-block 一步**：
+  - **先查明**：探测脚本照这一步的布置（3 块竖排原木，count 3）不带 key、带 key 各跑 12 轮，共 24 轮。
+    - 每轮回复都是 “Mined 3 of 3 oak_log”，都有 3 次拾取事件，背包都在约 1 秒内到 3 个。以前偶尔出现的“10 秒后背包仍只有 2 个”没有再现。
+    - 另有 5 轮（不带 key 3 轮、带 key 2 轮）回复写 “picked up 2 item(s) (2 oak_log); left 1 item(s) on the ground (1 oak_log)”，而 bot 在回复后约 1 秒就捡到了第 3 个。这是 collect-block 回复本身的问题（报告“留在地上”太早），按契约回报所有者，本条不改产品代码。
+  - **脚本的改动**：等待背包到 3 个超时时，错误里附上回复的第一行、16 格内的掉落物与这一步的拾取事件，留给下一次查。没有改场地布置，因为探测中掉落物都能捡到。
+- **文档**：BLUEPRINT 目录树加入 tests/_no-network.ts（审查指出缺了）。
+- **检查**：`node --check scripts/test-live-world.mjs` 通过；`npm run lint`、`tsc --noEmit` 无输出；（2）（3）的实机结果见 E-056 之后的实机记录。

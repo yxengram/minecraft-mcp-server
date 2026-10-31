@@ -44,6 +44,9 @@
     ],
     "nodeArguments": [
       "--import=tsx"
+    ],
+    "require": [
+      "./tests/_no-network.ts"
     ]
   },
   "scripts": {
