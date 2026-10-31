@@ -1744,3 +1744,9 @@ M19 的 26 步都已在本地提交（最后一个是 af85ff4），没有推送�
   - place-block 选参照面时仍把 cave_air、void_air 当作实心方块（第 11a 步的待办）。
   - --greeting 在 1.8～1.10.2 的服务器上按 100 字符切段时的命令问题（H 节）。
 - **测试脚本的小问题**（不影响产品）：传送门一步在恶魂炸门并补上后，bot 可能已被送回主世界，接着的 goto-waypoint 会失败；collect-block 偶尔捡不到全部原木；没有注入 fetch 的单元测试在导出 OPENROUTER_API_KEY 时会发真实的 /key 请求（npm test 要在不带 key 的环境中运行）。
+
+### 2026-10-31 M19：推送 1aaa64c，CI 通过
+
+- **推送**（所有者 2026-10-31 选“Push now”）：主检出 extra-tools 由 4957877 快进到 1aaa64c（M19 第 13～26 步与 CI 版本核对的修改，主检出推送前没有未提交的改动），`git push github extra-tools`。release.yml 只在 v* 标签与手动运行时触发，这次没有运行。
+- **CI**：运行 41156200026（CI Build，push）四个作业全部通过（ubuntu Node 22.x、24.x，macOS、Windows Node 22.x）。ubuntu Node 22.x 上第一次运行的步骤都通过：Install the package from its shrinkwrap、Compare the installed versions with the lockfile、Smoke test the package installed from its shrinkwrap、Install the package（空项目）与 Smoke test the installed package、Build the MCPB extension、Smoke test the unpacked extension、Upload the extension。产物 npm-package 307300 字节、mcpb-extension 14611190 字节，保留到 2026-11-14。运行提示 ubuntu-latest 从 2026-10-19 起逐步迁移到 Ubuntu 26（只是提示）。
+- **文件状态**：F-051 的 (d) 与新的版本核对、F-058 的 CI 一步都已在 CI 中通过（BLUEPRINT 已更新）。M19 整体仍等 “全部步骤之后留给所有者的事” 中的检查与 release.yml 的 dry-run。
