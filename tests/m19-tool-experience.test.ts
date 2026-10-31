@@ -1329,7 +1329,78 @@ test.serial('E-038 (1), E-049: the "Still leading" reply lists the blocks the pa
   t.is(task.status, 'running');
   const detail = task.progress ?? task.step;
   t.is(reply.text, `${still('leading', task.id, 'lead', `keeps running in the background (${detail})`)}; on the way the pathfinder placed 1 block(s): cobblestone at (5, 64, 0)`);
-  t.is(bot.listenerCount('blockPlaced'), 0, 'the watch stopped with the call');
+  // E-050: the call's watch stopped with the reply, and one more runs until the task ends.
+  t.is(bot.listenerCount('blockPlaced'), 1, 'one watch for the rest of the task');
+  await cancelLeftOver(clock, manager);
+  t.is(bot.listenerCount('blockPlaced'), 0, 'no watch after the task ended');
+});
+
+/**
+ * E-050: lead-animal on leadServe, with a cobblestone placed on the first stride (before the "Still leading" reply) and,
+ * when `after` is set, a dirt block placed on the first stride after the reply. Returns once the reply has come.
+ */
+async function leadPastReply(t: ExecutionContext, clock: sinon.SinonFakeTimers, after: boolean) {
+  let strides = 0;
+  let replied = false;
+  let placedAfter = false;
+  const served = await leadServe(t, lead => {
+    if (strides++ === 0) lead.emit('blockPlaced', null, { name: 'cobblestone', position: new Vec3(5, 64, 0) });
+    if (after && replied && !placedAfter) {
+      placedAfter = true;
+      lead.emit('blockPlaced', null, { name: 'dirt', position: new Vec3(15, 64, 0) });
+    }
+  });
+  const pending = track(served.call('lead-animal', { entityId: 2, x: 20, y: 64, z: 0 }));
+  await clock.tickAsync(45100);
+  t.true(pending.settled);
+  replied = true;
+  const task = served.manager.currentTask()!;
+  t.is(task.status, 'running');
+  return { ...served, reply: pending.reply!, task, placedAfter: () => placedAfter };
+}
+
+test.serial('E-050: blocks the pathfinder places after the "Still leading" reply go at the end of the lead task\'s result, and only those', async (t) => {
+  const clock = useClock(t);
+  const { manager, bot, reply, task } = await leadPastReply(t, clock, true);
+  t.true(reply.text.includes('; on the way the pathfinder placed 1 block(s): cobblestone at (5, 64, 0)'), reply.text);
+  t.false(reply.text.includes('dirt'), reply.text);
+  t.is(bot.listenerCount('blockPlaced'), 1, 'a new watch runs for the rest of the task');
+
+  await clock.tickAsync(30000);
+  const record = manager.list().history.find(entry => entry.id === task.id);
+  t.is(record?.status, 'done', record?.result);
+  t.regex(record?.result ?? '',
+    /^Led cow \(id 2\) to \(20, 64, 0\) by lure \(wheat\) in \d+s; it is \d\.\d blocks from the target; on the way the pathfinder placed 1 block\(s\): dirt at \(15, 64, 0\)$/);
+  t.is(bot.listenerCount('blockPlaced'), 0, 'the watch stopped when the task ended');
+  await cancelLeftOver(clock, manager);
+});
+
+test.serial('E-050: a lead task cancelled after the "Still leading" reply has the later blocks after its reason', async (t) => {
+  const clock = useClock(t);
+  const { manager, bot, task, placedAfter } = await leadPastReply(t, clock, true);
+  for (let i = 0; i < 200 && !placedAfter(); i++) await clock.tickAsync(100);
+  t.true(placedAfter(), 'a stride ended after the reply');
+  t.is(manager.currentTask()?.id, task.id, 'the lead is still going');
+
+  const cancelling = manager.cancel(task.id, 'cancelled by the test');
+  await clock.tickAsync(3000);
+  await cancelling;
+  const record = manager.list().history.find(entry => entry.id === task.id);
+  t.is(record?.status, 'cancelled');
+  t.is(record?.result, 'cancelled by the test; on the way the pathfinder placed 1 block(s): dirt at (15, 64, 0)');
+  t.is(bot.listenerCount('blockPlaced'), 0);
+});
+
+test.serial('E-050: with nothing dug or placed after the "Still leading" reply the lead task\'s result is unchanged', async (t) => {
+  const clock = useClock(t);
+  const { manager, bot, reply, task } = await leadPastReply(t, clock, false);
+  t.true(reply.text.includes('cobblestone at (5, 64, 0)'), 'the reply has the blocks before it');
+
+  await clock.tickAsync(30000);
+  const record = manager.list().history.find(entry => entry.id === task.id);
+  t.is(record?.status, 'done', record?.result);
+  t.regex(record?.result ?? '', /^Led cow \(id 2\) to \(20, 64, 0\) by lure \(wheat\) in \d+s; it is \d\.\d blocks from the target$/);
+  t.is(bot.listenerCount('blockPlaced'), 0);
   await cancelLeftOver(clock, manager);
 });
 

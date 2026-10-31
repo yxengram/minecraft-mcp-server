@@ -73,6 +73,8 @@ interface RunningTask {
   lastProgressEventAt: number;
   finished: Promise<TaskRecord>;
   resolveFinished: (record: TaskRecord) => void;
+  /** Read once when the task ends and added to its result (addResultSuffix). */
+  resultSuffix?: () => string;
 }
 
 export interface TaskManagerOptions {
@@ -285,6 +287,18 @@ export class TaskManager {
     return done ? Promise.resolve({ ...done }) : Promise.reject(new Error(`Unknown task ${id}`));
   }
 
+  /**
+   * Adds text to the result of the current task when it ends, however it ends: `suffix` is called once, before the end
+   * event is written (E-050: lead-animal's pathfinder edits after its "Still leading" reply). False, and `suffix` is not
+   * kept, when `id` is not the current task or it has already ended.
+   */
+  addResultSuffix(id: string, suffix: () => string): boolean {
+    const task = this.current;
+    if (!task || task.record.id !== id || this.isFinal(task)) return false;
+    task.resultSuffix = suffix;
+    return true;
+  }
+
   async cancelAll(reason: string): Promise<void> {
     if (this.current) await this.cancel(this.current.record.id, reason);
   }
@@ -372,6 +386,15 @@ export class TaskManager {
 
   private finish(task: RunningTask, status: 'done' | 'failed' | 'cancelled', result: string): void {
     if (this.isFinal(task)) return;
+    const suffix = task.resultSuffix;
+    task.resultSuffix = undefined;
+    if (suffix) {
+      try {
+        result += suffix();
+      } catch (error) {
+        this.options.log?.('warn', `Could not add to the result of task ${task.record.id}: ${error}`);
+      }
+    }
     task.record.status = status;
     task.record.result = result;
     task.record.endedAt = Date.now();

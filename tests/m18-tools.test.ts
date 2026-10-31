@@ -412,6 +412,24 @@ test.serial('lead-animal: a cancelled lead task lists the blocks placed before i
   t.is(world.bot.listenerCount('blockPlaced'), 0);
 });
 
+test.serial('E-050: a lead that ends before the reply has its blocks in the reply only, not in the task\'s result', async (t) => {
+  const clock = useClock(t);
+  const world = leadAnimal(t, [{ name: 'wheat', count: 5 }]);
+  let strides = 0;
+  walking(world.bot, () => {
+    if (strides++ === 0) world.bot.emit('blockPlaced', null, { name: 'cobblestone', position: new Vec3(5, 64, 0) });
+    following(world);
+  });
+
+  const result = await reply(clock, world.lead());
+
+  t.falsy(result.isError);
+  t.true(result.content[0].text.endsWith('; on the way the pathfinder placed 1 block(s): cobblestone at (5, 64, 0)'));
+  const record = world.autopilot.tasks.list().history[0];
+  t.is(record?.status, 'done');
+  t.false(record?.result?.includes('on the way'), record?.result);
+});
+
 test.serial('lead-animal: a lead task refused at the start replies as before and stops watching', async (t) => {
   useClock(t);
   const world = leadAnimal(t, [{ name: 'wheat', count: 5 }]);

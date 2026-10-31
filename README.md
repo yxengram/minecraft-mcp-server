@@ -44,7 +44,7 @@ The upstream project is a good, simple bridge: the LLM calls a tool, and the bot
 - **Chat triage:** the decision model sorts chat. Only messages meant for the bot wake the LLM, as `chat_request` events. Nobody can command the bot by chat unless the LLM allows it.
 
 ### 3. Tested in the game, not only on paper
-- 1548 unit tests.
+- 1554 unit tests.
 - A live test that exercises all 67 tools against a real server.
 - A scenario test that compares the bot with and without the Autopilot: zombie waves, being chased by zombies with bare hands, creepers, hunger, fire, drowning, diving on purpose, a lava shore, chat.
 - A 10-day survival test on Normal difficulty. The bot survived all ten nights without dying and built a 7×7 house with a door, eight glass windows, a bed, a chest, a crafting table, a furnace and torches.
@@ -313,7 +313,7 @@ A command that moves or uses the bot's body stops when the bot dies, and its rep
 
 ### Time limits
 Commands that move or use the bot's body, and `collect-block` and `lead-animal`, reply within the call limit, 50 seconds unless `--call-limit-seconds` sets another, because common MCP clients give up on a request after 60 seconds (`wait-for-event` keeps its own cap of 55 seconds). A command that moves or uses the bot's body is stopped when the limit runs out, and the reply says where the bot stopped. The long tools stay within it by themselves:
-- `collect-block` and `lead-animal` wait at most about 45 seconds for their task. A task that is still going then keeps running in the background, and the reply is a success that says so, for example `Still collecting after 45 s: task t5 gather keeps running in the background (mined 3 of 10 oak_log). Wait for it with wait-for-event types ['task_done', 'task_failed', 'task_cancelled'] (list-tasks shows whether it has already ended); stop it with cancel-task t5`. `lead-animal` says `Still leading after`, and a paused task `is paused (<reason>)`. Their `timeoutMs` limits only the task (120 and 300 seconds by default).
+- `collect-block` and `lead-animal` wait at most about 45 seconds for their task. A task that is still going then keeps running in the background, and the reply is a success that says so, for example `Still collecting after 45 s: task t5 gather keeps running in the background (mined 3 of 10 oak_log). Wait for it with wait-for-event types ['task_done', 'task_failed', 'task_cancelled'] (list-tasks shows whether it has already ended); stop it with cancel-task t5`. `lead-animal` says `Still leading after`, and a paused task `is paused (<reason>)`. The blocks the pathfinder dug or placed for `lead-animal` before that reply are listed in it, and those after it at the end of the task's result, which `task_done`, `task_failed` or `task_cancelled` carries. Their `timeoutMs` limits only the task (120 and 300 seconds by default).
 - `move-to-position` and `goto-waypoint` stop after about 35 seconds, which leaves time for the wait in a Nether portal: `Move timed out after 35000ms at (x, y, z), D blocks from the target; call move-to-position again to continue`.
 - `clear-region`, `fill-region` and `dig-tunnel` stop after about 45 seconds (they used to allow 120) and say how far they got: `Stopped early with N block(s) not processed; run again to continue`.
 - `smelt-item` waits at most about 45 seconds for the output; a batch that is not done keeps smelting in the furnace, and the reply says so.
@@ -516,7 +516,7 @@ In the client config, `command` is `node` and the first item of `args` is the fu
 ## Testing
 
 ```bash
-npm test             # 1548 unit tests
+npm test             # 1554 unit tests
 npm run lint
 npm run test:live -- <LAN_PORT>                                 # read-only check against a world
 npm run test:live:world -- <LAN_PORT> --allow-world-changes      # every tool, in a throwaway world with cheats on

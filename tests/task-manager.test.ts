@@ -112,6 +112,42 @@ test('behavior errors fail the task', async (t) => {
   t.is(final.result, 'target lost');
 });
 
+test('E-050: addResultSuffix adds its text to the result and the end event once, however the task ends', async (t) => {
+  const { tasks, controls, events } = setup();
+  await tasks.start('demo', {});
+  const suffix = sinon.stub().returns('; more');
+  t.true(tasks.addResultSuffix('t1', suffix));
+  t.false(suffix.called, 'read only when the task ends');
+
+  controls.finish!('all good');
+  const final = await tasks.waitForEnd('t1');
+  t.is(final.result, 'all good; more');
+  t.true(events.query({ types: ['task_done'], limit: 10 }).events[0].message.endsWith('t1 demo: all good; more'));
+  t.true(suffix.calledOnce);
+
+  await tasks.start('demo', {});
+  t.true(tasks.addResultSuffix('t2', () => '; later'));
+  await tasks.cancel('t2', 'stopped');
+  t.is(tasks.list().history[0].result, 'stopped; later');
+  t.true(events.query({ types: ['task_cancelled'], limit: 10 }).events[0].message.endsWith('t2 demo: cancelled (stopped; later)'));
+});
+
+test('E-050: addResultSuffix refuses a task that is not the current one or has ended, and a throwing suffix leaves the result as it was', async (t) => {
+  const { bot, events, arbiter, controls } = setup();
+  const log = sinon.stub();
+  const tasks = new TaskManager({ getBot: () => bot as never, getArbiter: () => arbiter, events, behaviors: [controllable(controls)] as never, log });
+  t.false(tasks.addResultSuffix('t1', () => '; x'), 'no task yet');
+  await tasks.start('demo', {});
+  t.false(tasks.addResultSuffix('t9', () => '; x'), 'not the current task');
+  t.true(tasks.addResultSuffix('t1', () => { throw new Error('broken'); }));
+  controls.fail!(new Error('target lost'));
+  const final = await tasks.waitForEnd('t1');
+  t.is(final.status, 'failed');
+  t.is(final.result, 'target lost');
+  t.true(log.calledWithMatch('warn', /Could not add to the result of task t1: Error: broken/));
+  t.false(tasks.addResultSuffix('t1', () => '; x'), 'the task has ended');
+});
+
 test('invalid params, unknown behaviors and failed preparation are refused without creating a task', async (t) => {
   const { tasks, events } = setup();
 

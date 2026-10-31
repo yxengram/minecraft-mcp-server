@@ -151,8 +151,16 @@ export function registerGatheringTools(factory: ToolFactory, getAutopilot: () =>
         ctx.setProgress(taskProgress(tasks, started.task.id));
 
         const waited = await awaitTask(tasks, started.task.id, timeoutMs, ctx);
-        // The edits so far, on the first line as in every other reply (E-049); the watch stops with the call.
-        if ('running' in waited) return factory.createResponse(`${stillReply('leading', waited.running, startedAt)}${stopEdits()}${replaced}`);
+        if ('running' in waited) {
+          // The edits so far, on the first line as in every other reply (E-049). The ones after the reply go at the end
+          // of the task's result when it ends, so task_done (or task_failed, task_cancelled) says them (E-050).
+          const text = `${stillReply('leading', waited.running, startedAt)}${stopEdits()}${replaced}`;
+          if (bot) {
+            const stopLater = watchPathEdits(bot);
+            if (!tasks.addResultSuffix(waited.running.id, stopLater)) stopLater();
+          }
+          return factory.createResponse(text);
+        }
         const { final } = waited;
         // On the reply's first line, before the line about the replaced task, as the move tools do (M17).
         const edits = stopEdits();

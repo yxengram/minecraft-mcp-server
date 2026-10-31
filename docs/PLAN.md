@@ -1818,3 +1818,25 @@ M19 的 26 步都已在本地提交（最后一个是 af85ff4），没有推送�
     - “Invalid --waypoint-file: empty” 与 “Invalid --decision-model: empty”。
     - BLUEPRINT E-052 中“草案”的说法已改。
 - **没有实现**：E-050～E-056 都只有契约，等所有者的实施指令。
+
+### 2026-11-01 M19 附加 E-050：lead-animal 在 “Still leading” 回复之后的寻路改动，在任务结束时补报
+
+- 用户指示（2026-11-01）：“开始实现”（E-050～E-056，按顺序每条一个提交）。这一轮由主会话直接实现，没有用多代理工作流；每条做变异检查（把新代码关掉，看对应的用例失败）。
+- **实现**：
+  - `src/autopilot/task-manager.ts`：新增 `addResultSuffix(id, suffix)`，只对当前、尚未结束的任务生效，否则返回 false。finish() 写结果与结束事件前调用一次 suffix，接在结果后面，完成、失败、取消都一样；suffix 抛错时结果不变，并记一条 warn 日志。
+  - `src/tools/gathering-tools.ts`：lead-animal 给出 Still 回复时：
+    - 到回复为止的改动照旧接在回复第一行，这个监视随之停止；
+    - 随即开一个新的 watchPathEdits，用 addResultSuffix 交给任务；任务已结束时立即停止它。
+  - README 中英文的 Time limits 一节加一句说明；单元测试数改为 1554。
+- **测试**：新增 6 个。
+  - task-manager：结果与 task_done、task_cancelled 事件都带后缀；不是当前任务、已结束的任务被拒绝；抛错的 suffix 不改结果并记日志。
+  - m19-tool-experience，用 leadServe 与假时钟：
+    - Still 回复之后放下的方块只出现在 task_done 的结果末尾，回复之前的只在回复里；
+    - 回复之后取消任务时，结果为 “cancelled by the test; on the way the pathfinder placed …”；
+    - 回复之后没有改动时结果不变。
+  - m18-tools：调用在任务结束前回复时，结果不带改动。
+  - 已有用例：E-049 的 Still 用例原来断言回复后没有 blockPlaced 监听（“the watch stopped with the call”），按 E-050 改为回复后 1 个、任务结束后 0 个。
+- **检查**：
+  - 变异检查：把 addResultSuffix 的调用换成直接停止，新增的两个用例失败，恢复后通过。
+  - `npm test`（不带 key）1554 个通过；`npm run lint`、`tsc --noEmit`、`git diff --check` 无输出。
+  - 实机放在 E-056 之后一起跑，见那里的记录。

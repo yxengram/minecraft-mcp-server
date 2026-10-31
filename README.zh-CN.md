@@ -44,7 +44,7 @@
 - **聊天分拣：**决策模型对聊天分类，只有发给机器人的消息才会以 `chat_request` 事件唤醒 LLM。除非 LLM 允许，任何人都不能通过聊天指挥机器人。
 
 ### 3. 在游戏里实测，而不只是纸面
-- 1548 个单元测试。
+- 1554 个单元测试。
 - 实机测试：在真实服务器上逐一运行全部 67 个工具。
 - 情景测试：比较有无 Autopilot 时机器人的表现，包括僵尸潮、空手被僵尸追赶、苦力怕、饥饿、着火、溺水、有意潜水、岩浆岸边和聊天。
 - 普通难度下的 10 天生存测试：机器人度过了全部十个夜晚，没有死亡，并建起一座 7×7 的房子，带门、八扇玻璃窗、床、箱子、工作台、熔炉和火把。
@@ -313,7 +313,7 @@ API key 只从环境变量 `OPENROUTER_API_KEY` 读取，没有哪个选项接�
 
 ### 时限
 移动或使用 bot 身体的命令，以及 `collect-block`、`lead-animal`，都在调用时限内回复，默认 50 秒（用 `--call-limit-seconds` 改），因为常见的 MCP 客户端 60 秒后就放弃请求（`wait-for-event` 仍最多等 55 秒）。移动或使用 bot 身体的命令到时会被停下，回复说明 bot 停在哪里。耗时长的工具自己控制在时限之内：
-- `collect-block` 和 `lead-animal` 最多等自己的任务约 45 秒。到时任务还没结束，就在后台继续，回复是成功的，并说明这一点，例如 `Still collecting after 45 s: task t5 gather keeps running in the background (mined 3 of 10 oak_log). Wait for it with wait-for-event types ['task_done', 'task_failed', 'task_cancelled'] (list-tasks shows whether it has already ended); stop it with cancel-task t5`。`lead-animal` 写 `Still leading after`；任务被暂停时写 `is paused (<原因>)`。它们的 `timeoutMs` 只限制任务本身（默认 120 秒和 300 秒）。
+- `collect-block` 和 `lead-animal` 最多等自己的任务约 45 秒。到时任务还没结束，就在后台继续，回复是成功的，并说明这一点，例如 `Still collecting after 45 s: task t5 gather keeps running in the background (mined 3 of 10 oak_log). Wait for it with wait-for-event types ['task_done', 'task_failed', 'task_cancelled'] (list-tasks shows whether it has already ended); stop it with cancel-task t5`。`lead-animal` 写 `Still leading after`；任务被暂停时写 `is paused (<原因>)`。`lead-animal` 在这句回复之前寻路器挖掉和放下的方块列在回复里，之后的列在任务结果的末尾，由 `task_done`、`task_failed` 或 `task_cancelled` 带出。它们的 `timeoutMs` 只限制任务本身（默认 120 秒和 300 秒）。
 - `move-to-position` 和 `goto-waypoint` 约 35 秒后停下，给在下界传送门里的等待留出时间：`Move timed out after 35000ms at (x, y, z), D blocks from the target; call move-to-position again to continue`。
 - `clear-region`、`fill-region` 和 `dig-tunnel` 约 45 秒后停下（以前是 120 秒），并说明做到了哪里：`Stopped early with N block(s) not processed; run again to continue`。
 - `smelt-item` 最多等产物约 45 秒；没烧完的会在熔炉里继续烧，回复里会说明。
@@ -516,7 +516,7 @@ node dist/main.js --check --port <局域网端口> --username ClaudeBot
 ## 测试
 
 ```bash
-npm test             # 1548 个单元测试
+npm test             # 1554 个单元测试
 npm run lint
 npm run test:live -- <局域网端口>                                 # 对世界做只读检查
 npm run test:live:world -- <局域网端口> --allow-world-changes      # 在开启作弊的一次性世界中运行每个工具
