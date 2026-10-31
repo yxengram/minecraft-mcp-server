@@ -1419,6 +1419,63 @@ test.serial('E-050: a lead task cancelled after the "Still leading" reply has th
   t.is(bot.listenerCount('blockPlaced'), 0);
 });
 
+test.serial('E-050 (review): blocks dug or placed while something else holds the body are not the lead task\'s', async (t) => {
+  const clock = useClock(t);
+  const { manager, bot, task, arbiter } = await leadPastReply(t, clock, false);
+  const urgent = await arbiter.acquire({ holder: 'instinct dig_in', priority: PRIORITY.URGENT_INSTINCT });
+  t.true(urgent.ok);
+  if (!urgent.ok) return;
+  await clock.tickAsync(100);
+  t.is(manager.currentTask()?.status, 'paused');
+  bot.emit('blockPlaced', null, { name: 'dirt', position: new Vec3(15, 64, 0) });
+  await bot.dig({ name: 'stone', position: new Vec3(16, 64, 0) } as never);
+  urgent.lease.release();
+
+  await clock.tickAsync(40000);
+  const record = manager.list().history.find(entry => entry.id === task.id);
+  t.is(record?.status, 'done', record?.result);
+  t.false(record?.result?.includes('on the way'), record?.result);
+  await cancelLeftOver(clock, manager);
+});
+
+test.serial('E-050 (review): a second lead-animal that replaces a lead left running gives bot.dig back once all have ended', async (t) => {
+  const clock = useClock(t);
+  const { manager, bot, ...s } = await leadServe(t);
+  const ownDig = bot.dig;
+  const first = track(s.call('lead-animal', { entityId: 2, x: 20, y: 64, z: 0 }));
+  await clock.tickAsync(45100);
+  t.true(first.settled);
+  t.not(bot.dig, ownDig, 'watched after the first reply');
+
+  const second = track(s.call('lead-animal', { entityId: 2, x: 0, y: 64, z: 0 }));
+  for (let i = 0; i < 900 && !second.settled; i++) await clock.tickAsync(100);
+  t.true(second.settled);
+  await cancelLeftOver(clock, manager);
+  t.is(manager.currentTask(), null);
+  t.is(bot.dig, ownDig, 'the bot\'s own dig again');
+  t.is(bot.listenerCount('blockPlaced'), 0);
+});
+
+test.serial('E-050 (review): a dig the pathfinder starts before the "Still leading" reply and finishes after it goes in the task\'s result', async (t) => {
+  const clock = useClock(t);
+  const served = await leadServe(t);
+  const { manager, bot } = served;
+  bot.dig = sinon.stub().callsFake(() => new Promise<void>(resolve => setTimeout(resolve, 2000))) as never;
+  // At 44 s, a second before the reply, ending at 46 s.
+  setTimeout(() => { void bot.dig({ name: 'stone', position: new Vec3(12, 64, 0) } as never); }, 44000);
+  const pending = track(served.call('lead-animal', { entityId: 2, x: 20, y: 64, z: 0 }));
+  await clock.tickAsync(45100);
+  t.true(pending.settled);
+  t.false(pending.reply!.text.includes('stone'), pending.reply!.text);
+  const task = manager.currentTask()!;
+
+  await clock.tickAsync(30000);
+  const record = manager.list().history.find(entry => entry.id === task.id);
+  t.is(record?.status, 'done', record?.result);
+  t.true(record?.result?.endsWith('; on the way the pathfinder dug 1 block(s): stone at (12, 64, 0)'), record?.result);
+  await cancelLeftOver(clock, manager);
+});
+
 test.serial('E-050: with nothing dug or placed after the "Still leading" reply the lead task\'s result is unchanged', async (t) => {
   const clock = useClock(t);
   const { manager, bot, reply, task } = await leadPastReply(t, clock, false);

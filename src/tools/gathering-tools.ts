@@ -153,12 +153,18 @@ export function registerGatheringTools(factory: ToolFactory, getAutopilot: () =>
         const waited = await awaitTask(tasks, started.task.id, timeoutMs, ctx);
         if ('running' in waited) {
           // The edits so far, on the first line as in every other reply (E-049). The ones after the reply go at the end
-          // of the task's result when it ends, so task_done (or task_failed, task_cancelled) says them (E-050).
+          // of the task's result when it ends, so task_done (or task_failed, task_cancelled) says them (E-050). That
+          // watch starts before this one stops, so a dig that finishes in between is the task's and not lost; it counts
+          // only while the lead task holds the body: a command or the instinct that pauses it has its own edits.
+          const id = waited.running.id;
+          const stopLater = bot
+            ? watchPathEdits(bot, () => {
+              const task = tasks.currentTask();
+              return task?.id === id && task.status === 'running';
+            })
+            : null;
           const text = `${stillReply('leading', waited.running, startedAt)}${stopEdits()}${replaced}`;
-          if (bot) {
-            const stopLater = watchPathEdits(bot);
-            if (!tasks.addResultSuffix(waited.running.id, stopLater)) stopLater();
-          }
+          if (stopLater && !tasks.addResultSuffix(id, stopLater)) stopLater();
           return factory.createResponse(text);
         }
         const { final } = waited;

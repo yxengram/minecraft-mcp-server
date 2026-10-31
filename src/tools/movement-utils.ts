@@ -306,31 +306,62 @@ function cellText(position: { x: number; y: number; z: number }): string {
   return `(${Math.floor(position.x)}, ${Math.floor(position.y)}, ${Math.floor(position.z)})`;
 }
 
+type DigListener = (block: EditBlock) => void;
+
+// One wrapper around bot.dig per bot, shared by every watch (E-050 review): watches that start and stop out of order
+// (a lead task's watch outlives the call that started it) each used to wrap bot.dig, and stopping them in the wrong
+// order left a dead wrapper on it. A dig reports to the watches open when it finishes, so one that runs across the
+// hand-over from one watch to the next is not lost.
+const digHooks = new WeakMap<object, { original: unknown; wrapper: unknown; listeners: Set<DigListener> }>();
+
+function onDig(bot: mineflayer.Bot, listener: DigListener): () => void {
+  let hook = digHooks.get(bot);
+  if (!hook) {
+    const original = bot.dig;
+    if (typeof original !== 'function') return () => {};
+    const listeners = new Set<DigListener>();
+    // Digs are seen by wrapping bot.dig, which the pathfinder looks up on every dig: it removes every
+    // diggingCompleted listener whenever it re-plans (removeAllListeners with a second argument, which Node ignores),
+    // so an event listener heard only the first dig of a move (E-019 review, seen live).
+    const wrapper = function (this: unknown, block: EditBlock, ...rest: unknown[]) {
+      const digging = (original as (...args: unknown[]) => Promise<void>).call(bot, block, ...rest);
+      return digging.then(result => {
+        for (const notify of [...listeners]) notify(block);
+        return result;
+      });
+    } as unknown as typeof bot.dig;
+    hook = { original, wrapper, listeners };
+    digHooks.set(bot, hook);
+    bot.dig = wrapper;
+  }
+  const { listeners } = hook;
+  const current = hook;
+  listeners.add(listener);
+  return () => {
+    listeners.delete(listener);
+    if (listeners.size === 0 && digHooks.get(bot) === current) {
+      digHooks.delete(bot);
+      if (bot.dig === current.wrapper) bot.dig = current.original as typeof bot.dig;
+    }
+  };
+}
+
 /**
  * Records the blocks the bot digs and places while a move runs, which during a move is the pathfinder's scaffolding
  * and the way it digs (E-019): in the task test it left blocks in a fence gap and in walls, and nothing said so.
+ * `recording`, when given, is asked at each edit: lead-animal's watch after its "Still leading" reply counts only
+ * while its task holds the body, not the edits of a command or the instinct that paused it (E-050).
  * Returns a function that stops recording and gives the suffix for the tool's reply ('' when nothing changed).
  */
-export function watchPathEdits(bot: mineflayer.Bot): () => string {
+export function watchPathEdits(bot: mineflayer.Bot, recording: () => boolean = () => true): () => string {
   const dug: { name: string; at: string }[] = [];
   const placed: { name: string; at: string }[] = [];
   let stopped = false;
-  // Digs are seen by wrapping bot.dig, which the pathfinder looks up on every dig: it removes every diggingCompleted
-  // listener whenever it re-plans (removeAllListeners with a second argument, which Node ignores), so an event
-  // listener heard only the first dig of a move (E-019 review, seen live).
-  const originalDig = bot.dig;
-  const wrappedDig = typeof originalDig === 'function'
-    ? (function (this: unknown, block: EditBlock, ...rest: unknown[]) {
-      const digging = (originalDig as (...args: unknown[]) => Promise<void>).call(bot, block, ...rest);
-      return digging.then(result => {
-        if (!stopped && block?.position) dug.push({ name: block.name ?? 'a block', at: cellText(block.position) });
-        return result;
-      });
-    } as unknown as typeof bot.dig)
-    : null;
-  if (wrappedDig) bot.dig = wrappedDig;
+  const stopDigs = onDig(bot, block => {
+    if (!stopped && block?.position && recording()) dug.push({ name: block.name ?? 'a block', at: cellText(block.position) });
+  });
   const onPlaced = (_oldBlock: EditBlock | null, newBlock: EditBlock | null) => {
-    if (!stopped && newBlock?.position) placed.push({ name: newBlock.name ?? 'a block', at: cellText(newBlock.position) });
+    if (!stopped && newBlock?.position && recording()) placed.push({ name: newBlock.name ?? 'a block', at: cellText(newBlock.position) });
   };
   // Test fakes may have no event emitter.
   const listens = typeof bot.on === 'function';
@@ -338,7 +369,7 @@ export function watchPathEdits(bot: mineflayer.Bot): () => string {
   return () => {
     if (!stopped) {
       stopped = true;
-      if (wrappedDig && bot.dig === wrappedDig) bot.dig = originalDig;
+      stopDigs();
       if (listens) bot.removeListener('blockPlaced' as never, onPlaced as never);
     }
     const parts: string[] = [];
