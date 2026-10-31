@@ -26,7 +26,7 @@
 | M16 | 岩浆与死亡时的命令：寻路器与岩浆保持距离、本能按碰撞箱和岩浆伤害判断“在岩浆里”、身体类工具在 bot 死亡时停止并报告 | M15；M15 验收中重做下界实测时的死亡（2026-10-22）；用户指示（2026-10-22，只规划） | verified（2026-10-22；见进展 M16 实现与实机验收） |
 | M17 | 修复任务式生存测试发现的问题：寻路器不在栅栏、墙、屋内放脚手架，不挖门和栅栏脚下的方块；移动工具报告途中放下和挖掉的方块；被围住（dig_in 的洞）时移动工具不会悄悄挖开掩体；紧急线索的决策请求对冲 | M15；任务式生存测试（2026-10-20）；会话指示（2026-10-22） | verified（2026-10-22；见进展 M17 实现与实机验收） |
 | M18 | 新工具 ground-height（远处地面高度，下界有顶时找附近的落脚层）与 lead-animal（拴绳或诱饵带动物走，新行为 lead） | M17；任务式生存测试中记下的问题；用户指示（2026-10-24） | verified（2026-10-24；见进展 M18 实现与验收） |
-| M19 | 发布前的阻塞问题、首次体验与安全：连接卡住、attack-entity 违反 I1、没有 key 时说清楚、安装与发行（npm、MCPB、CI、发布流程）、命令行、调用时限与取消、stop-all、连接错误说明、安全默认值（send-chat 的命令、问候、玩家文字不可信）、决策错误与统计、路标按世界分开、自检、工具注解、服务器说明 | M18；发布前评估（2026-10-26）；用户指示（2026-10-26，只规划） | 部分实现（2026-10-26：不需要批准的部分；2026-10-28：剩下的几件小事；2026-10-29：审计后剩下的检查与文档修正，以及经用户同意改写的服务器已满说明，见进展 M19 的四条记录；Q16～Q33 已于 2026-10-29 答复，见进展「M19：Q16～Q33 的答复」；2026-10-30～31 按用户的实施指令完成其余各步，26 步都已实现，每步一个本地提交，未推送；整体验收还差所有者的实机检查、推送后的 CI 与 release.yml 的 dry-run，见进展「M19 第 26 步」与「M19：全部步骤之后留给所有者的事」） |
+| M19 | 发布前的阻塞问题、首次体验与安全：连接卡住、attack-entity 违反 I1、没有 key 时说清楚、安装与发行（npm、MCPB、CI、发布流程）、命令行、调用时限与取消、stop-all、连接错误说明、安全默认值（send-chat 的命令、问候、玩家文字不可信）、决策错误与统计、路标按世界分开、自检、工具注解、服务器说明 | M18；发布前评估（2026-10-26）；用户指示（2026-10-26，只规划） | 部分实现（2026-10-26：不需要批准的部分；2026-10-28：剩下的几件小事；2026-10-29：审计后剩下的检查与文档修正，以及经用户同意改写的服务器已满说明，见进展 M19 的四条记录；Q16～Q33 已于 2026-10-29 答复，见进展「M19：Q16～Q33 的答复」；2026-10-30～31 按用户的实施指令完成其余各步，26 步都已实现，每步一个本地提交，未推送；整体验收还差所有者的实机检查，见进展「M19 第 26 步」与「M19：全部步骤之后留给所有者的事」；2026-10-31 推送并通过 CI，所有者逐条答复剩下的事并新增 E-050～E-055（未实现）；2026-11-01 release.yml 的 dry-run 通过，见进展同名各条） |
 
 ---
 
@@ -1772,3 +1772,29 @@ M19 的 26 步都已在本地提交（最后一个是 af85ff4），没有推送�
   15. 测试的三个小问题：都修，产品代码不动，见 BLUEPRINT E-055。
 - **文档改动**（只改 docs/PLAN.md 与 docs/BLUEPRINT.md）：BLUEPRINT F2 节新增 E-050～E-055 六行（M19 附加，契约与验证；E-052 的错误文字是草案）；E-023、E-031、E-038 各行与 H 节的 --greeting 一条加上指向新行的说明。PLAN「M19：全部步骤之后留给所有者的事」开头加上指向本条的说明。
 - **没有实现**：E-050～E-055 只写了契约，没有改代码、测试或 README。按 AGENTS.md，答复不等于实施指令；实施要等所有者的明确指令。第 1、3、5、10 件的选项本身就是要代理去做的事（dry-run、构建并发送 .mcpb、标题表、只查不改的重现），在本条之后做，结果另记。
+
+### 2026-11-01 M19：release.yml 的 dry-run 通过；扩展与核对清单交给所有者
+
+- **dry-run**（所有者 2026-10-31 选“两个分支都跑”，见「全部步骤之后留给所有者的事」的答复第 1 件）：
+  - **临时分支**：在单独的临时 worktree 里从 a320054（GitHub 上 extra-tools 的当前提交）建了两个分支。
+    - release-dryrun-ok（d511feb）：只把 CHANGELOG 的 “## [Unreleased]” 改名为 “## [3.0.0] - 2026-10-31”。
+    - release-dryrun-bad（ed6d2eb）：在 ok 的基础上只把 mcpb/manifest.json 的 version 改为 3.0.1。
+  - **运行**：`git push github` 两个分支后，用 `gh workflow run release.yml --ref <分支>` 各手动运行一次。build.yml 只在 extra-tools、main 的推送时运行，所以推送这两个分支没有触发 CI Build（运行列表核对过）。
+  - **ok 分支，运行 41208079481（Release dry run on release-dryrun-ok）**：结论 success，用时约 3 分钟。
+    - verify 的 20 步都通过。核对一步写 “Manual run, a dry run: no tag, so the manifest and the CHANGELOG are checked against package.json (3.0.0) and the branch check is skipped”。
+    - 之后依次通过：npm ci、lint、typecheck、test、build、pack；包内容的核对；按 shrinkwrap 安装与版本比较、两次冒烟；build:mcpb（15.0 MB，解开 121.1 MB，6369 个文件）与解开后的冒烟。
+    - 收集的发布文件：yxengram-minecraft-mcp-autopilot-3.0.0.tgz（307012 字节）、minecraft-mcp-autopilot-3.0.0.mcpb（15769319 字节）、release-notes.md（24059 字节）。上传为产物 release（14927767 字节，保留到 2026-11-30）。
+    - `npm publish --dry-run`：75 个文件，package size 307.0 kB，unpacked size 1.1 MB，最后一行 “Publishing to https://registry.npmjs.org/ with tag latest and public access (dry-run)”，以及 “+ @yxengram/minecraft-mcp-autopilot@3.0.0”；另有 npm 的提示 “This command requires you to be logged in … (dry-run)”，dry-run 不需要登录。
+    - 75 个文件与本地 `npm pack --dry-run --json` 的 74 个相比，只多 npm-shrinkwrap.json（CI 先运行 npm shrinkwrap，E-025），与 E-024 一致。
+    - publish 任务为 skipped（只在推送标签时运行）。
+  - **bad 分支，运行 41208082419**：结论 failure。核对一步只有一条 Release check failed 的注释：“Manifest: mcpb/manifest.json has version 3.0.1, not 3.0.0”，后面的步骤都没有运行，publish 为 skipped。
+  - **清理**：看完结果后 `git push github --delete` 删除了两个远程分支，本地分支与临时 worktree 也已删除；`git ls-remote --heads github` 里已没有 dryrun 分支。没有推送标签，没有改仓库可见性，没有发布，没有建立 Release。
+  - **文件状态**：F-059 由 implemented-unverified 改为 verified（部分）：verify 任务在 GitHub 上通过，不符时按契约失败；publish 任务要到所有者真正发布（推送 v3.0.0 标签并在 release environment 中批准）时才第一次运行。
+- **扩展与核对清单**（第 3、5 件）：
+  - **构建**：在本 worktree（f03687f，与 a320054 只差文档）运行 `npm run build` 与 `npm run build:mcpb`，得到 build/minecraft-mcp-autopilot-3.0.0.mcpb：15703893 字节，SHA-256 7958ec24…61721，6368 个文件。比 CI 的少一个文件（npm-shrinkwrap.json），所以大小不同。
+  - **冒烟**：解开后 `npm run test:smoke -- <解开目录>/dist/main.js` 全部 PASS。
+  - **核对清单**：写在 build/owner-check-3.0.0.md（build/ 在 .gitignore 里，不进仓库），内容有三部分：
+    - A：每个平台的步骤，即安装、不填 key 时 get-position、scan-area、get-policy 的 OFFLINE；填 key 后 online；日志里搜不到 sk-or-；自带的 Node 版本；key 是否在钥匙串或凭据管理器里。
+    - B：客户端里的标题与服务器说明，以及从 dist/tool-annotations.js 生成的 67 个工具的标题表（24 只读、11 安全、32 破坏性；65 个标为拟定，Move to position 与 Stop everything 标为契约）。
+    - C：manifest 里由实现拟定的文字。
+  - **交付**：.mcpb 与清单已用文件发送交给所有者。安装与在客户端里的检查等所有者做完后另记。
