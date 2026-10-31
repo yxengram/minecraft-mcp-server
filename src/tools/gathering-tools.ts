@@ -120,7 +120,7 @@ export function registerGatheringTools(factory: ToolFactory, getAutopilot: () =>
   // lead-animal runs a lead task and waits for it, as collect-block does with gather (E-020, F-045).
   factory.registerTool(
     "lead-animal",
-    `Lead one animal to a point: on a lead when the bot has one, otherwise holding a food the animal follows (wheat for cows and sheep, carrots for pigs, seeds for chickens...). Walks it there step by step, waiting when it lags behind. Runs as a lead task (replacing the current task) and ${inBackground}. Open gates first; the lead is taken off and picked up at the end`,
+    `Lead one animal to a point: on a lead when the bot has one, otherwise holding a food the animal follows (wheat for cows and sheep, carrots for pigs, seeds for chickens...). Walks it there step by step, waiting when it lags behind. Runs as a lead task (replacing the current task) and ${inBackground}. Open gates first; the lead is taken off and picked up at the end, and a freed animal wanders off, so lead it into a pen and close the gate behind it`,
     {
       entityId: z.coerce.number().int().optional().describe("Entity id from list-entities"),
       type: z.string().trim().min(1).optional().describe("If no entityId is given, the nearest animal of this type, e.g. 'cow'"),

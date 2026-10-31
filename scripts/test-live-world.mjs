@@ -711,9 +711,12 @@ try {
       expect(await cowNear(cx + 6, cz + 6), 'the cow is not by the lure target');
       await cmd('/give @s lead 1');
       await waitForCount('lead', count => count >= 1, 'a lead');
-      expectIncludes(await finishedTask(await call('lead-animal', { type: 'cow', x: cx - 6, y: y0, z: cz - 6, method: 'leash', timeoutMs: 120000 }), 'leading', 150000),
-        'on a lead', 'lead-animal on a lead');
-      expect(await cowNear(cx - 6, cz - 6), 'the cow is not by the lead target');
+      // A freed cow wanders off while the bot picks the lead up, so the reply gives the distance when the lead came off
+      // (E-056), and that is what is checked, not where the cow is afterwards.
+      const leashed = await finishedTask(await call('lead-animal', { type: 'cow', x: cx - 6, y: y0, z: cz - 6, method: 'leash', timeoutMs: 120000 }), 'leading', 150000);
+      expectIncludes(leashed, 'on a lead', 'lead-animal on a lead');
+      const released = leashed.match(/it was (\d+(?:\.\d+)?) blocks from the target when the lead came off/);
+      expect(released && Number(released[1]) <= 2, `lead-animal on a lead should say the cow was within 2 blocks when the lead came off: ${leashed}`);
       await waitForCount('lead', count => count >= 1, 'the lead back in the inventory');
       await cmd('/clear @s lead');
       expectIncludes(await call('lead-animal', { type: 'cow', x: cx, y: y0, z: cz, method: 'leash' }, { expectError: true }), 'No lead', 'lead-animal with no lead left');

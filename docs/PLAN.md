@@ -1972,3 +1972,14 @@ M19 的 26 步都已在本地提交（最后一个是 af85ff4），没有推送�
   - **脚本的改动**：等待背包到 3 个超时时，错误里附上回复的第一行、16 格内的掉落物与这一步的拾取事件，留给下一次查。没有改场地布置，因为探测中掉落物都能捡到。
 - **文档**：BLUEPRINT 目录树加入 tests/_no-network.ts（审查指出缺了）。
 - **检查**：`node --check scripts/test-live-world.mjs` 通过；`npm run lint`、`tsc --noEmit` 无输出；（2）（3）的实机结果见 E-056 之后的实机记录。
+
+### 2026-11-01 M19 附加 E-056：lead-animal 用拴绳时报告解开拴绳那一刻的距离
+
+- **实现**：
+  - `src/autopilot/behaviors/lead.ts`：releaseLead 多一个参数 measure，在 activateEntity 解开拴绳之后、捡回拴绳之前调用一次，并返回这个距离。拴绳方式到达时，结果写 “Led <动物> to (x, y, z) on a lead in Ns; it was D blocks from the target when the lead came off”；诱导方式照旧写 “it is D blocks from the target”。
+  - `src/tools/gathering-tools.ts`：lead-animal 的描述在 “the lead is taken off and picked up at the end” 后加 “and a freed animal wanders off, so lead it into a pen and close the gate behind it”。
+  - `scripts/test-live-world.mjs` 的 lead-animal 一步：拴绳那一次从回复中取 D，要求不超过 range（默认 2），不再要求牛之后还在目标旁；诱导那一次照旧。
+- **测试**：tests/m18-tools.test.ts 新增 1 个用例：解开拴绳后，假世界在捡拾期间把牛移开 6 格，结果仍写解开时的距离（不超过 2），而牛此时已在 5 格之外。原有的拴绳与诱导用例不改，照常通过。
+- **检查**：变异检查：改回在捡回拴绳后量距离，这个用例失败，回复为 “… on a lead in 4s; it is 6.7 blocks from the target”，正是原来的问题；恢复后通过。
+- **文档**：BLUEPRINT F-045 的输出一行分写两种结果（审查指出只写了一种）；README 的单元测试数改为 1596。
+- **其余检查**：`OPENROUTER_API_KEY=<伪造的值> npm test` 1596 个通过；`npm run lint`、`tsc --noEmit`、`git diff --check` 无输出；`node --check scripts/test-live-world.mjs` 通过。实机见下一条记录。

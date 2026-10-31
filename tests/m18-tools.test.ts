@@ -264,6 +264,37 @@ test.serial('leash: puts the lead on, walks there, takes it off at the end', asy
   t.true(reports.includes('cow (id 2) is on the lead'));
 });
 
+test.serial('E-056: on a lead the result gives the distance when the lead came off, not where the cow wandered during the pickup', async (t) => {
+  const clock = useClock(t);
+  const world = leadBot([{ name: 'lead', count: 1 }]);
+  let onLead = false;
+  world.bot.activateEntity.callsFake(async () => {
+    const lead = world.items.find(item => item.name === 'lead')!;
+    if (!onLead && world.bot.heldItem?.name === 'lead') {
+      onLead = true;
+      lead.count--;
+    } else if (onLead) {
+      onLead = false;
+      // Freed, the cow walks off while the bot picks the lead up (field test, 2026-11-01).
+      setTimeout(() => { world.animal.position = world.animal.position.offset(0, 0, 6); }, 100);
+    }
+  });
+  walking(world.bot, () => {
+    if (!onLead) return;
+    const away = world.animal.position.minus(world.bot.entity.position);
+    world.animal.position = world.bot.entity.position.plus(away.scaled(2 / (away.norm() || 1)));
+  });
+
+  const { settled } = await runLead(t, clock, world);
+
+  t.true(settled.ok, settled.ok ? '' : settled.error.message);
+  const text = (settled as { value: string }).value;
+  const match = text.match(/^Led cow \(id 2\) to \(20, 64, 0\) on a lead in \d+s; it was (\d+\.\d) blocks from the target when the lead came off$/);
+  t.truthy(match, text);
+  t.true(Number(match?.[1]) <= 2, 'within range when the lead came off');
+  t.true(world.animal.position.distanceTo(new Vec3(20, 64, 0)) > 5, 'the cow walked off afterwards');
+});
+
 test.serial('leash: a lead that does not hold falls back to the lure with auto, and fails with leash', async (t) => {
   const clock = useClock(t);
   const auto = leadBot([{ name: 'lead', count: 1 }, { name: 'wheat', count: 2 }]);

@@ -144,9 +144,13 @@ export const leadBehavior: BehaviorDefinition<LeadParams, Prepared> = {
     };
     const toTarget = (entity: BotEntity) => entity.position.distanceTo(target);
     const toBot = (entity: BotEntity) => entity.position.distanceTo(bot.entity.position);
-    const done = (entity: BotEntity) => {
+    // `released`: the distance when the lead came off (E-056); by lure, where the animal is now.
+    const done = (entity: BotEntity, released?: number) => {
       const how = method === 'leash' ? 'on a lead' : `by lure (${prepared.lure})`;
-      return `Led ${label} to (${Math.floor(target.x)}, ${Math.floor(target.y)}, ${Math.floor(target.z)}) ${how} in ${Math.round((Date.now() - started) / 1000)}s; it is ${toTarget(entity).toFixed(1)} blocks from the target`;
+      const where = released === undefined
+        ? `it is ${toTarget(entity).toFixed(1)} blocks from the target`
+        : `it was ${released.toFixed(1)} blocks from the target when the lead came off`;
+      return `Led ${label} to (${Math.floor(target.x)}, ${Math.floor(target.y)}, ${Math.floor(target.z)}) ${how} in ${Math.round((Date.now() - started) / 1000)}s; ${where}`;
     };
     const timeUp = async () => `time limit reached; ${label} is ${toTarget(await live()).toFixed(1)} blocks from the target`;
 
@@ -185,8 +189,11 @@ export const leadBehavior: BehaviorDefinition<LeadParams, Prepared> = {
         const remaining = toTarget(entity);
         if (remaining <= params.range) {
           if (leashed) {
-            await releaseLead(ctx, entity, deadline);
+            // A freed animal wanders off at once, so the distance is taken when the lead comes off, not after it has
+            // been picked up (2.4 to 3.4 s later in the field test, by then up to 3.4 blocks): E-056.
+            const released = await releaseLead(ctx, entity, deadline, () => toTarget(entity));
             leashed = false;
+            return done(entity, released);
           }
           return done(entity);
         }
@@ -321,12 +328,17 @@ async function attachLead(ctx: StepContext, animal: BotEntity, deadline: number,
 const PICKUP_DELAY_MS = 700;
 const PICKUP_TRIES = 3;
 
-/** Takes the lead off (it drops) and picks it up again, trying a few times while the count is not back. */
-async function releaseLead(ctx: StepContext, animal: BotEntity, deadline: number): Promise<void> {
+/**
+ * Takes the lead off (it drops) and picks it up again, trying a few times while the count is not back. Returns what
+ * `measure` gave once the lead was off, before the pickup (E-056).
+ */
+async function releaseLead(ctx: StepContext, animal: BotEntity, deadline: number, measure: () => number): Promise<number> {
   const before = itemCount(ctx.bot, LEAD_ITEM);
   await ctx.bot.activateEntity(animal);
+  const released = measure();
   for (let attempt = 0; attempt < PICKUP_TRIES && itemCount(ctx.bot, LEAD_ITEM) <= before; attempt++) {
     await delay(PICKUP_DELAY_MS, ctx.signal);
     await collectNearbyDrops(ctx, animal.position, deadline);
   }
+  return released;
 }
