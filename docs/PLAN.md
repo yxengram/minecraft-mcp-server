@@ -1891,3 +1891,14 @@ M19 的 26 步都已在本地提交（最后一个是 af85ff4），没有推送�
     - `--no-decision-model --check` 以 2 退出，“Invalid --decision-model: empty”；
     - `--check --check` 以 2 退出。
   - `npm run test:smoke` 17 项 PASS。
+
+### 2026-11-01 M19 附加 E-053：place-block 选参照面时，cave_air 与 void_air 也算空
+
+- **实现**：`src/tools/block-tools.ts` 选参照面的条件由 `referenceBlock.name !== 'air'` 改为 `!isAir(referenceBlock)`（block-utils 的 isAir，目标格的判断早已用它），三种空气都跳过。没有可依靠的面时，照 E-031 立即返回 “Could not place a block at (x, y, z): no suitable reference block found”，不走过去。
+- **测试**：tests/m19-tool-experience.test.ts 新增 3 个用例。
+  - 目标格四周只有 cave_air，或只有 void_air：立即返回上面的错误；没有调用 placeBlock、寻路或 lookAt。
+  - 下方为 cave_air、北面为石头：用北面放置，placeBlock 只调用一次，参照方块为 stone。
+- **检查**：
+  - 变异检查：恢复旧条件后 3 个用例都失败（旧代码会对着 cave_air 调用 placeBlock）；恢复新条件后通过。
+  - 全套测试：上一条记录中工作区的 1591 个通过已包含这 3 个用例；只算到 E-053 为 1590 个。README 的单元测试数改为 1590。
+  - 实机：全量实机测试的 place-block 各步放在 E-056 之后一起跑，见那里的记录。

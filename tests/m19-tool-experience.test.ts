@@ -915,6 +915,34 @@ test.serial('E-031: place-block with nothing to place against is an error that d
   t.false(bot.pathfinder.goto.called);
 });
 
+for (const air of ['cave_air', 'void_air']) {
+  test.serial(`E-053: place-block with only ${air} around the cell replies at once that there is nothing to place against`, async (t) => {
+    useClock(t);
+    const around = ['3,63,0', '3,65,0', '2,64,0', '4,64,0', '3,64,-1', '3,64,1'];
+    const bot = fakeBot(Object.fromEntries(around.map(cell => [cell, air])));
+    const s = await serve(t, bot);
+
+    const reply = await s.call('place-block', { x: 3, y: 64, z: 0 });
+    t.true(reply.isError);
+    t.is(reply.text, 'Failed: Could not place a block at (3, 64, 0): no suitable reference block found');
+    t.false(bot.placeBlock.called, `nothing placed against ${air}`);
+    t.false(bot.pathfinder.goto.called, 'no walk');
+    t.false(bot.lookAt.called);
+  });
+}
+
+test.serial('E-053: place-block passes over cave_air below the cell and places against the solid block beside it', async (t) => {
+  useClock(t);
+  const bot = fakeBot({ '3,63,0': 'cave_air', '3,64,-1': 'stone' });
+  const s = await serve(t, bot);
+
+  const reply = await s.call('place-block', { x: 3, y: 64, z: 0 });
+  t.false(reply.isError, reply.text);
+  t.is(reply.text, 'Placed block at (3, 64, 0) using north face');
+  t.true(bot.placeBlock.calledOnce);
+  t.is(bot.placeBlock.firstCall.args[0].name, 'stone');
+});
+
 test.serial('E-031: dig-block on a block that is not loaded is an error; on air, cave_air included, it is still a success', async (t) => {
   useClock(t);
   const bot = fakeBot({ '4,64,0': 'cave_air' });

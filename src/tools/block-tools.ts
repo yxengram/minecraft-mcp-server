@@ -78,7 +78,8 @@ export function registerBlockTools(factory: ToolFactory, getBot: () => mineflaye
         const referencePos = placePos.plus(face.vector);
         const referenceBlock = bot.blockAt(referencePos);
 
-        if (referenceBlock && referenceBlock.name !== 'air') {
+        // Cave air and void air are no more to place against than air (E-053).
+        if (referenceBlock && !isAir(referenceBlock)) {
           try {
             // A spot within reach that can see a face to click, never inside the target (E-013).
             await approachToPlace(bot, placePos, referenceBlock, ctx.signal);
