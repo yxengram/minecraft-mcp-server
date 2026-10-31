@@ -1902,3 +1902,14 @@ M19 的 26 步都已在本地提交（最后一个是 af85ff4），没有推送�
   - 变异检查：恢复旧条件后 3 个用例都失败（旧代码会对着 cave_air 调用 placeBlock）；恢复新条件后通过。
   - 全套测试：上一条记录中工作区的 1591 个通过已包含这 3 个用例；只算到 E-053 为 1590 个。README 的单元测试数改为 1590。
   - 实机：全量实机测试的 place-block 各步放在 E-056 之后一起跑，见那里的记录。
+
+### 2026-11-01 M19 附加 E-054：--greeting 的上限由 256 改为 100 字符
+
+- **实现**：`src/config.ts` 的 MAX_GREETING_LENGTH 由 256 改为 100，注释写明原因：服务器的聊天上限为 256，但 1.8～1.10.2 为 100；100 个字符在所有版本都是一段。
+- **同步修改**：错误文字（“… at most 100 characters”）、--help 的说明、ServerConfig 的注释、README 中英文（选项表与启动时检查的一段）、CHANGELOG 中 --greeting 的一条。
+- **BLUEPRINT**：E-034 行注明已由 E-054 改为 100；H 节 “--greeting 的 256 字符上限 …” 一条按契约删去。
+- **测试**：tests/config.test.ts 中 E-034 原有的 256、257 两处按契约改为 100、101；另新增一个用例，第 101 个字符起是 “/op x” 的问候被拒绝。
+- **检查**：
+  - `npm run build` 后，dist 上 101 个字符的问候以 1 退出，stderr 一行 “… at most 100 characters; run with --help for the options”。
+  - `OPENROUTER_API_KEY=<伪造的值> npm test` 在工作区 1592 个通过，其中含尚未提交的 E-055 的 1 个；只算到 E-054 为 1591 个，README 的单元测试数改为 1591。
+  - `npm run lint`、`tsc --noEmit`、`git diff --check` 无输出。

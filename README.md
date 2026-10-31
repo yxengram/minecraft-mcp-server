@@ -44,7 +44,7 @@ The upstream project is a good, simple bridge: the LLM calls a tool, and the bot
 - **Chat triage:** the decision model sorts chat. Only messages meant for the bot wake the LLM, as `chat_request` events. Nobody can command the bot by chat unless the LLM allows it.
 
 ### 3. Tested in the game, not only on paper
-- 1590 unit tests.
+- 1591 unit tests.
 - A live test that exercises all 67 tools against a real server.
 - A scenario test that compares the bot with and without the Autopilot: zombie waves, being chased by zombies with bare hands, creepers, hunger, fire, drowning, diving on purpose, a lava shore, chat.
 - A 10-day survival test on Normal difficulty. The bot survived all ten nights without dying and built a 7×7 house with a door, eight glass windows, a bed, a chest, a crafting table, a furnace and torches.
@@ -211,7 +211,7 @@ Restart the client completely. The bot joins the world once the client starts th
 | `--waypoint-file` | `~/.minecraft-mcp-server/waypoints.json` | Where waypoints are stored, per world (host and world seed); see [Waypoints](#waypoints) |
 | `--decision-model` | `perplexity/pplx-decider-v1.2-20261016` | The OpenRouter decision model |
 | `--allow-commands` | off | Let `send-chat` run server commands (`/give`, `/fill`, `/tp` and so on); chat and `/msg`, `/tell`, `/w`, `/me`, `/teammsg`, `/tm` always work |
-| `--greeting` | not set: the bot says nothing when it joins | A line the bot says in chat each time it joins the world (not when it respawns): one line of plain chat, at most 256 characters, not starting with `/` |
+| `--greeting` | not set: the bot says nothing when it joins | A line the bot says in chat each time it joins the world (not when it respawns): one line of plain chat, at most 100 characters, not starting with `/` |
 | `--call-limit-seconds` | `50` | How long a command that drives the bot, `collect-block` or `lead-animal` may take before it replies, from 20 to 3600 seconds; see [Time limits](#time-limits). Raise it only for an MCP client that waits longer than 60 seconds for a reply |
 | `--check` | off | Join the world once, check the key, print a report and exit, instead of serving MCP; see [Check the connection](#check-the-connection) |
 | `--help`, `-h` | — | Print the options and exit |
@@ -219,7 +219,7 @@ Restart the client completely. The bot joins the world once the client starts th
 
 The API key is read only from the `OPENROUTER_API_KEY` environment variable; no option takes it. If you build from source, do not put it in any file inside the repository.
 
-The server checks the options when it starts. An unknown option, a `--port` that is not a whole number from 1 to 65535, an empty `--host`, a `--username` that is empty, longer than 16 characters or contains spaces or control characters, a `--greeting` that is empty, longer than 256 characters, contains a line break or control character or starts with `/`, a `--call-limit-seconds` that is not a whole number from 20 to 3600, an option given twice (`--no-x` after `--x` counts too), a dotted option name such as `--host.a`, or `--no-waypoint-file` or `--no-decision-model` makes it write one line to stderr and exit with 1 (2 with `--check`) before it connects. The MCP client then shows the server as failed, and the line is in the client's log for the server (see [Where to look](#where-to-look)). A name that passes but is not 3 to 16 letters, digits or underscores (for example `Bot-1`, `ab` or a name in Chinese) only gets a warning in that log, because some servers refuse such names.
+The server checks the options when it starts. An unknown option, a `--port` that is not a whole number from 1 to 65535, an empty `--host`, a `--username` that is empty, longer than 16 characters or contains spaces or control characters, a `--greeting` that is empty, longer than 100 characters, contains a line break or control character or starts with `/`, a `--call-limit-seconds` that is not a whole number from 20 to 3600, an option given twice (`--no-x` after `--x` counts too), a dotted option name such as `--host.a`, or `--no-waypoint-file` or `--no-decision-model` makes it write one line to stderr and exit with 1 (2 with `--check`) before it connects. The MCP client then shows the server as failed, and the line is in the client's log for the server (see [Where to look](#where-to-look)). A name that passes but is not 3 to 16 letters, digits or underscores (for example `Bot-1`, `ab` or a name in Chinese) only gets a warning in that log, because some servers refuse such names.
 
 ### 4. Play
 Ask the LLM to do things in Minecraft. A few habits make it much better at the game. The server gives them to the MCP client as its instructions when the client connects; some clients do not show those to the LLM, so they are here as well:
@@ -516,7 +516,7 @@ In the client config, `command` is `node` and the first item of `args` is the fu
 ## Testing
 
 ```bash
-npm test             # 1590 unit tests
+npm test             # 1591 unit tests
 npm run lint
 npm run test:live -- <LAN_PORT>                                 # read-only check against a world
 npm run test:live:world -- <LAN_PORT> --allow-world-changes      # every tool, in a throwaway world with cheats on

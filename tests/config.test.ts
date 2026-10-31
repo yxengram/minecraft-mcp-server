@@ -263,10 +263,11 @@ test('E-033: the arguments live-arena passes, --allow-commands included, parse u
 
 // ---------------------------------------------------------------------------------------------------------------
 // E-034: --greeting <text>, unset by default. bot.chat sends a line that starts with / as a command, each line of a
-// message separately, and a line of more than 256 characters in pieces, so only one line of plain chat passes.
+// message separately, and a line longer than the server's chat limit in pieces (100 characters on 1.8 to 1.10.2
+// servers, E-054), so only one line of plain chat of at most 100 characters passes.
 // ---------------------------------------------------------------------------------------------------------------
 
-const GREETING_ERROR = 'Invalid --greeting: expected one line of plain chat (not a command), at most 256 characters';
+const GREETING_ERROR = 'Invalid --greeting: expected one line of plain chat (not a command), at most 100 characters';
 
 test('E-034: greeting is undefined by default', (t) => {
   t.is(parseConfig([]).greeting, undefined);
@@ -276,14 +277,19 @@ test('E-034: --greeting "hello all" parses as given', (t) => {
   t.is(parseConfig(['--greeting', 'hello all']).greeting, 'hello all');
 });
 
-test('E-034: a greeting of 256 characters is accepted', (t) => {
-  t.is(parseConfig(['--greeting', 'a'.repeat(256)]).greeting, 'a'.repeat(256));
+test('E-034, E-054: a greeting of 100 characters is accepted', (t) => {
+  t.is(parseConfig(['--greeting', 'a'.repeat(100)]).greeting, 'a'.repeat(100));
+});
+
+// On a 1.8 to 1.10.2 server bot.chat would send the 101st character on as a second message, here a command.
+test('E-054: a greeting whose 101st character starts a command is refused', (t) => {
+  t.is(configError(t, ['--greeting', `${'a'.repeat(100)}/op x`])?.message, GREETING_ERROR);
 });
 
 for (const [name, greeting] of [
   ['a command ("/op x")', '/op x'],
   ['a command on the second line ("hi\\n/op x")', 'hi\n/op x'],
-  ['257 characters', 'a'.repeat(257)],
+  ['101 characters', 'a'.repeat(101)],
   ['an empty string', '']
 ]) {
   test(`E-034: --greeting with ${name} throws the greeting error`, (t) => {

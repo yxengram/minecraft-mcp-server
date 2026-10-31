@@ -19,7 +19,7 @@ export interface ServerConfig {
   allowCommands: boolean;
   /**
    * What the bot says in chat each time it joins the world (BLUEPRINT E-034); unset, it says nothing. parseConfig lets
-   * through only one line of plain chat of at most 256 characters, so bot.chat sends it as one message, never a command.
+   * through only one line of plain chat of at most 100 characters, so bot.chat sends it as one message, never a command.
    */
   greeting?: string;
   /**
@@ -58,9 +58,10 @@ const BARE_VALUE = 'a value without an option';
 const UNPRINTABLE = /[\p{Cc}\u2028\u2029]/gu;
 
 // bot.chat sends each line of a message separately, and a line that starts with / as a command; it also cuts a line
-// longer than 256 characters (counted as String.length, as the server does) into pieces, and a later piece may start
-// with / too (E-034). Line separators count as line breaks, so the greeting stays one line.
-const MAX_GREETING_LENGTH = 256;
+// longer than the server's chat limit (counted as String.length, as the server does) into pieces, and a later piece
+// may start with / too (E-034). The limit is 256 characters, but 100 on 1.8 to 1.10.2 servers, so at most 100 keeps
+// the greeting one piece on every server (E-054). Line separators count as line breaks, so it stays one line.
+const MAX_GREETING_LENGTH = 100;
 const LINE_BREAK_OR_CONTROL = /[\p{Cc}\u2028\u2029]/u;
 const GREETING_ERROR = `Invalid --greeting: expected one line of plain chat (not a command), at most ${MAX_GREETING_LENGTH} characters`;
 
@@ -205,7 +206,7 @@ export function parseConfig(argv: string[] = hideBin(process.argv)): ServerConfi
     })
     .option('greeting', {
       type: 'string',
-      description: 'Say this in chat each time the bot joins the world (without it: say nothing); one line of plain chat, at most 256 characters, not starting with /'
+      description: 'Say this in chat each time the bot joins the world (without it: say nothing); one line of plain chat, at most 100 characters, not starting with /'
     })
     .option('call-limit-seconds', {
       type: 'number',
