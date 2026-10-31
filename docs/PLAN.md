@@ -1724,7 +1724,7 @@
 
 ### 2026-10-31 M19：全部步骤之后留给所有者的事
 
-M19 的 26 步都已在本地提交（最后一个是 af85ff4），没有推送。下面是各步记录里留下的、代理做不了或需要所有者决定的事，按先后排列。
+M19 的 26 步都已在本地提交（最后一个是 af85ff4），没有推送。下面是各步记录里留下的、代理做不了或需要所有者决定的事，按先后排列。（2026-10-31 所有者已逐条答复，见「M19：全部步骤之后留给所有者的事」的答复。）
 
 - **推送与发布**（要所有者同意或亲手做）：
   - 推送：快进 extra-tools 并 `git push github extra-tools`。推送后 CI 第一次跑 a2e8c50 改过的版本核对与 E-047 的 MCPB 三步。
@@ -1750,3 +1750,25 @@ M19 的 26 步都已在本地提交（最后一个是 af85ff4），没有推送�
 - **推送**（所有者 2026-10-31 选“Push now”）：主检出 extra-tools 由 4957877 快进到 1aaa64c（M19 第 13～26 步与 CI 版本核对的修改，主检出推送前没有未提交的改动），`git push github extra-tools`。release.yml 只在 v* 标签与手动运行时触发，这次没有运行。
 - **CI**：运行 41156200026（CI Build，push）四个作业全部通过（ubuntu Node 22.x、24.x，macOS、Windows Node 22.x）。ubuntu Node 22.x 上第一次运行的步骤都通过：Install the package from its shrinkwrap、Compare the installed versions with the lockfile、Smoke test the package installed from its shrinkwrap、Install the package（空项目）与 Smoke test the installed package、Build the MCPB extension、Smoke test the unpacked extension、Upload the extension。产物 npm-package 307300 字节、mcpb-extension 14611190 字节，保留到 2026-11-14。运行提示 ubuntu-latest 从 2026-10-19 起逐步迁移到 Ubuntu 26（只是提示）。
 - **文件状态**：F-051 的 (d) 与新的版本核对、F-058 的 CI 一步都已在 CI 中通过（BLUEPRINT 已更新）。M19 整体仍等 “全部步骤之后留给所有者的事” 中的检查与 release.yml 的 dry-run。
+
+### 2026-10-31 M19：「全部步骤之后留给所有者的事」的答复
+
+- 用户指示（2026-10-31）：“请把这些事按照顺序一个一个问我。”代理按「M19：全部步骤之后留给所有者的事」的顺序（推送已在此前完成，不再问）用选择对话框提问，每次一个问题，每个选项附有说明；用户逐条选择，15 件都选了推荐的选项。
+- **答复**（选项说明里写明的前提与附带条件一并记下）：
+  1. release.yml 的 dry-run：两个临时分支都跑。release-dryrun-ok 把 CHANGELOG 改名为 “## [3.0.0] - 2026-10-31”，应全部通过；release-dryrun-bad 另把 manifest 版本改为不符，verify 应只在这一项失败。各用 workflow_dispatch 运行一次，只到 `npm publish --dry-run`，不发布、不打标签、不建 Release；看完结果删除两个远程分支。问完所有问题后再做。
+  2. 正式发布 3.0.0：先做下面的检查、改完要改的行为问题，再按 CONTRIBUTING 的 Releasing 发布（由所有者亲手做）。
+  3. E-047 扩展安装：代理用 extra-tools 当前的提交构建 .mcpb，连同逐项核对清单和 manifest 里的文字发给所有者；macOS 与 Windows 用同一个文件，安装与点击由所有者做。
+  4. E-046 的 npx 检查：发布后由所有者在另一台机器（或新账户）上做；发布前代理写好要粘贴的配置片段与核对步骤。选项标签写作 “发布后你来做”，按选项说明理解为所有者做。
+  5. E-044、E-045：和扩展安装一起看。代理把 67 个工具的标题列成表（工具名、标题、只读/安全/破坏性，标出 65 个由实现拟定的），与 .mcpb 一起发给所有者；所有者装好扩展后看客户端显示的标题，问它服务器说明里写了什么，记下客户端与版本。
+  6. E-043 的两项实机检查：所有者两次用同一 Port Number 打开世界、再新建一个开启作弊的原版 26.1.2 世界并 Open to LAN，每次告诉代理；代理只用 `--check` 加入（进入后即离开，不改世界），结果记入 PLAN，按第 ② 项的结果改 README 的 Accounts。
+  7. E-041：和第 6 件的新世界一起做。代理在新世界里用同一个路标文件启动服务器，只调用 list-waypoints（只读），应看不到测试世界的路标；回到测试世界再调一次，原来的路标仍在。
+  8. E-030 对另一版本服务器的实测：跳过。这台 Mac 没有装 Java；版本警告只是一行提示，单元测试已覆盖。记为可选、所有者决定不做。
+  9. lead-animal 在 “Still leading” 回复之后的寻路改动：在 task_done（或失败、取消）的结果后面补报，见 BLUEPRINT E-050。
+  10. 用拴绳牵牛时报告离目标 3.8～4.2 格：先查清再定。代理在测试世界里重现，记下解开拴绳前、捡回拴绳后牛的位置，查明是解开后走开还是没到就判完成，再带着结果和改法来问；只查不改。
+  11. parched：加入 HOSTILE_MOBS，并加与 minecraft-data 的核对测试，见 BLUEPRINT E-051。
+  12. 命令行的剩余写法：全部拒绝（重复的选项、点号写法、对取值选项用 --no-），见 BLUEPRINT E-052。新的错误文字先拟好给所有者看，确认后再实现。
+  13. place-block 选参照面：改为按空气判断（isAir），见 BLUEPRINT E-053。
+  14. --greeting：上限由 256 改为 100 字符，见 BLUEPRINT E-054。
+  15. 测试的三个小问题：都修，产品代码不动，见 BLUEPRINT E-055。
+- **文档改动**（只改 docs/PLAN.md 与 docs/BLUEPRINT.md）：BLUEPRINT F2 节新增 E-050～E-055 六行（M19 附加，契约与验证；E-052 的错误文字是草案）；E-023、E-031、E-038 各行与 H 节的 --greeting 一条加上指向新行的说明。PLAN「M19：全部步骤之后留给所有者的事」开头加上指向本条的说明。
+- **没有实现**：E-050～E-055 只写了契约，没有改代码、测试或 README。按 AGENTS.md，答复不等于实施指令；实施要等所有者的明确指令。第 1、3、5、10 件的选项本身就是要代理去做的事（dry-run、构建并发送 .mcpb、标题表、只查不改的重现），在本条之后做，结果另记。
